@@ -1,0 +1,249 @@
+"""
+本地技能（Skill）加载器：发现 → 解析 → 注入清单 → 按需加载正文。
+
+一个 skill 是什么？
+    一个目录 + 一张 SKILL.md。SKILL.md 顶部是可选的 YAML frontmatter
+    （用 `name` / `description` 声明），正文是给模型的完整操作指引。
+
+    与「工具」不同：工具是模型能*调用*的能力，skill 是模型能*遵循*的工作流。
+    两者互补 —— 一个 skill 往往编排多个工具完成一件有章法的事。
+
+怎么生效（清单 + 按需加载，不解耦上下文就永远塞不下几十个技能）：
+    1. 启动时把所有 skill 的「名字 + 一句话描述」变成一张清单，注入 system prompt；
+    2. 模型判断任务命中某个 skill 时，调用内置的 use_skill 工具，
+       把该 skill 的正文拉进上下文，再照着做。
+
+设计原则（与 PluginLoader 一脉相承）：
+    1. 约定优于配置 —— skills/、skills_user/ 下的子目录只要含 SKILL.md 就被发现。
+    2. 故障隔离 —— 某个 skill 解析失败只记录在报告里，不影响其它 skill。
+    3. 可热重载 —— /skills reload 重新扫描，不用重启。
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+
+from core.registry import Tool, ToolRegistry
+from core.schema import schema_from_callable
+
+DEFAULT_SKILL_DIRS = ("skills", "skills_user")
+
+
+def default_dirs() -> list[str]:
+    """技能目录。可用环境变量 AGENT_SKILL_DIRS 覆盖（逗号或分号分隔，替换默认）。
+
+    设 AGENT_NO_SKILLS=1 可完全关闭技能加载。
+    """
+    if os.environ.get("AGENT_NO_SKILLS") == "1":
+        return []
+    raw = os.environ.get("AGENT_SKILL_DIRS", "").strip()
+    if not raw:
+        return list(DEFAULT_SKILL_DIRS)
+    return [d.strip() for d in raw.replace(";", ",").split(",") if d.strip()]
+
+
+# ------------------------------------------------------------------ frontmatter
+
+def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    """解析 SKILL.md。返回 (meta, body)。
+
+    meta 只支持最简单的 `key: value` 行（避免引入 yaml 依赖），
+    由 `---` 包裹时可写可不写；认不出就整篇当正文。
+    """
+    text = text.lstrip("\ufeff")
+    meta: dict[str, str] = {}
+    body = text.strip()
+
+    if text.startswith("---"):
+        lines = text.splitlines()
+        end = None
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                end = i
+                break
+        if end is not None:
+            for line in lines[1:end]:
+                line = line.strip()
+                if not line or line.startswith("#") or ":" not in line:
+                    continue
+                k, v = line.split(":", 1)
+                meta[k.strip().lower()] = v.strip().strip('"').strip("'")
+            body = "\n".join(lines[end + 1:]).strip()
+
+    return meta, body
+
+
+# ------------------------------------------------------------------ 数据结构
+
+@dataclass
+class Skill:
+    name: str           # 模型与 use_skill 都用它定位（frontmatter 的 name 或目录名）
+    description: str    # 一句话说明，进清单，模型靠它判断何时用
+    dir: str            # 目录绝对路径
+    path: str           # SKILL.md 绝对路径
+    body: str           # frontmatter 之后的正文（use_skill 返回它）
+
+
+@dataclass
+class SkillLoadReport:
+    loaded: list[str] = field(default_factory=list)          # 成功加载的 skill 名
+    failed: dict[str, str] = field(default_factory=dict)     # 名 -> 原因（解析失败 / 冲突）
+
+    @property
+    def count(self) -> int:
+        return len(self.loaded)
+
+    def summary(self) -> str:
+        bits = [f"技能 {self.count} 个"]
+        if self.failed:
+            bits.append(f"失败 {len(self.failed)}")
+        return " | ".join(bits)
+
+
+# ------------------------------------------------------------------ 加载器
+
+class SkillLoader:
+    """管理若干个技能目录，产出可用技能清单与正文。"""
+
+    def __init__(self, project_root: str, dirs: list[str] | None = None) -> None:
+        self.root = os.path.abspath(project_root)
+        self.dirs = list(dirs) if dirs is not None else default_dirs()
+        self._skills: dict[str, Skill] = {}
+
+    # ------------------------------------------------------------ 发现
+
+    def discover(self) -> list[tuple[str, str, str]]:
+        """扫描技能目录，返回 [(目录名, skill名, SKILL.md绝对路径)]。"""
+        found: list[tuple[str, str, str]] = []
+        for d in self.dirs:
+            base = os.path.join(self.root, d)
+            if not os.path.isdir(base):
+                continue
+            for entry in sorted(os.listdir(base)):
+                if entry.startswith(".") or entry.startswith("_"):
+                    continue
+                full = os.path.join(base, entry)
+                if not os.path.isdir(full):
+                    continue
+                skill_md = os.path.join(full, "SKILL.md")
+                if os.path.isfile(skill_md):
+                    found.append((d, entry, skill_md))
+        return found
+
+    # ------------------------------------------------------------ 加载
+
+    def load_all(self) -> SkillLoadReport:
+        report = SkillLoadReport()
+        self._skills = {}
+        for _d, name, path in self.discover():
+            self._load_one(name, path, report)
+        return report
+
+    def reload(self) -> SkillLoadReport:
+        """重新扫描（覆盖式，最简单也最可预测 —— 删掉的 skill 自然消失）。"""
+        return self.load_all()
+
+    def _load_one(self, dir_name: str, path: str, report: SkillLoadReport) -> None:
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except Exception as e:  # noqa: BLE001 —— 坏文件不能带走主程序
+            report.failed[dir_name] = f"{type(e).__name__}: {e}"
+            return
+
+        meta, body = parse_frontmatter(text)
+        name = (meta.get("name") or dir_name).strip()
+        description = (meta.get("description") or "").strip()
+        if not description:
+            # 取正文首行兜底，避免清单里出现空描述
+            for line in body.splitlines():
+                if line.strip() and not line.lstrip().startswith("#"):
+                    description = line.strip().lstrip("#").strip()
+                    break
+
+        if name in self._skills:
+            report.failed[dir_name] = f"技能名冲突：{name}（已被 {self._skills[name].dir} 占用）"
+            return
+
+        self._skills[name] = Skill(
+            name=name,
+            description=description or name,
+            dir=os.path.dirname(path),
+            path=path,
+            body=body,
+        )
+        report.loaded.append(name)
+
+    # ------------------------------------------------------------ 查询
+
+    def all(self) -> list[Skill]:
+        return [self._skills[n] for n in sorted(self._skills)]
+
+    def get(self, name: str) -> Skill | None:
+        return self._skills.get(name)
+
+    def names(self) -> list[str]:
+        return sorted(self._skills)
+
+    def render_index(self) -> str:
+        """生成注入 system prompt 的「可用技能清单」。没有技能时返回空串。"""
+        if not self._skills:
+            return ""
+        lines = [
+            "## 可用技能（Skills）",
+            "",
+            "下面是本项目预设的技能，每一行对应一个可复用的操作指引。",
+            "当任务与某个技能的描述匹配时，先调用 use_skill 工具加载它的完整指引，再照着执行。",
+            "",
+        ]
+        for s in self.all():
+            lines.append(f"- {s.name}：{s.description}")
+        return "\n".join(lines)
+
+
+# ------------------------------------------------------------------ 内置工具
+
+def register_use_skill_tool(registry: ToolRegistry, loader: SkillLoader) -> Tool:
+    """把 use_skill 注册成一个「技能通道」的内置工具。
+
+    它不属于任何插件模块，直接进注册表，group=技能。模型在 system prompt 里
+    看到技能清单后，按需调用它把某个 skill 的正文拉进上下文。
+    """
+
+    def use_skill(name: str) -> str:
+        """加载并返回指定技能的完整操作指引。
+
+        Args:
+            name: 技能名称（见 system prompt 里的「可用技能」清单）
+        """
+        s = loader.get(name)
+        if s is None:
+            available = ", ".join(loader.names()) or "（当前没有任何技能）"
+            return f"[error] 未知技能：{name}。可用技能：{available}"
+        return s.body
+
+    use_skill.__name__ = "use_skill"
+    t = Tool(
+        name="use_skill",
+        description="加载指定技能的完整操作指引。当任务匹配 system prompt 里「可用技能」清单中的某项时，先调用它获取详细步骤，再照着执行。",
+        parameters=schema_from_callable(use_skill),
+        func=use_skill,
+        group="技能",
+        source="core",
+        module="skills",
+        no_clip=True,   # 技能正文是给模型的完整指引，截断会丢步骤 —— 不走默认的 clip
+    )
+    try:
+        registry.add(t)
+    except ValueError as e:
+        # 名字冲突（理论上不会）不该阻断启动
+        registry.skipped[t.name] = str(e)
+    return t
+
+
+def load_skills(project_root: str, dirs: list[str] | None = None) -> SkillLoader:
+    """便捷入口：建加载器并加载全部技能，返回可继续查询/热重载的加载器。"""
+    loader = SkillLoader(project_root, dirs)
+    loader.load_all()
+    return loader

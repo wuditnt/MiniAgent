@@ -1,0 +1,21 @@
+{
+  "_readme": [
+    "MCP server 配置。删掉/禁用某个 server，它的工具就会从注册表里消失。",
+    "command 写 python/python3 时会被自动换成当前解释器，避免多环境错乱。",
+    "dangerous=true 表示这些外部工具在执行前需要用户确认（/approve on 时生效）。",
+    "路径说明：cwd 与 args 里的相对路径，都以【项目根目录】为基准解析，",
+    "不是以本文件所在目录为基准。所以 demo server 写作 mcp/mcp_demo_server.py。",
+    "timeout 是单次协议调用的超时秒数。"
+  ],
+  "servers": {
+    "demo": {
+      "command": "python",
+      "args": ["mcp/mcp_demo_server.py"],
+      "cwd": ".",
+      "enabled": true,
+      "dangerous": false,
+      "group": "MCP:demo",
+      "timeout": 20
+    }
+  }
+}

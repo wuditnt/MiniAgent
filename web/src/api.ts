@@ -1,0 +1,288 @@
+/**
+ * 后端 API 封装：普通 JSON 接口 + POST /api/chat 的 SSE 消费。
+ *
+ * EventSource 只支持 GET，所以用 fetch 读流并手写解析 SSE 帧（约 30 行），
+ * 不引入 XStream —— 这也是方案里约定的降级路径，干脆作为唯一实现。
+ */
+import type {
+  AgentState,
+  GeneralSettings,
+  HistoryMessage,
+  Mode,
+  ModelsInfo,
+  SessionItem,
+  SettingsInfo,
+  SSEEvent,
+  TestResult,
+  WorkspaceItem,
+} from "./types";
+
+/** 从错误响应里尽量提取可读信息（后端错误统一为 {error: "..."}） */
+async function readError(res: Response): Promise<string> {
+  try {
+    const data = await res.json();
+    if (data && typeof data.error === "string") return data.error;
+  } catch {
+    /* 非 JSON 响应体，退回状态码 */
+  }
+  return `HTTP ${res.status}`;
+}
+
+export async function fetchState(): Promise<AgentState> {
+  const res = await fetch("/api/state");
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function fetchHistory(
+  session: string
+): Promise<{ session: string; messages: HistoryMessage[] }> {
+  const res = await fetch(`/api/history?session=${encodeURIComponent(session)}`);
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function postConfirm(
+  id: string,
+  approve: boolean,
+  session: string
+): Promise<void> {
+  const res = await fetch("/api/confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, approve, session }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+export async function postStop(session: string): Promise<void> {
+  const res = await fetch("/api/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+export async function fetchSessions(
+  q: string = "",
+  workspace: string = ""
+): Promise<SessionItem[]> {
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  if (workspace) params.set("workspace", workspace);
+  const qs = params.toString();
+  const res = await fetch(`/api/sessions${qs ? `?${qs}` : ""}`);
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()).sessions;
+}
+
+export async function createSession(
+  workspace: string = ""
+): Promise<{ id: string; title: string; workspace_id: string }> {
+  const res = await fetch("/api/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function deleteSession(sid: string): Promise<void> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+/** 修改会话标题（改过之后后端不再按首条消息自动生成） */
+export async function updateSession(sid: string, title: string): Promise<{ id: string; title: string }> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+// ---------------------------------------------------------------- 工作区
+
+/** 弹出本机原生「选择文件夹」对话框（后端 tkinter 实现）；取消返回 null */
+export async function pickFolder(): Promise<string | null> {
+  const res = await fetch("/api/workspaces/pick", { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()).path ?? null;
+}
+
+export async function fetchWorkspaces(): Promise<WorkspaceItem[]> {
+  const res = await fetch("/api/workspaces");
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()).workspaces;
+}
+
+export async function createWorkspace(
+  name: string,
+  path: string
+): Promise<WorkspaceItem> {
+  const res = await fetch("/api/workspaces", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, path }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function updateWorkspace(
+  wid: string,
+  patch: { name?: string; path?: string }
+): Promise<WorkspaceItem> {
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(wid)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function deleteWorkspace(wid: string): Promise<void> {
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(wid)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+// ---------------------------------------------------------------- 模型配置
+
+export async function fetchModels(): Promise<ModelsInfo> {
+  const res = await fetch("/api/models");
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function createModel(payload: {
+  provider: string;
+  name: string;
+  base_url: string;
+  api_key: string;
+  model: string;
+}): Promise<{ id: string }> {
+  const res = await fetch("/api/models", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function updateModel(
+  id: string,
+  patch: { name?: string; base_url?: string; api_key?: string; model?: string }
+): Promise<void> {
+  const res = await fetch(`/api/models/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+export async function deleteModel(id: string): Promise<void> {
+  const res = await fetch(`/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+export async function testModel(id: string): Promise<TestResult> {
+  const res = await fetch(`/api/models/${encodeURIComponent(id)}/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function testModelRaw(base_url: string, api_key: string): Promise<TestResult> {
+  const res = await fetch("/api/models/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ base_url, api_key }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function activateModel(id: string): Promise<void> {
+  const res = await fetch(`/api/models/${encodeURIComponent(id)}/activate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+// ---------------------------------------------------------------- 通用配置
+
+export async function fetchSettings(): Promise<SettingsInfo> {
+  const res = await fetch("/api/settings");
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/** 更新通用配置；传 {reset: true} 表示恢复默认，其余字段做局部覆盖 */
+export async function updateSettings(
+  patch: Partial<GeneralSettings> | { reset: true }
+): Promise<SettingsInfo> {
+  const res = await fetch("/api/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/**
+ * 发送一条消息并消费 SSE 事件流。
+ *
+ * 帧格式：`data: {...}\n\n`；`: ping` 心跳注释帧直接忽略；
+ * 终态事件为 done / error / cancelled，之后服务端关闭连接，本函数随之返回。
+ */
+export async function chatStream(
+  opts: { message: string; mode: Mode; web: boolean; session: string; workspace?: string },
+  onEvent: (ev: SSEEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(opts),
+    signal,
+  });
+  if (!res.ok || !res.body) throw new Error(await readError(res));
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx: number;
+    // SSE 帧以空行分隔
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      for (const line of frame.split("\n")) {
+        if (!line.startsWith("data:")) continue; // 心跳注释帧在这里被忽略
+        const payload = line.slice(5).trim();
+        if (!payload) continue;
+        try {
+          onEvent(JSON.parse(payload) as SSEEvent);
+        } catch {
+          // 单帧解析失败不致命：跳过，继续处理后续帧
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mini-agent"
+version = "1.0.0"
+description = "一个可扩展的本地智能体控制台：插件目录 + MCP 双通道扩展工具"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+
+dependencies = [
+    # 必装：模型接入
+    "openai>=1.30.0",
+]
+
+[project.optional-dependencies]
+# 控制台体验。装了就自动启用彩色表格与输入补全；不装也能跑（退回纯文本）。
+console = [
+    "rich>=13.0",
+    "prompt_toolkit>=3.0",
+]
+
+[project.scripts]
+mini-agent = "core.main:main"
+
+# ---------------------------------------------------------------------------
+# 为什么是 src 布局 + 显式 package-dir？
+#
+#   src/core/    唯一的包：应用层（main/agent/repl/ui/loader/skills/tools）
+#                与核心库（registry/sandbox/cancel/mcp/schema/images）平铺其中。
+#
+# 插件作者写的是 `from core import tool`、`import tools` 这类写法，
+# 其中 `import tools` 这种裸模块名不在包命名空间里，
+# 靠 core/__init__.py 里的 sys.path 铺设才能找到。
+# 所以**必须**声明 package-dir 让 setuptools 认识 src 布局，
+# 否则 editable 安装后 src/ 不在 path 上，这些写法都会失效。
+# ---------------------------------------------------------------------------
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["core*"]
