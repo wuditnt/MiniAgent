@@ -15,6 +15,7 @@ from core import (
     hexdump,
     looks_binary,
     read_bytes,
+    read_path,
     safe_path,
     tool,
     workspace,
@@ -35,7 +36,7 @@ PLUGIN_INFO = {"name": "文件系统", "version": "1.0", "author": "mini-agent"}
     required=["path"],
 )
 def read_file(path: str, offset: int = 1, limit: int = 300) -> str:
-    ap = safe_path(path)
+    ap = read_path(path)
     if not os.path.isfile(ap):
         return f"[error] 文件不存在：{ap}"
 
@@ -80,7 +81,7 @@ def write_file(path: str, content: str) -> str:
     params={"path": {"type": "string", "description": "目录路径", "default": "."}},
 )
 def list_dir(path: str = ".") -> str:
-    ap = safe_path(path)
+    ap = read_path(path)
     if not os.path.isdir(ap):
         return f"[error] 目录不存在：{ap}"
     rows = []
@@ -104,13 +105,25 @@ def list_dir(path: str = ".") -> str:
 )
 def glob_files(pattern: str, path: str = ".") -> str:
     import glob as _glob
-    ap = safe_path(path)
-    hits = [h for h in _glob.glob(os.path.join(ap, pattern), recursive=True) if os.path.isfile(h)]
+    ap = read_path(path)
+    hits = []
+    for h in _glob.glob(os.path.join(ap, pattern), recursive=True):
+        if not os.path.isfile(h):
+            continue
+        # 再校验一次：pattern 里的 .. 或符号链接都不能把结果带出允许范围
+        try:
+            read_path(os.path.realpath(h))
+        except Exception:
+            continue
+        hits.append(h)
     if not hits:
         return f"[ok] 无匹配：{pattern}"
     root = workspace()
-    listing = "\n".join("  " + os.path.relpath(h, root) for h in hits[:200])
-    return f"[ok] {len(hits)} 个匹配\n{listing}"
+    labels = []
+    for h in hits[:200]:
+        rel = os.path.relpath(h, root)
+        labels.append("  " + (rel if not rel.startswith("..") else os.path.abspath(h)))
+    return f"[ok] {len(hits)} 个匹配\n" + "\n".join(labels)
 
 
 @tool(
@@ -127,7 +140,7 @@ def grep(pattern: str, path: str = ".", glob: str = "*") -> str:
     import glob as _glob
     import re
 
-    ap = safe_path(path)
+    ap = read_path(path)
     try:
         rx = re.compile(pattern)
     except re.error as e:
@@ -139,6 +152,11 @@ def grep(pattern: str, path: str = ".", glob: str = "*") -> str:
     for fp in _glob.glob(os.path.join(ap, "**", glob), recursive=True):
         if not os.path.isfile(fp):
             continue
+        # 防 pattern 内 .. / 符号链接把读取带出允许范围
+        try:
+            read_path(os.path.realpath(fp))
+        except Exception:
+            continue
         try:
             data = read_bytes(fp, 2 * 1024 * 1024)
         except OSError:
@@ -147,9 +165,12 @@ def grep(pattern: str, path: str = ".", glob: str = "*") -> str:
             continue
         scanned += 1
         text, _ = decode_bytes(data)
+        label = os.path.relpath(fp, root)
+        if label.startswith(".."):
+            label = os.path.abspath(fp)   # 沙箱外文件显示绝对路径
         for i, line in enumerate(text.splitlines(), 1):
             if rx.search(line):
-                out.append(f"{os.path.relpath(fp, root)}:{i}:{line.strip()[:200]}")
+                out.append(f"{label}:{i}:{line.strip()[:200]}")
                 if len(out) >= 200:
                     break
         if len(out) >= 200:

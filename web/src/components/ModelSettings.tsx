@@ -14,6 +14,7 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import {
+  Alert,
   AutoComplete,
   Button,
   Empty,
@@ -40,11 +41,13 @@ import type { ModelProvider, ModelsInfo, TestResult } from "../types";
 interface Props {
   /** 配置变更后通知外层重新拉 /api/state（顶栏模型名要跟着变） */
   onChanged: () => void;
+  /** 远程访问：列表只读，禁止新增/编辑/删除/切换/测试（后端同样 403 拦截） */
+  remote?: boolean;
 }
 
 const DEFAULT_PROVIDER = "deepseek";
 
-export default function ModelSettingsPanel({ onChanged }: Props) {
+export default function ModelSettingsPanel({ onChanged, remote = false }: Props) {
   const [info, setInfo] = useState<ModelsInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [tests, setTests] = useState<Record<string, TestResult | "loading">>({});
@@ -240,6 +243,14 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
   return (
     <>
       <div className="ms-panel">
+        {remote && (
+          <Alert
+            type="info"
+            showIcon
+            message="远程访问模式：模型配置仅供查看，修改请在主机本机进行"
+            style={{ marginBottom: 12 }}
+          />
+        )}
         <Spin spinning={loading}>
           {providers.length === 0 ? (
             <Empty description="暂无模型配置" image={Empty.PRESENTED_IMAGE_SIMPLE} />
@@ -268,6 +279,7 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
                     <Button
                       size="small"
                       icon={<ApiOutlined />}
+                      disabled={remote}
                       onClick={() => doTest(p.id)}
                       loading={tests[p.id] === "loading"}
                     >
@@ -278,13 +290,14 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
                         size="small"
                         type="primary"
                         icon={<ThunderboltOutlined />}
+                        disabled={remote}
                         onClick={() => doActivate(p.id)}
                       >
                         设为当前
                       </Button>
                     )}
                     <Space size={4}>
-                      <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(p)}>
+                      <Button size="small" icon={<EditOutlined />} disabled={remote} onClick={() => openEdit(p)}>
                         编辑
                       </Button>
                       <Popconfirm
@@ -293,7 +306,7 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
                         cancelText="取消"
                         onConfirm={() => doDelete(p.id)}
                       >
-                        <Button size="small" danger icon={<DeleteOutlined />} />
+                        <Button size="small" danger icon={<DeleteOutlined />} disabled={remote} />
                       </Popconfirm>
                     </Space>
                   </Space>
@@ -301,7 +314,7 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
               ))}
             </div>
           )}
-          <Button block icon={<PlusOutlined />} onClick={openNew} style={{ marginTop: 12 }}>
+          <Button block icon={<PlusOutlined />} disabled={remote} onClick={openNew} style={{ marginTop: 12 }}>
             添加模型配置
           </Button>
         </Spin>

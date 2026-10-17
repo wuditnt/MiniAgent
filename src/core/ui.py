@@ -289,7 +289,19 @@ class RichUI(PlainUI):
                 return False
         return ans.strip().lower() in ("y", "yes")
 
-    # ---------------------------------------------------------- 辅助
+    def ask_approval(self, reason: str) -> bool:
+        """auto 档模型主动申请授权（request_approval）的终端询问。"""
+        if not self.console:
+            return False
+        with self._lock:
+            self.console.print(
+                f"\n[bold cyan]🛡 模型请求授权[/bold cyan]\n{self._escape(reason)}"
+            )
+            try:
+                ans = self.console.input("[cyan]批准这次操作？[y/N] [/cyan]")
+            except (EOFError, KeyboardInterrupt):
+                return False
+        return ans.strip().lower() in ("y", "yes")
 
     @staticmethod
     def _escape(text: str) -> str:

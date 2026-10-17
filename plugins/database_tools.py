@@ -13,7 +13,7 @@ import csv
 import os
 import sqlite3
 
-from core import decode_bytes, read_bytes, safe_path, tool
+from core import SandboxError, decode_bytes, read_bytes, read_path, safe_path, tool
 
 PLUGIN_INFO = {"name": "数据库", "version": "1.0", "author": "mini-agent"}
 
@@ -34,9 +34,13 @@ def _format_table(cursor: sqlite3.Cursor, rows: list, limit: int) -> str:
     return "\n".join([header, sep] + body) + tail
 
 
+_READONLY_SQL_PREFIXES = ("select", "with", "pragma", "explain")
+
+
 @tool(
     "sqlite_query",
-    "对 SQLite 数据库文件执行 SQL（SELECT/INSERT/UPDATE/DELETE/CREATE 等）。SELECT 以表格返回。",
+    "对 SQLite 数据库文件执行 SQL。工作区内库可读写（INSERT/UPDATE/DDL 等）；"
+    "沙箱外库只能以只读方式打开，仅允许 SELECT/WITH/PRAGMA/EXPLAIN。SELECT 以表格返回。",
     params={
         "db": {"type": "string", "description": "SQLite 数据库文件路径（.sqlite/.db）"},
         "sql": {"type": "string", "description": "要执行的 SQL 语句"},
@@ -46,15 +50,29 @@ def _format_table(cursor: sqlite3.Cursor, rows: list, limit: int) -> str:
     dangerous=True,
 )
 def sqlite_query(db: str, sql: str, limit: int = 50) -> str:
-    ap = safe_path(db)
+    # 工作区内 → 可写；沙箱外 → 走读取策略，且强制只读
+    try:
+        ap = safe_path(db)
+        readonly = False
+    except SandboxError:
+        ap = read_path(db)
+        readonly = True
     if not os.path.isfile(ap):
         return f"[error] 数据库文件不存在：{ap}"
+    is_query = sql.strip().lower().startswith(_READONLY_SQL_PREFIXES)
+    if readonly and not is_query:
+        return "[blocked] 沙箱外数据库为只读连接，仅允许 SELECT/WITH/PRAGMA/EXPLAIN 查询"
     try:
-        conn = sqlite3.connect(ap)
+        if readonly:
+            from urllib.request import pathname2url
+
+            conn = sqlite3.connect("file:" + pathname2url(ap) + "?mode=ro", uri=True)
+        else:
+            conn = sqlite3.connect(ap)
         cur = conn.cursor()
         cur.execute(sql)
         rows = cur.fetchall()
-        if sql.strip().lower().startswith(("select", "with", "pragma", "explain")):
+        if is_query:
             out = _format_table(cur, rows, limit)
         else:
             conn.commit()
@@ -77,7 +95,7 @@ def sqlite_query(db: str, sql: str, limit: int = 50) -> str:
     required=["csv_path", "sql"],
 )
 def csv_sql(csv_path: str, sql: str, table: str = "csv", limit: int = 50) -> str:
-    ap = safe_path(csv_path)
+    ap = read_path(csv_path)
     if not os.path.isfile(ap):
         return f"[error] CSV 文件不存在：{ap}"
 

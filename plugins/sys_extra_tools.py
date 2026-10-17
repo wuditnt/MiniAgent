@@ -13,7 +13,7 @@ import os
 import sys
 import time
 
-from core import check_command, run_process, safe_path, tool
+from core import check_command, read_path, run_process, tool
 
 PLUGIN_INFO = {"name": "系统增强", "version": "1.0", "author": "mini-agent"}
 
@@ -52,7 +52,7 @@ def kill_process(pid: int, force: bool = False) -> str:
     required=["path"],
 )
 def wait_for_file(path: str, timeout: int = 60, interval: float = 0.5) -> str:
-    ap = safe_path(path)
+    ap = read_path(path)
     deadline = time.time() + timeout
     while time.time() < deadline:
         if os.path.exists(ap):

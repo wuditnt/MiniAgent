@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-from core import safe_path, tool
+from core import read_path, tool
 
 PLUGIN_INFO = {
     "name": "文本统计",
@@ -40,7 +40,7 @@ def count_lines(path: str, top: int = 5) -> str:
         统计结果文本
     """
     try:
-        text = open(safe_path(path), encoding="utf-8", errors="replace").read()
+        text = open(read_path(path), encoding="utf-8", errors="replace").read()
     except FileNotFoundError:
         return f"[error] 文件不存在：{path}"
 
@@ -61,7 +61,7 @@ def count_lines(path: str, top: int = 5) -> str:
 )
 def word_freq(path: str, top: int = 10) -> str:
     try:
-        text = open(safe_path(path), encoding="utf-8", errors="replace").read()
+        text = open(read_path(path), encoding="utf-8", errors="replace").read()
     except FileNotFoundError:
         return f"[error] 文件不存在：{path}"
 

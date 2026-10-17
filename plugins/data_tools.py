@@ -24,7 +24,7 @@ from core import (
     decode_bytes,
     looks_binary,
     read_bytes,
-    safe_path,
+    read_path,
     tool,
     workspace,
 )
@@ -47,7 +47,7 @@ MAX_ROWS = 200
     required=["path"],
 )
 def read_csv(path: str, max_rows: int = 50, delimiter: str = "", encoding: str = "") -> str:
-    ap = safe_path(path)
+    ap = read_path(path)
     if not os.path.isfile(ap):
         return f"[error] 文件不存在：{ap}"
     if looks_binary(read_bytes(ap, 4096)):
@@ -106,7 +106,7 @@ def read_csv(path: str, max_rows: int = 50, delimiter: str = "", encoding: str =
     required=["path"],
 )
 def read_json(path: str, max_chars: int = 8000) -> str:
-    ap = safe_path(path)
+    ap = read_path(path)
     if not os.path.isfile(ap):
         return f"[error] 文件不存在：{ap}"
     text, enc = decode_bytes(read_bytes(ap))
@@ -128,7 +128,7 @@ def read_json(path: str, max_chars: int = 8000) -> str:
     required=["path"],
 )
 def read_jsonl(path: str, max_lines: int = 20) -> str:
-    ap = safe_path(path)
+    ap = read_path(path)
     if not os.path.isfile(ap):
         return f"[error] 文件不存在：{ap}"
     text, enc = decode_bytes(read_bytes(ap))
@@ -156,7 +156,7 @@ def read_jsonl(path: str, max_lines: int = 20) -> str:
     required=["path"],
 )
 def file_info(path: str) -> str:
-    ap = safe_path(path)
+    ap = read_path(path)
     if not os.path.isfile(ap):
         return f"[error] 文件不存在：{ap}"
     st = os.stat(ap)
@@ -189,7 +189,7 @@ def file_info(path: str) -> str:
     required=["path"],
 )
 def detect_encoding(path: str, max_bytes: int = 65536) -> str:
-    ap = safe_path(path)
+    ap = read_path(path)
     if not os.path.isfile(ap):
         return f"[error] 文件不存在：{ap}"
     data = read_bytes(ap, max_bytes)

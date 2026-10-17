@@ -6,6 +6,8 @@
  */
 import type {
   AgentState,
+  ApprovalMode,
+  Attachment,
   GeneralSettings,
   HistoryMessage,
   Mode,
@@ -14,6 +16,7 @@ import type {
   SettingsInfo,
   SSEEvent,
   TestResult,
+  ToolInfo,
   WorkspaceItem,
 } from "./types";
 
@@ -64,6 +67,36 @@ export async function postStop(session: string): Promise<void> {
   if (!res.ok) throw new Error(await readError(res));
 }
 
+/** 上传附件（base64）：先落盘到工作区 .attachments/，返回元数据供发送时引用 */
+export async function uploadFile(
+  file: File,
+  workspace: string
+): Promise<Attachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const res = await fetch("/api/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: file.name,
+            data: (reader.result as string).split(",")[1] || "",
+            mime: file.type || "application/octet-stream",
+            workspace,
+          }),
+        });
+        if (!res.ok) throw new Error(await readError(res));
+        resolve(await res.json());
+      } catch (e) {
+        reject(e);
+      }
+    };
+    reader.onerror = () => reject(new Error("读取文件失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
 export async function fetchSessions(
   q: string = "",
   workspace: string = ""
@@ -92,6 +125,17 @@ export async function createSession(
 export async function deleteSession(sid: string): Promise<void> {
   const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await readError(res));
+}
+
+/** 截断会话：保留前 keep 条 user/assistant 消息（不含 system），删除其后的全部内容 */
+export async function truncateSession(sid: string, keep: number): Promise<{ ok: boolean; keep: number }> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/truncate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ keep }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
 }
 
 /** 修改会话标题（改过之后后端不再按首条消息自动生成） */
@@ -229,6 +273,13 @@ export async function fetchSettings(): Promise<SettingsInfo> {
   return res.json();
 }
 
+/** 获取全部工具列表（插件管理界面用） */
+export async function fetchTools(): Promise<{ tools: ToolInfo[]; groups: Record<string, ToolInfo[]>; sources: Record<string, number> }> {
+  const res = await fetch("/api/tools");
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 /** 更新通用配置；传 {reset: true} 表示恢复默认，其余字段做局部覆盖 */
 export async function updateSettings(
   patch: Partial<GeneralSettings> | { reset: true }
@@ -249,7 +300,15 @@ export async function updateSettings(
  * 终态事件为 done / error / cancelled，之后服务端关闭连接，本函数随之返回。
  */
 export async function chatStream(
-  opts: { message: string; mode: Mode; web: boolean; session: string; workspace?: string },
+  opts: {
+    message: string;
+    mode: Mode;
+    web: boolean;
+    session: string;
+    workspace?: string;
+    attachments?: Attachment[];
+    approval?: ApprovalMode;
+  },
   onEvent: (ev: SSEEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {

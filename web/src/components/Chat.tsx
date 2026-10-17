@@ -9,14 +9,28 @@ import {
   CheckOutlined,
   CopyOutlined,
   DatabaseOutlined,
+  DeleteOutlined,
   DownOutlined,
+  EditOutlined,
   FolderOpenOutlined,
+  PaperClipOutlined,
+  PictureOutlined,
+  PlusOutlined,
+  RedoOutlined,
   RobotOutlined,
-  UserOutlined,
+  SafetyCertificateOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 import { Bubble, Sender } from "@ant-design/x";
-import { Collapse, Dropdown, Tag, Tooltip } from "antd";
-import type { ChatItem, Mode, WorkspaceItem } from "../types";
+import { Collapse, Dropdown, message, Tag, Tooltip } from "antd";
+import type {
+  ApprovalMode,
+  Attachment,
+  ChatItem,
+  Mode,
+  WorkspaceItem,
+} from "../types";
+import { uploadFile } from "../api";
 import Markdown from "./Markdown";
 import ToolChain from "./ToolChain";
 import WelcomePane from "./WelcomePane";
@@ -52,21 +66,68 @@ function fallbackCopy(text: string): boolean {
   }
 }
 
+/** 把 Markdown 文本还原为纯文本（去掉语法标记，保留可读内容） */
+function stripMarkdown(md: string): string {
+  return md
+    // 代码块：保留内容，去掉围栏和语言标记
+    .replace(/```[\w]*\n([\s\S]*?)```/g, "$1")
+    // 行内代码
+    .replace(/`([^`]+)`/g, "$1")
+    // 图片和链接：只保留 alt / 文字
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    // 粗体、斜体、删除线
+    .replace(/\*\*([\s\S]*?)\*\*/g, "$1")
+    .replace(/\*([\s\S]*?)\*/g, "$1")
+    .replace(/__([\s\S]*?)__/g, "$1")
+    .replace(/_([\s\S]*?)_/g, "$1")
+    .replace(/~~([\s\S]*?)~~/g, "$1")
+    // 标题
+    .replace(/^#{1,6}\s*/gm, "")
+    // 引用
+    .replace(/^\s*>\s*/gm, "")
+    // 无序 / 有序列表标记
+    .replace(/^[-*+]\s+/gm, "")
+    .replace(/^\d+\.\s+/gm, "")
+    // 分割线
+    .replace(/^\s*[-*_]{3,}\s*$/gm, "")
+    // 数学公式标记（保留公式内容）
+    .replace(/\$\$([\s\S]*?)\$\$/g, "$1")
+    .replace(/\$([^$]+)\$/g, "$1")
+    // 表格：把竖线变空格，去掉对齐分隔行
+    .replace(/^\|(.+)\|\s*$/gm, (_m, inner: string) =>
+      inner.split("|").map((s) => s.trim()).filter(Boolean).join("  ")
+    )
+    .replace(/^\s*\|[\s\-:|]+\|\s*$/gm, "")
+    // 压缩多余空行
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 /**
  * 每轮回答下方的小工具栏：复制文本 / 用量统计 / 耗时。
- * 只有拿到数据的项才显示 —— 从磁盘回放的历史消息没有用量与耗时，不占位。
+ * 只有拿到数据的项才显示 —— 用量与耗时随历史落盘持久化，
+ * 老会话（保存该能力之前产生的）没有这两项，不占位。
  *
  * 复制反馈走命令式 DOM（data-state + CSS），不依赖 React 重渲染：
  * 这类「一次性提示」用 DOM 属性最稳，也不会被父级 memo 影响。
  */
-function MessageToolbar({ item }: { item: ChatItem }) {
+function MessageToolbar({
+  item,
+  onRegenerate,
+  onDelete,
+}: {
+  item: ChatItem;
+  onRegenerate?: (msgId: string) => void;
+  onDelete?: (msgId: string) => void;
+}) {
   const btnRef = useRef<HTMLSpanElement>(null);
   const hasContent = !!item.content.trim();
   const usage = item.usage;
   const showUsage = !!usage && usage.total_tokens > 0;
   const showSec = item.sec != null;
 
-  if (!hasContent && !showUsage && !showSec) return null;
+  if (!hasContent && !showUsage && !showSec && !onRegenerate) return null;
 
   const mark = (ok: boolean) => {
     const el = btnRef.current;
@@ -78,30 +139,57 @@ function MessageToolbar({ item }: { item: ChatItem }) {
     }, 1500);
   };
 
-  const copy = async () => {
+  const copy = async (text: string) => {
     let ok = false;
     try {
       if (navigator.clipboard && window.isSecureContext) {
         // 加超时竞速：某些环境下写剪贴板既不 resolve 也不 reject，会把 await 挂死
         ok = await Promise.race([
-          navigator.clipboard.writeText(item.content).then(() => true),
+          navigator.clipboard.writeText(text).then(() => true),
           new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 400)),
         ]);
       }
     } catch {
       ok = false;     // 没权限 / 没有用户手势 → 走降级
     }
-    if (!ok) ok = fallbackCopy(item.content);
+    if (!ok) ok = fallbackCopy(text);
     mark(ok);
   };
 
   return (
     <div className="msg-toolbar">
       {hasContent && (
-        <Tooltip title="复制回答">
-          <span ref={btnRef} className="msg-tool" onClick={copy}>
+        <Dropdown
+          trigger={["hover"]}
+          placement="topLeft"
+          menu={{
+            items: [
+              { key: "markdown", label: "复制为 Markdown" },
+              { key: "plain", label: "复制为纯文本" },
+            ],
+            onClick: ({ key }) => {
+              if (key === "plain") copy(stripMarkdown(item.content));
+              else copy(item.content);
+            },
+          }}
+        >
+          <span ref={btnRef} className="msg-tool">
             <CopyOutlined className="icon-copy" />
             <CheckOutlined className="icon-check" />
+          </span>
+        </Dropdown>
+      )}
+      {onRegenerate && (
+        <Tooltip title="重新生成">
+          <span className="msg-tool" onClick={() => onRegenerate(item.id)}>
+            <RedoOutlined />
+          </span>
+        </Tooltip>
+      )}
+      {onDelete && (
+        <Tooltip title="删除此条及之后消息">
+          <span className="msg-tool" onClick={() => onDelete(item.id)}>
+            <DeleteOutlined />
           </span>
         </Tooltip>
       )}
@@ -125,7 +213,17 @@ function MessageToolbar({ item }: { item: ChatItem }) {
   );
 }
 
-function AssistantBody({ item }: { item: ChatItem }) {
+function AssistantBody({
+  item,
+  onRegenerate,
+  onDelete,
+  workspaceId,
+}: {
+  item: ChatItem;
+  onRegenerate?: (msgId: string) => void;
+  onDelete?: (msgId: string) => void;
+  workspaceId: string;
+}) {
   return (
     <div className="assistant-body">
       {item.reasoning ? (
@@ -165,7 +263,7 @@ function AssistantBody({ item }: { item: ChatItem }) {
           ]}
         />
       ) : null}
-      {item.content ? <Markdown text={item.content} /> : null}
+      {item.content ? <Markdown text={item.content} workspaceId={workspaceId} /> : null}
       {item.status === "error" ? (
         <div className="status-error">出错了：{item.error || "未知错误"}</div>
       ) : null}
@@ -174,7 +272,7 @@ function AssistantBody({ item }: { item: ChatItem }) {
           已停止{item.reason ? `：${item.reason}` : ""}
         </Tag>
       ) : null}
-      {item.status !== "streaming" ? <MessageToolbar item={item} /> : null}
+      {item.status !== "streaming" ? <MessageToolbar item={item} onRegenerate={onRegenerate} onDelete={onDelete} /> : null}
     </div>
   );
 }
@@ -183,7 +281,11 @@ interface Props {
   items: ChatItem[];
   busy: boolean;
   mode: Mode;
-  onSend: (text: string) => void;
+  onMode: (m: Mode) => void;
+  /** 三档确认模式（ask / auto / full），仅智能体模式下可切 */
+  approval: ApprovalMode;
+  onApproval: (m: ApprovalMode) => void;
+  onSend: (text: string, attachments?: Attachment[]) => void;
   onStop: () => void;
   /** 搜索命中后要定位闪烁的消息 id（形如 h-3）；为 null 表示无定位请求 */
   focusId?: string | null;
@@ -192,6 +294,15 @@ interface Props {
   workspaceId: string;
   onWorkspaceChange: (id: string) => void;
   workspaceLocked: boolean;
+  /** 上下文水位：已用字符数 / 上限 */
+  contextUsage?: number;
+  contextLimit?: number;
+  /** 重新生成（assistant 消息）：截掉该条及之后的内容，重发对应的 user 消息 */
+  onRegenerate?: (msgId: string) => void;
+  /** 编辑重发（user 消息）：截掉该条及之后的内容，把原文填回输入框 */
+  onEditResend?: (msgId: string) => void;
+  /** 删除消息：截掉该条及之后的内容 */
+  onDelete?: (msgId: string) => void;
 }
 
 /**
@@ -252,10 +363,103 @@ function WorkspaceChip({
   );
 }
 
+/** 三档确认模式的元数据：短名（胶囊）/ 全名 + 说明（菜单） */
+const APPROVAL_OPTIONS: { key: ApprovalMode; short: string; name: string; desc: string }[] = [
+  { key: "ask", short: "按需询问", name: "按需询问", desc: "危险操作执行前逐个弹窗确认" },
+  { key: "auto", short: "自主判断", name: "自主判断", desc: "模型按风险准则自行判断，必要时主动申请授权" },
+  { key: "full", short: "完全控制", name: "完全控制", desc: "沙箱内直接执行不再弹窗（MCP 工具仍会确认）" },
+];
+
+/**
+ * 输入框工具栏的确认模式盾牌胶囊：
+ * ask 蓝 / auto 青 / full 琥珀，颜色随风险递增，hover 出菜单切换。
+ */
+function ApprovalChip({
+  value,
+  onChange,
+}: {
+  value: ApprovalMode;
+  onChange: (m: ApprovalMode) => void;
+}) {
+  const current = APPROVAL_OPTIONS.find((o) => o.key === value) || APPROVAL_OPTIONS[0];
+  return (
+    <Dropdown
+      trigger={["click"]}
+      placement="topLeft"
+      menu={{
+        selectedKeys: [value],
+        items: APPROVAL_OPTIONS.map((o) => ({
+          key: o.key,
+          label: (
+            <div className="approval-menu-item">
+              <div className="approval-menu-name">{o.name}</div>
+              <div className="approval-menu-desc">{o.desc}</div>
+            </div>
+          ),
+        })),
+        onClick: ({ key }) => onChange(key as ApprovalMode),
+      }}
+    >
+      <span className={`tb-approval tb-approval-${value}`}>
+        <SafetyCertificateOutlined />
+        <span>{current.short}</span>
+        <DownOutlined className="tb-mode-caret" />
+      </span>
+    </Dropdown>
+  );
+}
+
+/** 附件大小缩写：1.2K / 3.4M */
+function fmtSize(n: number): string {
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}K`;
+  return `${(n / (1024 * 1024)).toFixed(1)}M`;
+}
+
+/** 用户消息里的附件展示：图片渲染缩略图，其它显示文件 chip */
+function AttachmentPreview({
+  attachments,
+  workspaceId,
+}: {
+  attachments?: Attachment[];
+  workspaceId: string;
+}) {
+  if (!attachments || !attachments.length) return null;
+  return (
+    <div className="msg-atts">
+      {attachments.map((a, i) =>
+        a.mime.startsWith("image/") ? (
+          <a
+            key={i}
+            href={`/api/attachment?path=${encodeURIComponent(a.path)}&workspace=${encodeURIComponent(workspaceId)}`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            <img
+              className="msg-att-img"
+              src={`/api/attachment?path=${encodeURIComponent(a.path)}&workspace=${encodeURIComponent(workspaceId)}`}
+              alt={a.name}
+            />
+          </a>
+        ) : (
+          <span key={i} className="msg-att-chip" title={a.path}>
+            <PaperClipOutlined />
+            <span className="msg-att-name">{a.name}</span>
+            <span className="msg-att-size">{fmtSize(a.size)}</span>
+          </span>
+        )
+      )}
+    </div>
+  );
+}
+
 export default function Chat({
   items,
   busy,
   mode,
+  onMode,
+  approval,
+  onApproval,
   onSend,
   onStop,
   focusId,
@@ -263,10 +467,39 @@ export default function Chat({
   workspaceId,
   onWorkspaceChange,
   workspaceLocked,
+  onRegenerate,
+  onEditResend,
+  onDelete,
+  contextUsage,
+  contextLimit,
 }: Props) {
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevLen = useRef(0);
+  // 已上传、待发送的附件（chips 展示在输入框上方）
+  const [pending, setPending] = useState<Attachment[]>([]);
+  const [uploading, setUploading] = useState(false);
+
+  /** 选中文件后立即上传到工作区 .attachments/，结果暂存 pending 等发送 */
+  const onPickFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    e.target.value = ""; // 允许再次选择同一个文件
+    if (!f) return;
+    setUploading(true);
+    try {
+      const att = await uploadFile(f, workspaceId);
+      setPending((prev) => [...prev, att]);
+      message.success(`已附加「${f.name}」`);
+    } catch (err) {
+      message.error(`上传失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const removePending = (idx: number) => {
+    setPending((prev) => prev.filter((_, i) => i !== idx));
+  };
 
   // 贴近底部时跟随滚动；用户向上翻历史时不打扰；新消息插入时强制回底
   useEffect(() => {
@@ -291,20 +524,15 @@ export default function Chat({
     user: {
       placement: "end",
       variant: "filled",
-      avatar: { icon: <UserOutlined />, style: { background: "#1677ff" } },
     },
     assistant: {
       placement: "start",
-      variant: "outlined",
-      avatar: { icon: <RobotOutlined />, style: { background: "#e6f4ff", color: "#1677ff" } },
+      // 无外框、无背景，文字直接落在白色聊天区上（参考千问）
+      variant: "borderless",
     },
     notice: {
       placement: "start",
       variant: "borderless",
-      avatar: {
-        icon: <RobotOutlined style={{ color: "#c0c0c0" }} />,
-        style: { background: "transparent" },
-      },
     },
   };
 
@@ -322,7 +550,7 @@ export default function Chat({
         loading: waiting,
         content: (
           <div id={`msg-${it.id}`}>
-            <AssistantBody item={it} />
+            <AssistantBody item={it} onRegenerate={busy ? undefined : onRegenerate} onDelete={busy ? undefined : onDelete} workspaceId={workspaceId} />
           </div>
         ),
       };
@@ -333,7 +561,34 @@ export default function Chat({
     return {
       key: it.id,
       role: "user",
-      content: <span id={`msg-${it.id}`}>{it.content}</span>,
+      content: (
+        <span id={`msg-${it.id}`}>
+          {it.content}
+          <AttachmentPreview attachments={it.attachments} workspaceId={workspaceId} />
+          {onEditResend && !busy && (
+            <div className="msg-toolbar" style={{ marginTop: 6 }}>
+              <Tooltip title="编辑重发">
+                <span
+                  className="msg-tool"
+                  onClick={() => {
+                    setInput(it.content);
+                    onEditResend(it.id);
+                  }}
+                >
+                  <EditOutlined />
+                </span>
+              </Tooltip>
+              {onDelete && (
+                <Tooltip title="删除此条及之后消息">
+                  <span className="msg-tool" onClick={() => onDelete(it.id)}>
+                    <DeleteOutlined />
+                  </span>
+                </Tooltip>
+              )}
+            </div>
+          )}
+        </span>
+      ),
     };
   });
 
@@ -357,22 +612,120 @@ export default function Chat({
               locked={workspaceLocked}
               onChange={onWorkspaceChange}
             />
+            {/* 上下文水位 */}
+            {contextLimit != null && contextLimit > 0 && (
+              <Tooltip title={`上下文已用 ${contextUsage?.toLocaleString() ?? 0} / ${contextLimit.toLocaleString()} 字符`}>
+                <span className={`ctx-meter ${(() => {
+                  const pct = (contextUsage ?? 0) / contextLimit;
+                  return pct > 0.8 ? "ctx-danger" : pct > 0.5 ? "ctx-warn" : "";
+                })()}`}>
+                  <span className="ctx-meter-bar" style={{ width: `${Math.min(100, ((contextUsage ?? 0) / contextLimit) * 100)}%` }} />
+                  <span className="ctx-meter-text">{Math.round(((contextUsage ?? 0) / contextLimit) * 100)}%</span>
+                </span>
+              </Tooltip>
+            )}
+            {/* 待发送附件 chips：发送后清空 */}
+            {pending.map((a, i) => (
+              <span key={i} className="pending-att">
+                {a.mime.startsWith("image/") ? <PictureOutlined /> : <PaperClipOutlined />}
+                <span className="pending-att-name">{a.name}</span>
+                <span className="pending-att-x" onClick={() => removePending(i)}>×</span>
+              </span>
+            ))}
+            {uploading && <span className="pending-att uploading">上传中…</span>}
           </div>
           <Sender
             value={input}
             onChange={setInput}
             onSubmit={(v: string) => {
-              onSend(v);
+              onSend(v, pending.length ? pending : undefined);
               setInput("");
+              setPending([]);
             }}
             loading={busy}
             onCancel={onStop}
+            allowSpeech
+            actions={false}
             placeholder={
               mode === "chat"
                 ? "有问题尽管问（chat 模式，打开右上角开关可联网）"
                 : "描述任务，Agent 会调用本地工具完成（agent 模式）"
             }
+            footer={({ components }) => {
+              const { SendButton, LoadingButton, SpeechButton } = components;
+              return (
+                <div className="composer-toolbar">
+                  <div className="composer-toolbar-left">
+                    {/* 「+」上传菜单：图片 / 文件。
+                        菜单项用原生 label htmlFor 直连隐藏 input ——
+                        手机浏览器（iOS/安卓）对 antd 菜单里的 JS input.click()
+                        可能不视为用户手势导致选图面板不弹出，label 是原生激活无此问题 */}
+                    <Dropdown
+                      trigger={["click"]}
+                      placement="topLeft"
+                      menu={{
+                        items: [
+                          {
+                            key: "image",
+                            label: (
+                              <label className="plus-menu-label" htmlFor="att-input-image">
+                                <PictureOutlined /> 上传图片
+                              </label>
+                            ),
+                          },
+                          {
+                            key: "file",
+                            label: (
+                              <label className="plus-menu-label" htmlFor="att-input-file">
+                                <PaperClipOutlined /> 上传文件
+                              </label>
+                            ),
+                          },
+                        ],
+                      }}
+                    >
+                      <span className="tb-icon-btn" title="上传附件">
+                        <PlusOutlined />
+                      </span>
+                    </Dropdown>
+                    {/* 模式选择：快速对话 / 智能体（从顶栏迁移至此） */}
+                    <Dropdown
+                      trigger={["click"]}
+                      placement="topLeft"
+                      menu={{
+                        selectedKeys: [mode],
+                        items: [
+                          { key: "chat", icon: <ThunderboltOutlined />, label: "快速对话" },
+                          { key: "agent", icon: <RobotOutlined />, label: "智能体" },
+                        ],
+                        onClick: ({ key }) => onMode(key as Mode),
+                      }}
+                    >
+                      <span className="tb-mode">
+                        {mode === "chat" ? <ThunderboltOutlined /> : <RobotOutlined />}
+                        <span>{mode === "chat" ? "快速对话" : "智能体"}</span>
+                        <DownOutlined className="tb-mode-caret" />
+                      </span>
+                    </Dropdown>
+                    {/* 确认模式：仅智能体模式有意义（chat 模式无危险本地工具） */}
+                    {mode === "agent" && (
+                      <ApprovalChip value={approval} onChange={onApproval} />
+                    )}
+                  </div>
+                  <div className="composer-toolbar-right">
+                    {/* 语音输入（浏览器 SpeechRecognition，不支持时自动变禁用态） */}
+                    <SpeechButton />
+                    {/* 发送按钮保持默认主色圆形样式，在一排文字图标中最醒目 */}
+                    {busy ? <LoadingButton /> : <SendButton />}
+                  </div>
+                </div>
+              );
+            }}
           />
+          {/* 「+」菜单用的文件选择框：视觉隐藏而非 display:none，
+              保证手机浏览器通过 label 激活时能正常弹出选图面板 */}
+          <input id="att-input-image" className="visually-hidden-file" type="file" accept="image/*" onChange={onPickFile} />
+          <input id="att-input-file" className="visually-hidden-file" type="file" onChange={onPickFile} />
           <div className="hint">Enter 发送 / Shift+Enter 换行 · 本地部署，数据不出本机</div>
         </div>
       </div>

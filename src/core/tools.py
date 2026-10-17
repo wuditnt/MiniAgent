@@ -62,6 +62,11 @@ _safe_path = safe_path
 _LOADER = PluginLoader(PROJECT_ROOT)
 _REPORT = _LOADER.load_all()
 
+# 核心工具：三档确认模式之「自主判断」用的授权申请（幂等，不受插件加载时序影响）
+from core.approval import register as _register_approval  # noqa: E402
+
+_register_approval()
+
 
 def loader() -> PluginLoader:
     """拿到插件加载器（控制台的 /reload、/plugins 用它）。"""

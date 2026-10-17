@@ -208,7 +208,11 @@ def scenario_chat_and_history() -> None:
     assert status == 200
     msgs = hist["messages"]
     assert msgs[0] == {"role": "user", "content": "你好"}
-    assert msgs[-1] == {"role": "assistant", "content": FINAL_TEXT}
+    # assistant 消息内联 usage/sec 脚注（刷新后恢复每轮用量），只比对正文与脚注存在性
+    last = msgs[-1]
+    assert last["role"] == "assistant" and last["content"] == FINAL_TEXT
+    assert last.get("usage", {}).get("total_tokens") == MOCK_USAGE["total_tokens"]
+    assert last.get("sec") is not None
     print(f"  [2] chat 模式事件序列通过（{len(types)} 个事件，无工具）")
     print(f"  [3] /api/history 通过（恢复 {len(msgs)} 条消息）")
 

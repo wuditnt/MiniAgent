@@ -57,6 +57,42 @@ def max_output_chars() -> int:
     return MAX_OUTPUT_CHARS
 
 
+# ---------------------------------------------------------------- 沙箱读取策略
+
+# strict   = 沙箱外一律不可读（默认）
+# whitelist = 沙箱外仅 _READ_WHITELIST 内的路径可读
+# open     = 沙箱外全部只读放开（写仍由 safe_path 硬禁）
+_READ_MODE = "strict"
+_READ_WHITELIST: tuple[str, ...] = ()
+
+
+def set_read_policy(mode: str, whitelist) -> None:
+    """运行时切换沙箱外读取策略（Web UI 保存配置后立即生效）。"""
+    global _READ_MODE, _READ_WHITELIST
+    _READ_MODE = mode if mode in ("strict", "whitelist", "open") else "strict"
+    _READ_WHITELIST = tuple(
+        os.path.normcase(os.path.abspath(os.path.expanduser(str(p))))
+        for p in (whitelist or [])
+        if str(p).strip()
+    )
+
+
+def read_mode() -> str:
+    return _READ_MODE
+
+
+def _within(target: str, root: str) -> bool:
+    """target 是否等于 root 或位于 root 之内（大小写按操作系统规范化）。"""
+    t = os.path.normcase(os.path.abspath(target))
+    r = os.path.normcase(os.path.abspath(root))
+    return t == r or t.startswith(r + os.sep)
+
+
+def _whitelisted(ap: str) -> bool:
+    target = os.path.normcase(os.path.abspath(ap))
+    return any(target == w or target.startswith(w + os.sep) for w in _READ_WHITELIST)
+
+
 # ---------------------------------------------------------------- 路径沙箱
 
 class SandboxError(PermissionError):
@@ -64,16 +100,54 @@ class SandboxError(PermissionError):
 
 
 def safe_path(p: str) -> str:
-    """把相对路径解析到工作区内，并阻止越界访问。
+    """写通道：把相对路径解析到工作区内，并阻止一切越界访问（读/写都拦）。
 
-    这是插件最常用的一个函数：任何要碰文件系统的工具都应该先调用它。
+    这是所有「会修改文件系统」的工具必须走的入口；读类工具请改用 read_path，
+    后者会按沙箱读取策略有条件放开沙箱外只读访问。
     """
     raw = p if os.path.isabs(p) else os.path.join(_WORKSPACE, p)
     ap = os.path.abspath(raw)
-    root = os.path.normcase(_WORKSPACE)
-    target = os.path.normcase(ap)
-    if target != root and not target.startswith(root + os.sep):
+    if not _within(ap, _WORKSPACE):
         raise SandboxError(f"路径越界：{ap} 不在工作区 {_WORKSPACE} 内")
+    return ap
+
+
+def read_path(p: str) -> str:
+    """读通道：相对路径锚定工作区；沙箱外绝对路径按读取策略判定。
+
+      · 工作区内：始终放行；
+      · 工作区外：strict 拦截 / whitelist 仅白名单 / open 全部只读放开。
+    返回解析后的绝对路径；越界时抛 SandboxError。
+    """
+    raw = p if os.path.isabs(p) else os.path.join(_WORKSPACE, p)
+    ap = os.path.abspath(raw)
+    if _within(ap, _WORKSPACE):
+        return ap
+    if _READ_MODE == "open":
+        return ap
+    if _READ_MODE == "whitelist" and _whitelisted(ap):
+        return ap
+    if _READ_MODE == "whitelist":
+        raise SandboxError(
+            f"路径越界：{ap} 不在工作区 {_WORKSPACE} 或只读白名单内"
+        )
+    raise SandboxError(
+        f"路径越界：{ap} 不在工作区 {_WORKSPACE} 内"
+        f"（沙箱外默认只读关闭，可在「通用配置」放开白名单/只读模式）"
+    )
+
+
+def assert_can_write(p: str) -> str:
+    """写护栏的统一判定：写操作（含删除/移动/重命名）的目标必须在工作区内。
+
+    给 run_python 的同进程护栏与命令检测复用 —— 与 safe_path 的区别只是
+    错误信息面向「脚本越权」场景。返回规范化绝对路径。
+    """
+    ap = os.path.abspath(os.path.expanduser(str(p)))
+    if not _within(ap, _WORKSPACE):
+        raise PermissionError(
+            f"沙箱外路径只读，禁止写入/删除：{ap}（工作区 {_WORKSPACE}）"
+        )
     return ap
 
 
@@ -156,6 +230,72 @@ def check_command(command: str) -> str | None:
                 f"该命令命中危险模式 `{pat}`，已被拦截。\n"
                 f"确认要执行请设置环境变量 AGENT_ALLOW_DANGEROUS=1 后重试。"
             )
+    return None
+
+
+# ---------------------------------------------------------------- shell 越界写检测
+
+# 整条语句里「所有路径参数都必须在工作区内」的写动词（含删除/移动）
+_SHELL_WRITE_ALL = ("del", "erase", "rmdir", "rd", "move", "ren", "rename",
+                    "mkdir", "md", "mklink", "rm", "cacls", "icacls", "takeown")
+# 多源一目标：只强制最后一个路径（目标）在工作区内
+_SHELL_WRITE_DST = ("copy", "xcopy", "robocopy", "cp", "mv")
+
+_PATH_TOKEN = re.compile(r'^([A-Za-z]:[\\/]|\\\\)')  # 盘符绝对路径 / UNC
+_REDIRECT = re.compile(r'(?<![\w\d])>{1,2}\s*("?)([^\s&|<>"]+)\1')
+
+
+def _token_escapes(token: str) -> bool:
+    """路径 token 是否写到工作区外。只识别绝对路径与含 .. 的相对路径，
+    普通相对路径（锚定 cwd=工作区）不会越界，不拦。"""
+    t = token.strip().strip('"')
+    if not t:
+        return False
+    if t.startswith("-") or re.match(r"^/[A-Za-z]", t):
+        return False  # -f /F 之类的命令开关
+    if _PATH_TOKEN.match(t):
+        raw = t
+    elif ".." in t:
+        raw = os.path.join(_WORKSPACE, t)  # 相对路径只有含 .. 才可能逃逸
+    else:
+        return False
+    return not _within(os.path.abspath(raw), _WORKSPACE)
+
+
+def check_command_write(command: str) -> str | None:
+    """检测 shell 命令里「写/删/移动到工作区外」的明显写法。
+
+    覆盖：输出重定向（> / >>）与常见写动词（copy/move/del/rd/mkdir/...）。
+    拦不住 powershell -c、程序内部写文件等混淆形式 —— 与 run_python 护栏
+    同属「提高随手绕过成本」，不是强隔离边界。
+    """
+    # 1) 重定向目标（2>&1 这类目标是 &1，会被路径判定自然放过）
+    for m in _REDIRECT.finditer(command):
+        tok = m.group(2)
+        if tok not in ("&1", "&2", "NUL", "/dev/null") and _token_escapes(tok):
+            return f"检测到重定向写入工作区外路径：{tok}（沙箱外只读，请改写到工作区内）"
+
+    # 2) 按 & 拆语句，看句首写动词
+    for stmt in re.split(r"&&|&|\|\|", command):
+        s = stmt.strip()
+        if not s:
+            continue
+        head = re.split(r"[\s=]", s, 1)[0].strip('"').lower()
+        head = os.path.basename(head)  # 兼容 C:\Windows\System32\xcopy.exe 形态
+        head = os.path.splitext(head)[0]
+        if head not in _SHELL_WRITE_ALL and head not in _SHELL_WRITE_DST:
+            continue
+        # 粗分词：去引号，只保留像路径的 token（绝对路径 / 含 ..）
+        tokens = [t.strip('"') for t in re.split(r"\s+", s)[1:] if t.strip()]
+        paths = [t for t in tokens if _PATH_TOKEN.match(t) or ".." in t]
+        if head in _SHELL_WRITE_DST and paths:
+            paths = [paths[-1]]  # copy/xcopy/robocopy：只管目标
+        for tok in paths:
+            if _token_escapes(tok):
+                return (
+                    f"写操作 `{head}` 的路径在工作区外：{tok}"
+                    f"（沙箱外只读，硬规则不可放开）"
+                )
     return None
 
 

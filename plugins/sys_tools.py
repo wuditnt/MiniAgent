@@ -58,9 +58,9 @@ def system_info() -> str:
     params={"path": {"type": "string", "description": "目录路径，留空用工作区", "default": "."}},
 )
 def disk_usage(path: str = ".") -> str:
-    from core import safe_path
+    from core import read_path
 
-    ap = safe_path(path)
+    ap = read_path(path)
     if not os.path.exists(ap):
         return f"[error] 路径不存在：{ap}"
     d = shutil.disk_usage(ap)

@@ -42,6 +42,7 @@ except ImportError:  # pragma: no cover
     OpenAI = None  # type: ignore[assignment]
 
 import tools  # noqa: F401  —— 导入即加载插件；同时保留 agent.tools 的旧用法
+from core import approval
 from core.cancel import CancellationToken, Cancelled, current_token, set_current_token
 from core.images import take_images
 from core.registry import REGISTRY, Tool, ToolRegistry
@@ -141,7 +142,8 @@ class Agent:
         client: Any = None,                 # 注入点：测试时传假客户端
         registry: ToolRegistry | None = None,
         ui: Any = None,                     # 注入点：控制台传 RichUI
-        approve: bool = False,              # 危险工具是否要人工确认
+        approve: bool = False,              # 旧开关：危险工具是否要人工确认（approval_mode 缺省时按它推断）
+        approval_mode: str | None = None,   # 三档确认：ask / auto / full（见 core.approval）
         keep_recent_turns: int | None = None,  # 滑动窗口保留轮数
         stream: bool | None = None,         # None = 读通用配置（默认开）
         parallel_tools: bool | None = None, # None = 读通用配置（默认开）
@@ -160,6 +162,12 @@ class Agent:
         self.registry = registry if registry is not None else REGISTRY
         self.ui = ui if ui is not None else PlainUI(enabled=verbose)
         self.approve = approve
+        # 显式三档优先；否则由旧开关推断：approve=True → ask（逐次询问），
+        # approve=False → full（不确认，控制台/测试的历史行为）
+        self.approval_mode = approval.normalize(
+            approval_mode if approval_mode is not None
+            else (approval.ASK if approve else approval.FULL)
+        )
         self.stream = bool(_pick(stream, "stream", True))
         self.parallel_tools = bool(_pick(parallel_tools, "parallel_tools", True))
         self.max_workers = max(1, int(_pick(max_workers, "max_workers", 4)))
@@ -358,8 +366,11 @@ class Agent:
 
     # ------------------------------------------------------------ 主循环
 
-    def run(self, user_input: str) -> str:
+    def run(self, user_input: str, attachments: list[dict] | None = None) -> str:
         """运行一个任务。被取消时抛 core.cancel.Cancelled（不抛 KeyboardInterrupt）。
+
+        attachments：WebUI 上传的附件（[{name, path, mime, size, data_url?, excerpt?}]），
+        由 _build_user_message 组装进用户消息 —— 图片走多模态分片，文本注入节选。
 
         取消的三条触发路径，最后都归一化成 Cancelled：
           1. 协作式：任何检查点（轮首 / 流式分片间 / 工具执行前 / MCP 等待中）
@@ -385,8 +396,12 @@ class Agent:
         # 只在「已有客户端」时注册会让首轮任务的取消钩子悄悄失效；
         # _abort_client 自己会处理 client is None 的情况。
         token.on_cancel(self._abort_client)
+        # 本轮确认模式：同步 system prompt（auto 追加责任准则），
+        # 并把 request_approval 的询问桥接到 UI（结束后立刻摘除）
+        self._sync_approval_prompt()
+        approval.set_asker(self._ask_approval)
         try:
-            return self._run_loop(user_input)
+            return self._run_loop(user_input, attachments)
         except Cancelled as e:
             if not token.cancelled():
                 # 协作式取消理论上都伴随一次 token.cancel()；这里兜住
@@ -404,8 +419,26 @@ class Agent:
             self.last_cancel_notice_shown = bool(self._ui_call("cancelled", reason))
             raise Cancelled(f"任务已被用户取消（{reason}）") from None
         finally:
+            approval.set_asker(None)
             self.cancel_token = None
             set_current_token(prev)
+
+    def _ask_approval(self, reason: str) -> bool:
+        """request_approval 工具 → UI 的授权询问桥（缺方法时 _ui_call 返回 None=拒绝）。"""
+        return bool(self._ui_call("ask_approval", reason))
+
+    def _sync_approval_prompt(self) -> None:
+        """按当前确认模式刷新 messages[0]：auto 追加责任准则，其它档位还原基础提示词。
+
+        每轮 run() 都覆盖一次，模式可逐轮切换且立即生效。
+        """
+        extra = (
+            "\n\n" + approval.AUTO_RESPONSIBILITY_PROMPT
+            if self.approval_mode == approval.AUTO else ""
+        )
+        content = self.system_prompt + extra
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0]["content"] = content
 
     def interrupt(self, reason: str = "程序化要求中断当前任务") -> None:
         """程序化取消当前任务（等价于 Ctrl+C 的效果）。没有任务在跑则无事发生。
@@ -463,9 +496,47 @@ class Agent:
                     }
                 )
 
-    def _run_loop(self, user_input: str) -> str:
+    @staticmethod
+    def _build_user_message(user_input: str, attachments: list[dict]) -> dict:
+        """组装用户消息。无附件时保持纯字符串；有图片时升级为多模态 content 数组。
+
+        附件的三档处理（按类型各得其所）：
+          · 图片   → data_url 的 image_url 分片，视觉模型直接看到；
+          · 文本   → 内容节选拼进消息文本（长度已在 webui 层裁剪）；
+          · 其它二进制 → 只注记相对路径，模型可调用工具自行读取。
+        _attachments 元数据供 WebUI 历史回放展示（_ 前缀不会发给模型接口）。
+        """
+        if not attachments:
+            return {"role": "user", "content": user_input}
+
+        text_parts = [user_input]
+        image_parts: list[dict] = []
+        meta: list[dict] = []
+        for att in attachments:
+            name = str(att.get("name") or "附件")
+            mime = str(att.get("mime") or "")
+            data_url = att.get("data_url")
+            excerpt = att.get("excerpt")
+            rel = str(att.get("path") or "")
+            meta.append({"name": name, "path": rel, "mime": mime,
+                         "size": int(att.get("size") or 0)})
+            if data_url and mime.startswith("image/"):
+                image_parts.append({"type": "image_url", "image_url": {"url": data_url}})
+            elif excerpt:
+                text_parts.append(f"\n\n[文件 {name} 内容节选]\n{excerpt}")
+            else:
+                text_parts.append(f"\n\n[附件：{name}（{mime or '未知类型'}，路径 {rel}）]")
+
+        text = "".join(text_parts)
+        if image_parts:
+            content: Any = [{"type": "text", "text": text}] + image_parts
+        else:
+            content = text
+        return {"role": "user", "content": content, "_attachments": meta}
+
+    def _run_loop(self, user_input: str, attachments: list[dict] | None = None) -> str:
         take_images()   # 丢弃上一次任务可能残留的附件（如取消时没取走的）
-        self.messages.append({"role": "user", "content": user_input})
+        self.messages.append(self._build_user_message(user_input, attachments or []))
         client = self._get_client()
         schemas = self.registry.schemas()
         self.last_answer_streamed = False
@@ -824,7 +895,7 @@ class Agent:
             available = ", ".join(self.registry.names()[:20])
             return tc, None, args, f"[error] 未知工具：{name}。当前可用工具：{available}"
 
-        if self.approve and tool.dangerous:
+        if self._needs_confirm(tool):
             if not self._ui_call("ask_confirm", tool, args):
                 return tc, tool, args, (
                     "[denied] 用户拒绝执行该操作。请改用不需要确认的方式，"
@@ -832,6 +903,23 @@ class Agent:
                 )
 
         return tc, tool, args, None
+
+    def _needs_confirm(self, tool: Tool) -> bool:
+        """三档确认矩阵：
+
+        ask   所有 dangerous 工具弹窗；
+        auto  仅 dangerous 的 MCP 工具弹窗，普通高危工具靠模型主动
+              request_approval；
+        full  沙箱内不弹窗，dangerous 的 MCP 工具仍弹窗（硬特例）。
+        """
+        if not tool.dangerous:
+            return False
+        mode = self.approval_mode
+        if mode == approval.ASK:
+            return True
+        if mode in (approval.AUTO, approval.FULL):
+            return tool.source == "mcp"
+        return bool(self.approve)  # 未知档位：退回旧开关语义
 
     def _call_tool(self, tool: Tool, args: dict) -> tuple[str, float]:
         """真正执行（可能跑在工作线程里）。注册表内部已兜住所有异常。

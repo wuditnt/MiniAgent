@@ -44,6 +44,8 @@ interface Props {
   onCreateWorkspace: () => void;
   onRenameWorkspace: (w: WorkspaceItem) => void;
   onDeleteWorkspace: (w: WorkspaceItem) => void;
+  /** 远程访问时隐藏工作区新建/改名/删除入口（后端同样 403 拦截） */
+  remote?: boolean;
   onSearch: (q: string) => void;
   /** 打开「系统配置」弹窗（模型 / 通用） */
   onOpenSettings: () => void;
@@ -114,6 +116,7 @@ export default function Sidebar({
   onCreateWorkspace,
   onRenameWorkspace,
   onDeleteWorkspace,
+  remote = false,
   onSearch,
   onOpenSettings,
   onLogin,
@@ -225,7 +228,11 @@ export default function Sidebar({
               />
             </Tooltip>
             <Tooltip title="新建工作区">
-              <FolderOpenOutlined className="sidebar-icon" onClick={onCreateWorkspace} />
+              <FolderOpenOutlined
+                className="sidebar-icon"
+                style={remote ? { display: "none" } : undefined}
+                onClick={remote ? undefined : onCreateWorkspace}
+              />
             </Tooltip>
           </span>
         </div>
@@ -261,27 +268,31 @@ export default function Sidebar({
                     </span>
                     <span className="ws-count">{list.length}</span>
                     <span className="ws-actions" onClick={(e) => e.stopPropagation()}>
-                      <Tooltip title="改名">
-                        <EditOutlined
-                          className="ws-action"
-                          onClick={() => onRenameWorkspace(w)}
-                        />
-                      </Tooltip>
-                      {w.id !== "default" && (
-                        <Popconfirm
-                          title="移除这个工作区？"
-                          description={
-                            w.session_count
-                              ? `组内还有 ${w.session_count} 个对话，需先删除`
-                              : "不会删除任何文件"
-                          }
-                          okText="移除"
-                          cancelText="取消"
-                          okButtonProps={{ disabled: !!w.session_count }}
-                          onConfirm={() => onDeleteWorkspace(w)}
-                        >
-                          <DeleteOutlined className="ws-action" />
-                        </Popconfirm>
+                      {!remote && (
+                        <>
+                          <Tooltip title="改名">
+                            <EditOutlined
+                              className="ws-action"
+                              onClick={() => onRenameWorkspace(w)}
+                            />
+                          </Tooltip>
+                          {w.id !== "default" && (
+                            <Popconfirm
+                              title="移除这个工作区？"
+                              description={
+                                w.session_count
+                                  ? `组内还有 ${w.session_count} 个对话，需先删除`
+                                  : "不会删除任何文件"
+                              }
+                              okText="移除"
+                              cancelText="取消"
+                              okButtonProps={{ disabled: !!w.session_count }}
+                              onConfirm={() => onDeleteWorkspace(w)}
+                            >
+                              <DeleteOutlined className="ws-action" />
+                            </Popconfirm>
+                          )}
+                        </>
                       )}
                     </span>
                   </div>

@@ -5,11 +5,25 @@
 /** 交互模式：chat = 纯对话；agent = 工具循环 */
 export type Mode = "chat" | "agent";
 
+/** 确认模式：ask 按需询问 / auto 自主判断（主动 request_approval）/ full 完全控制 */
+export type ApprovalMode = "ask" | "auto" | "full";
+
+/** 沙箱外读取策略：strict 全拦 / whitelist 仅白名单 / open 全部只读放开 */
+export type SandboxReadMode = "strict" | "whitelist" | "open";
+
 /** 危险操作确认请求（confirm_request 事件 → ConfirmModal） */
 export interface ConfirmInfo {
   id: string;
   tool: string;
   args: Record<string, unknown>;
+}
+
+/** 附件元数据（由 /api/upload 返回，也在 /api/history 中随用户消息带回） */
+export interface Attachment {
+  name: string;
+  path: string;
+  mime: string;
+  size: number;
 }
 
 /** 一次回答的用量统计（done / error / cancelled 事件带回，为「本轮增量」） */
@@ -57,6 +71,8 @@ export interface ChatItem {
   usage?: Usage;
   error?: string;
   reason?: string;
+  /** 用户消息的附件（图片 / 文件），供前端展示 */
+  attachments?: Attachment[];
 }
 
 /** GET /api/state 返回 */
@@ -67,13 +83,21 @@ export interface AgentState {
   tools: number;
   search_backend: string;
   confirm_timeout: number;
+  max_context_chars?: number;
   sessions: { id: string; busy: boolean }[];
+  /** true = 当前客户端是远程访问（非回环地址），主机配置类操作被后端禁用 */
+  remote?: boolean;
 }
 
 /** GET /api/history 返回的单条消息 */
 export interface HistoryMessage {
   role: "user" | "assistant";
   content: string;
+  /** assistant 消息的该轮用量与耗时（落盘持久化，老会话可能没有） */
+  usage?: Usage;
+  sec?: number;
+  /** 用户消息的附件元数据 */
+  attachments?: Attachment[];
 }
 
 /** 会话列表项（GET /api/sessions 返回） */
@@ -146,10 +170,26 @@ export interface GeneralSettings {
   stream: boolean;
   parallel_tools: boolean;
   max_workers: number;
+  /** 沙箱外读取策略；写操作在任何档位下都被硬禁 */
+  sandbox_read: SandboxReadMode;
+  /** 沙箱外只读白名单（绝对路径，sandbox_read=whitelist 时生效） */
+  sandbox_read_whitelist: string[];
 }
 
 /** GET/PUT /api/settings 返回 */
 export interface SettingsInfo {
   values: GeneralSettings;
   defaults: GeneralSettings;
+}
+
+/** 工具信息（GET /api/tools 返回，插件管理界面用） */
+export interface ToolInfo {
+  name: string;
+  description: string;
+  group: string;
+  source: string;
+  module: string;
+  dangerous: boolean;
+  exclusive: boolean;
+  signature: string;
 }

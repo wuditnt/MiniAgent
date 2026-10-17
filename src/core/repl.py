@@ -299,7 +299,7 @@ class Console:
         elif cmd == "/verbose":
             self.cmd_toggle("verbose", arg)
         elif cmd == "/approve":
-            self.cmd_toggle("approve", arg)
+            self.cmd_approval(arg)
         elif cmd == "/reset":
             self.agent.reset()
             self._print("[green]已清空对话历史。[/green]")
@@ -477,6 +477,27 @@ class Console:
             f"消息 [bold]{s['messages']}[/bold] 条 | 约 [bold]{s['chars']}[/bold] 字符 "
             f"（上限 {s['limit']}，占用 {pct:.1f}%）| 已裁剪 {s['trimmed']} 条"
         )
+
+    def cmd_approval(self, arg: str = "") -> None:
+        """/approve on|off：on=按需询问（ask），off=完全控制（full）。
+
+        三档模型下旧布尔开关映射到 ask/full；auto（自主判断）目前只在
+        Web UI 提供切换。
+        """
+        cur = self.agent.approval_mode
+        if arg.lower() == "on":
+            value, mode = True, "ask"
+        elif arg.lower() == "off":
+            value, mode = False, "full"
+        elif arg == "":
+            value, mode = (False, "full") if cur == "ask" else (True, "ask")
+        else:
+            self._print("[red]用法：/approve on|off[/red]")
+            return
+        self.agent.approve = value
+        self.agent.approval_mode = mode
+        label = {"ask": "按需询问", "full": "完全控制", "auto": "自主判断"}[mode]
+        self._print(f"[green]确认模式 = {label}（{mode}）[/green]")
 
     def cmd_toggle(self, attr: str, arg: str, label: str = "") -> None:
         if arg.lower() in ("on", "off"):

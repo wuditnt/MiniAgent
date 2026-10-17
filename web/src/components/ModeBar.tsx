@@ -1,20 +1,19 @@
 /**
- * 头部模式条：对话/智能体切换（Segmented）+ 联网搜索开关（Switch）。
+ * 头部模式条：联网搜索开关（Switch）。
+ * 对话/智能体切换已迁移到输入框下方的工具栏（见 Chat.tsx 的 Sender footer）。
  * 搜索后端探测结果通过 Tooltip 展示（bing / tavily / bocha / unknown）。
  */
-import { GlobalOutlined, MessageOutlined, RobotOutlined } from "@ant-design/icons";
-import { Segmented, Switch, Tooltip } from "antd";
-import type { AgentState, Mode } from "../types";
+import { GlobalOutlined } from "@ant-design/icons";
+import { Switch, Tooltip } from "antd";
+import type { AgentState } from "../types";
 
 interface Props {
-  mode: Mode;
   web: boolean;
   state: AgentState | null;
-  onMode: (m: Mode) => void;
   onWeb: (w: boolean) => void;
 }
 
-export default function ModeBar({ mode, web, state, onMode, onWeb }: Props) {
+export default function ModeBar({ web, state, onWeb }: Props) {
   const backend = state?.search_backend || "unknown";
   const backendText =
     backend === "unknown" || backend === "none"
@@ -23,14 +22,6 @@ export default function ModeBar({ mode, web, state, onMode, onWeb }: Props) {
 
   return (
     <div className="mode-bar">
-      <Segmented
-        value={mode}
-        onChange={(v) => onMode(v as Mode)}
-        options={[
-          { value: "chat", label: "对话", icon: <MessageOutlined /> },
-          { value: "agent", label: "智能体", icon: <RobotOutlined /> },
-        ]}
-      />
       <Tooltip title={backendText}>
         <span className="web-switch">
           <GlobalOutlined />

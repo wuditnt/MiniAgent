@@ -13,9 +13,16 @@ from __future__ import annotations
 
 import sys
 
-from core import check_command, run_process, tool, workspace
+from core import (
+    check_command,
+    check_command_write,
+    run_process,
+    tool,
+    workspace,
+)
+from core.python_prelude import build_prelude
 
-PLUGIN_INFO = {"name": "命令执行", "version": "1.1", "author": "mini-agent"}
+PLUGIN_INFO = {"name": "命令执行", "version": "1.2", "author": "mini-agent"}
 
 
 @tool(
@@ -32,6 +39,9 @@ def run_shell(command: str, timeout: int = 120) -> str:
     reason = check_command(command)
     if reason:
         return f"[blocked] {reason}"
+    outside = check_command_write(command)
+    if outside:
+        return f"[blocked] {outside}"
 
     try:
         code, out, err, cancelled = run_process(
@@ -58,9 +68,11 @@ def run_shell(command: str, timeout: int = 120) -> str:
     dangerous=True,
 )
 def run_python(code: str, timeout: int = 120) -> str:
+    # 注入写护栏：open/os/shutil/pathlib/sqlite3 的区外写/删/移动在子进程内被拒
+    guarded = build_prelude(workspace()) + "\n" + code
     try:
         code_, out, err, cancelled = run_process(
-            [sys.executable, "-c", code], cwd=workspace(), timeout=timeout,
+            [sys.executable, "-c", guarded], cwd=workspace(), timeout=timeout,
         )
     except TimeoutError:
         return f"[error] Python 执行超时（{timeout}s）"

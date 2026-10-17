@@ -11,7 +11,7 @@ import base64 as _b64
 import hashlib
 import os
 
-from core import read_bytes, safe_path, tool
+from core import read_bytes, read_path, tool
 
 PLUGIN_INFO = {"name": "哈希与编码", "version": "1.0", "author": "mini-agent"}
 
@@ -28,7 +28,7 @@ _SUPPORTED = ("md5", "sha1", "sha256", "sha512")
     required=["path"],
 )
 def file_hash(path: str, algo: str = "sha256") -> str:
-    ap = safe_path(path)
+    ap = read_path(path)
     if not os.path.isfile(ap):
         return f"[error] 文件不存在：{ap}"
     algo = algo.lower()
@@ -68,7 +68,7 @@ def text_hash(text: str, algo: str = "sha256") -> str:
 )
 def base64_encode(text: str = "", path: str = "") -> str:
     if path:
-        ap = safe_path(path)
+        ap = read_path(path)
         if not os.path.isfile(ap):
             return f"[error] 文件不存在：{ap}"
         data = read_bytes(ap)

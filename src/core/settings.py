@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from ._paths import ROOT
 
@@ -29,6 +30,12 @@ DEFAULTS: dict = {
     "stream": True,                # 流式输出（关闭则整段返回）
     "parallel_tools": True,        # 同一轮的多个工具并行执行
     "max_workers": 4,              # 并行工具的最大线程数
+    # 沙箱外读取策略：strict=沙箱外读写全拦（默认）；
+    # whitelist=仅白名单路径可读；open=沙箱外全部只读放开。
+    # 任何档位下沙箱外写入都由 sandbox.safe_path 硬禁，没有开关。
+    "sandbox_read": "strict",
+    # 沙箱外只读白名单：每行一个绝对路径（文件或目录），仅 sandbox_read=whitelist 生效
+    "sandbox_read_whitelist": [],
 }
 
 #: 数值型取值区间；未列出的项不做区间限制
@@ -45,6 +52,12 @@ RANGES: dict[str, tuple] = {
 INT_KEYS = ("max_turns", "max_context_chars", "keep_recent_turns", "max_output_chars", "max_workers")
 #: 布尔字段
 BOOL_KEYS = ("stream", "parallel_tools")
+#: 枚举字符串字段：允许的取值
+ENUM_KEYS: dict[str, tuple[str, ...]] = {
+    "sandbox_read": ("strict", "whitelist", "open"),
+}
+#: 字符串列表字段（元素必须是非空字符串，自动去空白）
+LIST_KEYS = ("sandbox_read_whitelist",)
 
 #: 环境变量兜底：没保存过、也没显式传参时，仍按老 .env 设置来
 ENV_KEYS = {
@@ -119,6 +132,27 @@ def coerce(key: str, value):
             return value.strip().lower() in _TRUTHY
         raise ValueError(f"{key} 必须是布尔值")
 
+    if key in ENUM_KEYS:
+        if isinstance(value, str) and value.strip() in ENUM_KEYS[key]:
+            return value.strip()
+        allowed = " / ".join(ENUM_KEYS[key])
+        raise ValueError(f"{key} 只能是：{allowed}")
+
+    if key in LIST_KEYS:
+        # 接受数组，也接受 textarea 传来的多行字符串；元素去空白、去重、保序
+        if isinstance(value, str):
+            items = re.split(r"[\r\n,]+", value)
+        elif isinstance(value, list):
+            items = value
+        else:
+            raise ValueError(f"{key} 必须是字符串数组或换行分隔的文本")
+        out: list[str] = []
+        for it in items:
+            s = str(it).strip()
+            if s and s not in out:
+                out.append(s)
+        return out
+
     try:
         num = float(value)
     except (TypeError, ValueError):
@@ -183,7 +217,8 @@ def reset() -> dict:
 
 
 def apply_to_runtime() -> None:
-    """把只影响进程全局的配置同步到运行时（目前只有工具输出上限）。"""
+    """把只影响进程全局的配置同步到运行时（工具输出上限、沙箱读取策略）。"""
     from . import sandbox
 
     sandbox.set_max_output_chars(get("max_output_chars"))
+    sandbox.set_read_policy(str(get("sandbox_read")), list(get("sandbox_read_whitelist") or []))

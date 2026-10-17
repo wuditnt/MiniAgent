@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 
-from core import safe_path, tool
+from core import read_path, safe_path, tool
 
 PLUGIN_INFO = {"name": "图片元信息", "version": "1.0", "author": "mini-agent"}
 
@@ -31,7 +31,7 @@ def _has_pillow():
     required=["path"],
 )
 def image_info(path: str) -> str:
-    ap = safe_path(path)
+    ap = read_path(path)
     if not os.path.isfile(ap):
         return f"[error] 文件不存在：{ap}"
     size = os.path.getsize(ap)
@@ -90,8 +90,8 @@ def image_convert(path: str, output: str, scale: float = 1.0, width: int = 0, he
         return "[error] 需要 Pillow：pip install pillow"
     from PIL import Image
 
-    ap = safe_path(path)
-    op = safe_path(output)
+    ap = read_path(path)   # 源图只读：可来自沙箱外（受读取策略限制）
+    op = safe_path(output) # 输出严格：只能写工作区内
     if not os.path.isfile(ap):
         return f"[error] 源文件不存在：{ap}"
     try:

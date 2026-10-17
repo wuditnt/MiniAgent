@@ -19,7 +19,9 @@ mini-agent/
 │   ├── tools.py                  向后兼容垫片（import tools 即加载插件）
 │   ├── registry.py               ToolRegistry：唯一的工具存放处
 │   ├── schema.py                 从类型注解 + docstring 自动推导 JSON Schema
-│   ├── sandbox.py                工作区沙箱 / 输出截断 / 危险命令策略
+│   ├── sandbox.py                工作区沙箱（读写双通道 / 三档读取 / 越界写检测）/ 截断
+│   ├── approval.py               三档确认模式（ask/auto/full）+ request_approval 核心工具
+│   ├── python_prelude.py         run_python 注入的写护栏（区外写/删/改一律拦截）
 │   ├── cancel.py                 取消令牌 / 杀进程树 / 原因留痕
 │   ├── mcp.py                    MCP stdio 客户端 + 桥接成 Tool（并发 / 取消通知）
 │   └── images.py                 图片附件通道（view_image 的底层）
@@ -110,7 +112,7 @@ python -m core              # 进入控制台
 # 生产模式（推荐，运行时无需 Node）
 cd web; npm install; npm run build   # 仅首次或前端变更后需要
 python -m core --web                 # Python 托管 web/dist
-# 浏览器打开 http://127.0.0.1:8000
+# 浏览器打开 c
 
 # 开发模式（前端热更新，两个终端）
 python -m core --web --port 8123     # 终端 1：后端 API + SSE
@@ -120,15 +122,27 @@ cd web; npm run dev                  # 终端 2：Vite :5173，/api 自动代理
 要点：
 
 - 默认只监听 `127.0.0.1`（`--host` 可改），数据不出本机；新增 `--web` / `--port`（默认 8000） / `--host` 开关
-- chat 模式 = 纯对话（关联网时零工具、单次直答）；agent 模式 = 全量 74+ 内置工具循环；开联网则追加 `web_search`
-- 流式输出、工具执行轨迹（ThoughtChain，参数/结果可展开）、危险操作弹窗确认、中途停止、刷新后恢复历史
-- **每轮回答下方工具栏**：鼠标移到该条回答上才淡入（默认隐藏，触屏设备常显）。一键复制回答（失败有降级与提示）、本轮 token 用量（悬停看输入/输出/模型调用/工具调用明细）、本轮耗时。历史回放的消息没有用量与耗时，对应项自动隐藏
+- chat 模式 = 纯对话（关联网时零工具、单次直答）；agent 模式 = 全量 80 个内置工具循环；开联网则追加 `web_search`
+- 流式输出、工具执行轨迹（ThoughtChain，参数/结果可展开）、中途停止、刷新后恢复历史
+- **三档确认模式**（仅 agent 模式，输入框工具栏盾牌胶囊切换，localStorage 记住选择）：
+  - **按需询问（ask，默认）**：每个危险工具执行前都弹窗确认
+  - **自主判断（auto）**：普通危险操作不再打扰，系统提示词注入责任准则，模型认为有风险时主动调 `request_approval(reason)` 向你申请（弹窗展示申请理由，批准才继续）；**危险的 MCP 工具在任何档位都强制弹窗**，这是硬特例
+  - **完全控制（full）**：沙箱内操作一律不弹（MCP 工具仍弹）
+  - 控制台 `/approve` 在 ask / full 两档间切换；命令行 `--approve` 默认进入 ask
+- **附件上传**：输入区左侧加号菜单可上传图片 / 文件（多选）。图片走视觉模型（`view_image` 通道），文件内容注入消息；助手回答中引用 `.attachments/` 路径的图片会直接渲染显示
+- **每轮消息下方工具栏**（常显）：复制按钮悬停展开「复制为 Markdown / 复制为纯文本」菜单；助手消息支持**重新生成**（回溯到对应提问重答）；用户消息支持**编辑重发**（原文回填输入框）与**删除此条及之后消息**；另有本轮 token 用量（悬停看输入/输出/模型调用/工具调用明细）与耗时。历史回放的消息没有用量与耗时，对应项自动隐藏
+- **顶栏操作**：用量统计面板（消息数 / token 汇总 / 平均每轮 / 总耗时 / LLM 与工具调用次数 + 逐条明细）、清空当前会话、导出会话为 Markdown 文件下载
+- **上下文水位**：输入区上方实时显示上下文占用百分比（绿 → 黄 → 红渐变预警），上限取「通用配置」的上下文字符上限
+- **快捷键**：`Ctrl/⌘+N` 新建会话、`Ctrl/⌘+E` 导出 Markdown、`Ctrl/⌘+Shift+Delete` 清空会话、`Ctrl/⌘+/` 查看帮助
+- **窄屏适配**：≤768px 时侧栏自动收起为浮层（汉堡按钮展开），顶栏与输入区自动紧凑布局
 - 富渲染：GFM 表格、KaTeX 公式（`$...$`）、ECharts 图表（` ```echarts ` 代码块，柱/线/饼/散点）、内联 HTML（经白名单消毒）；配套技能 `skills/rich-render/` 教模型主动用图表达
 - **工作区管理**：左侧边栏按工作区分组管理对话，可新建 / 改名 / 移除；每个工作区的 `path` 就是 Agent 的文件操作边界（沙箱根），会话归属哪个工作区就在哪个目录里干活。默认工作区锚在**当前登录用户的数据目录**（如 `C:\Users\<you>\mini-agent`，启动时自动创建，不再拿源码目录当工作区），不可删除；组内还有对话时不允许删工作区
   - 输入框上方左侧有工作区胶囊：新对话可直接切换（不选就落在默认工作区），已开始的对话只读显示 —— 换沙箱根会让「之前写的文件在哪」变得难以理解
-- **系统配置**：右上角齿轮图标打开，内含「模型配置」与「通用配置」两个页签（顶栏点模型名也能进，直接落在模型配置页）
+- **系统配置**：右上角齿轮图标打开，内含「模型配置」「通用配置」「插件管理」三个页签（顶栏点模型名也能进，直接落在模型配置页）
   - 模型配置：任意 OpenAI 兼容接口 —— 内置 DeepSeek（默认）/ 智谱 / Kimi / 通义千问 / 豆包 / 千帆 / 硅基流动 / OpenAI / Ollama / vLLM 模板，可加多份「服务商 + 模型」配置一键切换；带连接测试（`GET /models` 探测，不耗 token，401/403 与网络错误分开报）。配置存 `web_data/models.json`，**API Key 只在本机，不上传第三方**，接口列表回显时脱敏为 `****后四位`
   - 通用配置：最大轮数、上下文字符上限、保留最近轮数、单次工具输出上限、温度、流式输出、并行工具、并发线程数，保存即生效（`web_data/settings.json`，可一键恢复默认）。取值优先级：命令行显式参数 > 这里保存的值 > 环境变量 > 内置默认
+  - 通用配置 → **沙箱读取范围**（`sandbox_read`，默认 `strict`）：控制 Agent 读工作区**之外**文件的口径 —— `strict` 越界读写全拦；`whitelist` 仅白名单绝对路径可读（TextArea 每行一条）；`open` 沙箱外全部只读放开。**任何档位下，沙箱外的写入 / 删除 / 移动一律硬禁**，没有放开开关；此外 `run_python` 注入写护栏、`run_shell` 检测越界写命令、zip/tar 解压防路径穿越（混淆写法无法 100% 拦截，详见下文「沙箱」一节）
+  - 插件管理：展示当前全部工具（名称 / 来源 / 分组 / 签名），按来源标记为 core / builtin / user / mcp，支持查看 dangerous / exclusive 标记与分组汇总，便于快速了解 Agent 当前具备的能力
 - **多会话与搜索**：对话本地持久化（`web_data/sessions/*.json`，原子写），搜索支持标题 + 全文、空格分隔的多词 AND、命中片段高亮，点结果直接滚动定位到那条消息并闪烁
 - **上下文记忆**：超长对话三级收敛 —— 先裁较早的工具结果、再把较早整轮滚动摘要成一段（保留任务目标/决策/进度/待办）、最后滑动窗口硬截断（保留 system + 摘要 + 最近 8 轮）。裁剪以「轮」为单位，`tool_calls` 与 `tool` 结果要么一起留要么一起删，不会配对错位导致接口报错
 - 后端为 `src/core/webui.py`：stdlib `ThreadingHTTPServer` + SSE，Python 侧零新依赖；协议与设计见 [docs/WEBUI_ANTDX_PLAN.md](docs/WEBUI_ANTDX_PLAN.md)
@@ -430,7 +444,7 @@ def my_tool(...):
 | `/usage`            | 本次会话的 token 与调用统计                                          |
 | `/context`          | 上下文占用与已裁剪条数                                                |
 | `/verbose on\|off`  | 是否显示工具调用轨迹                                                 |
-| `/approve on\|off`  | 危险工具是否要人工确认                                                |
+| `/approve on\|off`  | 切换确认模式：`on`=按需询问（ask）/ `off`=完全控制（full）；无参数在两档间切换 |
 | `/reset`            | 清空对话历史                                                     |
 | `/exit`             | 退出                                                         |
 
@@ -575,12 +589,17 @@ mini-agent/
 │   ├── __init__.py           铺 sys.path + 导出插件作者要用的 API
 │   ├── registry.py           Tool / ToolRegistry / @tool
 │   ├── schema.py             自动 Schema 推导
-│   ├── sandbox.py            沙箱与安全策略（含可取消的 run_process）
+│   ├── sandbox.py            沙箱与安全策略：safe_path/read_path 双通道、三档读取、
+│   │                          shell 越界写检测、可取消的 run_process
+│   ├── approval.py           三档确认模式（ask/auto/full）+ request_approval 工具
+│   ├── python_prelude.py     run_python 写护栏（open/shutil/pathlib/sqlite 等 patch）
 │   ├── cancel.py             取消令牌：CancellationToken / Cancelled / 杀进程树
 │   ├── mcp.py                MCP stdio 客户端（并发安全 + 可取消 + 取消通知）+ 桥接
 │   └── images.py             图片附件通道（view_image 的底层）
 ├── plugins/                  自带插件
 │   ├── fs_tools.py           read_file / write_file / list_dir / glob_files / grep
+│   ├── code_tools.py         edit_file（唯一匹配块编辑）/ re_replace / search_symbol /
+│   │                          py_syntax_check / count_code_lines
 │   ├── exec_tools.py         run_shell / run_python
 │   ├── net_tools.py          fetch_url
 │   └── vision_tools.py       view_image（图片输入：按魔数嗅探格式，附件进对话）
@@ -608,8 +627,28 @@ mini-agent/
 `agent.py` 从头到尾没出现过 `isinstance` 或来源判断。
 
 **2. 为什么把沙箱独立成模块？**
-工具会被不断扩展，但边界必须只有一处定义。插件作者 `from core import safe_path`
-就自动继承工作区限制，核心不需要知道任何具体插件长什么样。
+工具会被不断扩展，但边界必须只有一处定义。沙箱提供两个通道，插件作者按语义二选一：
+`from core import safe_path, read_path`
+
+- `safe_path(p)` —— **写通道**（写 / 删 / 移动 / 编辑 / 解压落地点）：目标必须在工作区内，
+  区外一律 `PermissionError`，没有任何模式可以放开；
+- `read_path(p)` —— **读通道**：区内放行；区外按 `sandbox_read` 三档判定
+  （`strict` 拦 / `whitelist` 查表 / `open` 放行）。区外 SQLite 库自动改 `mode=ro` 只读连接，
+  且只允许 SELECT/WITH/PRAGMA/EXPLAIN。
+
+只把工具入口的路径换成 `read_path` 还不够 —— Agent 能写代码，写操作有三条旁路，各封一层：
+
+1. **`run_python` 注入 prelude 写护栏**（`python_prelude.py`）：用户代码执行前包一层
+   `_install()`，patch 掉 `open`/`os.remove`/`shutil.*`/`pathlib`/`sqlite3.connect` 等写入口，
+   区外写直接抛 `PermissionError`；护栏一次性安装后摘除自身，不污染用户命名空间；
+2. **`run_shell` 越界写检测**：重定向（`>`/`>>`）与写动词（copy/move/del/mkdir/…）
+   的目标路径落在区外即拒绝执行；
+3. **zip / tar 解压防穿越（zip-slip）**：逐成员 `realpath` 校验必须落在解压目录内，
+   tar 额外拒绝符号链接成员。
+
+已知边界：shell 与 Python 都是完整语言，变量拼接、编码、别名等**混淆写法无法 100% 拦截**，
+所以「区外硬禁写入」的可靠底座仍是文件系统层 —— 工具通道、prelude、命令检测是纵深防御，
+不是绝对边界。读取三档同理：`open` 只降低读门槛，写门槛永远不变。
 
 **3. 为什么坏插件不中断启动？**
 加载报告会把失败记成 `{模块: 错误}`，其它插件照常加载。可扩展系统的头号杀手是
@@ -621,8 +660,12 @@ mini-agent/
 整个任务没有中断。
 
 **5. 为什么 `dangerous` 要单独标注？**
-黑名单只能拦已知模式；`/approve on` 让用户对**每一个**危险操作做决定，
-是比黑名单更可靠的防线。两者是互补的，不是替代关系。
+黑名单只能拦已知模式；让用户对危险操作做决定，是比黑名单更可靠的防线。
+但「每个危险操作都问」在真实使用里疲劳且打断任务，所以确认做成三档（`approval.py`）：
+ask 每个危险工具都问；auto 把判断权部分交给模型 —— 系统提示词注入责任准则，
+由模型在做高风险动作前主动调 `request_approval(reason)` 申请；full 沙箱内不问。
+两条硬底线不变：**任何档位下 dangerous 的 MCP 工具都弹窗**（外部能力不可信），
+以及沙箱外不可写（见第 2 条）。三档与三读档正交，分别回答「要不要问」与「能不能读」。
 
 **6. 为什么 `registry or REGISTRY` 是错的？**
 这是个真实的坑（开发时就踩了）：`ToolRegistry` 定义了 `__len__`，

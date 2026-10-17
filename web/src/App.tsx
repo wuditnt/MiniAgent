@@ -3,8 +3,8 @@
  * Chat / ModeBar / WelcomePane / ConfirmModal / ToolChain 是纯展示组件。
  */
 import { useEffect, useRef, useState } from "react";
-import { DownOutlined, MenuOutlined, SettingOutlined } from "@ant-design/icons";
-import { Dropdown, Input, message, Tooltip } from "antd";
+import { DownOutlined, DeleteOutlined, ExportOutlined, BarChartOutlined, MenuOutlined, SettingOutlined } from "@ant-design/icons";
+import { Dropdown, Input, message, Modal, Tooltip } from "antd";
 import {
   activateModel,
   chatStream,
@@ -20,11 +20,13 @@ import {
   pickFolder,
   postConfirm,
   postStop,
+  truncateSession,
   updateSession,
   updateWorkspace,
 } from "./api";
 import type {
   AgentState,
+  ApprovalMode,
   ChatItem,
   ConfirmInfo,
   Mode,
@@ -45,6 +47,7 @@ const SESSION_KEY = "miniagent.session";
 const MODE_KEY = "miniagent.mode";
 const WEB_KEY = "miniagent.web";
 const WS_KEY = "miniagent.workspace";
+const APPROVAL_KEY = "miniagent.approval";
 
 /** 浏览器侧会话 id：localStorage 记忆，刷新后恢复同一会话历史 */
 function loadSession(): string {
@@ -65,6 +68,10 @@ export default function App() {
     localStorage.getItem(MODE_KEY) === "chat" ? "chat" : "agent"
   );
   const [web, setWeb] = useState<boolean>(() => localStorage.getItem(WEB_KEY) === "1");
+  const [approval, setApproval] = useState<ApprovalMode>(() => {
+    const v = localStorage.getItem(APPROVAL_KEY);
+    return v === "auto" || v === "full" ? v : "ask";
+  });
   const [state, setState] = useState<AgentState | null>(null);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [busy, setBusy] = useState(false);
@@ -78,7 +85,18 @@ export default function App() {
     item?: WorkspaceItem;
     pickedPath?: string;
   } | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
+  // 窄屏（≤768px）默认收起侧栏，给聊天区留足空间
+  const [collapsed, setCollapsed] = useState(() => typeof window !== "undefined" && window.innerWidth <= 768);
+
+  // 屏幕宽度变化时自动收起/展开侧栏
+  useEffect(() => {
+    const onResize = () => {
+      if (window.innerWidth <= 768 && !collapsed) setCollapsed(true);
+      else if (window.innerWidth > 768 && collapsed) setCollapsed(false);
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [collapsed]);
   // 顶栏会话标题：就地编辑状态
   const [titleEditing, setTitleEditing] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
@@ -88,6 +106,7 @@ export default function App() {
   const [ws, setWs] = useState<string>(() => localStorage.getItem(WS_KEY) || "default");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const [statsOpen, setStatsOpen] = useState(false);
   // 搜索命中后要定位闪烁的消息 id
   const [focus, setFocus] = useState<{ id: string; nonce: number } | null>(null);
   const pendingHit = useRef<number | null>(null);
@@ -103,6 +122,9 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(WS_KEY, ws);
   }, [ws]);
+  useEffect(() => {
+    localStorage.setItem(APPROVAL_KEY, approval);
+  }, [approval]);
 
   /** 会话列表刷新（支持搜索词，跨全部工作区） */
   const refreshSessions = (q: string = "") => {
@@ -149,6 +171,11 @@ export default function App() {
             role: m.role === "user" ? "user" : "assistant",
             content: m.content,
             status: "done" as const,
+            // 落盘时一并保存的用量/耗时，回放时原样恢复脚注
+            usage: m.usage,
+            sec: m.sec,
+            // 附件元数据：发送时写入，历史回放原样展示
+            attachments: m.attachments,
           }))
         );
         // 若本次是从搜索结果点进来的，定位到命中那条消息并闪烁
@@ -161,6 +188,36 @@ export default function App() {
       .catch(() => {});
   }, [session]);
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  // 快捷键
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key === "n") {
+        e.preventDefault();
+        handleNewSession();
+      } else if (mod && e.key === "e") {
+        e.preventDefault();
+        handleExportMarkdown();
+      } else if (mod && e.shiftKey && (e.key === "Delete" || e.key === "Backspace")) {
+        e.preventDefault();
+        handleClearSession();
+      } else if (mod && e.key === "/") {
+        e.preventDefault();
+        message.info(
+          <div style={{ textAlign: "left" }}>
+            <div><b>Ctrl/⌘ + N</b> 新建会话</div>
+            <div><b>Ctrl/⌘ + E</b> 导出 Markdown</div>
+            <div><b>Ctrl/⌘ + Shift + Delete</b> 清空会话</div>
+            <div><b>Enter</b> 发送 / <b>Shift+Enter</b> 换行</div>
+          </div>,
+          5
+        );
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   // 切换会话时同步工作区：只对「已经开始的会话」跟它自己的归属走；
   // 空会话保留用户在胶囊里的当前选择（否则刚选完就被会话默认值覆盖回去）
@@ -181,15 +238,21 @@ export default function App() {
   });
 
   /** 发送一条消息：乐观插入两条气泡，然后消费 SSE 事件流增量更新 */
-  const send = (text: string) => {
+  const send = (
+    text: string,
+    attachments?: import("./types").Attachment[],
+    skipUserItem?: boolean
+  ) => {
     const msg = text.trim();
-    if (!msg || busy) return;
+    if (!msg && !(attachments && attachments.length)) return;
+    if (busy) return;
     const asstId = `a-${Date.now()}`;
     const userItem: ChatItem = {
       id: `u-${Date.now()}`,
       role: "user",
       content: msg,
       status: "done",
+      attachments,
     };
     const asstItem: ChatItem = {
       id: asstId,
@@ -198,13 +261,18 @@ export default function App() {
       status: "streaming",
       mode,
     };
-    setItems((prev) => [...prev, userItem, asstItem]);
+    if (skipUserItem) {
+      // 重新生成场景：user 消息已保留在列表里，只需追加 assistant 气泡
+      setItems((prev) => [...prev, asstItem]);
+    } else {
+      setItems((prev) => [...prev, userItem, asstItem]);
+    }
     setBusy(true);
     const ac = new AbortController();
     abortRef.current = ac;
 
     chatStream(
-      { message: msg, mode, web, session, workspace: ws },
+      { message: msg, mode, web, approval, session, workspace: ws, attachments },
       (ev: SSEEvent) => {
         switch (ev.type) {
           case "delta":
@@ -285,6 +353,40 @@ export default function App() {
   /** 停止：只触发服务端取消令牌；cancelled 终态事件随后由流送达 */
   const stop = () => {
     postStop(session).catch(() => {});
+  };
+
+  /** 重新生成：截掉该 assistant 消息及之后的内容，重发前一条 user 消息 */
+  const handleRegenerate = (msgId: string) => {
+    const idx = items.findIndex((it) => it.id === msgId);
+    if (idx < 0 || items[idx].role !== "assistant") return;
+    // 找前一条 user 消息（重新生成 = 保留 user、去掉 assistant 回答后重发）
+    let userIdx = -1;
+    for (let i = idx - 1; i >= 0; i--) {
+      if (items[i].role === "user") { userIdx = i; break; }
+    }
+    if (userIdx < 0) return;
+    const userMsg = items[userIdx];
+    // keep = 该 user 消息及其之前所有非 notice 消息（后端索引不含 notice）
+    const keep = items.slice(0, userIdx + 1).filter((it) => it.role !== "notice").length;
+    truncateSession(session, keep)
+      .then(() => {
+        setItems((prev) => prev.slice(0, userIdx + 1));
+        send(userMsg.content, userMsg.attachments, true);
+      })
+      .catch((e: unknown) => message.error(e instanceof Error ? e.message : "重新生成失败"));
+  };
+
+  /** 编辑重发：截掉该 user 消息及之后的内容，原文由 Chat 回填输入框 */
+  const handleEditResend = (msgId: string) => {
+    const idx = items.findIndex((it) => it.id === msgId);
+    if (idx < 0 || items[idx].role !== "user") return;
+    // keep = 该 user 消息之前所有非 notice 消息（不含这条 user 本身）
+    const keep = items.slice(0, idx).filter((it) => it.role !== "notice").length;
+    truncateSession(session, keep)
+      .then(() => {
+        setItems((prev) => prev.slice(0, idx));
+      })
+      .catch((e: unknown) => message.error(e instanceof Error ? e.message : "编辑重发失败"));
   };
 
   /** 新建对话：在当前选中的工作区下创建空会话 → 切换过去 */
@@ -395,10 +497,72 @@ export default function App() {
       .catch((e: unknown) => message.error(e instanceof Error ? e.message : "移除失败"));
   };
 
+  /** 删除消息：截掉该条及之后的所有内容（含该条） */
+  const handleDeleteMessage = (msgId: string) => {
+    const idx = items.findIndex((it) => it.id === msgId);
+    if (idx < 0) return;
+    const keep = items.slice(0, idx).filter((it) => it.role !== "notice").length;
+    truncateSession(session, keep)
+      .then(() => {
+        setItems((prev) => prev.slice(0, idx));
+      })
+      .catch((e: unknown) => message.error(e instanceof Error ? e.message : "删除失败"));
+  };
+
+  /** 清空会话：截断到 0 */
+  const handleClearSession = () => {
+    truncateSession(session, 0)
+      .then(() => setItems([]))
+      .catch((e: unknown) => message.error(e instanceof Error ? e.message : "清空失败"));
+  };
+
+  /** 导出当前会话为 Markdown 文件 */
+  const handleExportMarkdown = () => {
+    if (!items.length) {
+      message.info("当前会话没有消息可导出");
+      return;
+    }
+    const title = currentSession?.title || "新对话";
+    const now = new Date().toLocaleString("zh-CN");
+    let md = `# ${title}\n\n导出时间：${now}\n\n---\n\n`;
+    items.forEach((it) => {
+      if (it.role === "notice") return;
+      if (it.role === "user") {
+        md += `## User\n\n${it.content}\n\n`;
+        if (it.attachments?.length) {
+          md += `> 附件：${it.attachments.map((a) => a.name).join("、")}\n\n`;
+        }
+      } else {
+        md += `## Assistant\n\n${it.content}\n\n`;
+        if (it.tools?.length) {
+          md += `> 工具调用：${it.tools.map((t) => t.name).join("、")}\n\n`;
+        }
+      }
+      md += "---\n\n";
+    });
+    const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${title.replace(/[\\/:*?"<>|]/g, "_")}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   // 当前会话（可能还没落盘，所以找不到就是 undefined）
   const currentSession = sessions.find((s) => s.id === session);
   // 顶栏模型菜单里当前激活的那一项
   const activeModelId = models.find((m) => m.is_active)?.id;
+  // 上下文水位：所有非 notice 消息的文本总长度（近似值，含 reasoning/tools）
+  const contextUsage = items.reduce((sum, it) => {
+    if (it.role === "notice") return sum;
+    let s = it.content.length + (it.reasoning?.length || 0);
+    if (it.tools) {
+      s += it.tools.reduce((ts, t) => ts + (t.args ? JSON.stringify(t.args).length : 0) + (t.result?.length || 0), 0);
+    }
+    return sum + s;
+  }, 0);
+  const contextLimit = state?.max_context_chars ?? 200000;
 
   /** 顶栏标题：提交（Enter / 失焦）；未改动则直接关闭 */
   const commitTitle = () => {
@@ -425,6 +589,7 @@ export default function App() {
           sessions={sessions}
           currentId={session}
           collapsed={collapsed}
+          remote={!!state?.remote}
           onToggleCollapse={() => setCollapsed((c) => !c)}
           onSelect={handleSelectSession}
           onCreateSession={handleNewSession}
@@ -482,6 +647,24 @@ export default function App() {
           </div>
 
           <div className="header-right">
+            {/* 用量统计 */}
+            <Tooltip title="用量统计">
+              <span className="tb-icon-btn" onClick={() => setStatsOpen(true)}>
+                <BarChartOutlined />
+              </span>
+            </Tooltip>
+            {/* 清空会话 */}
+            <Tooltip title="清空会话">
+              <span className="tb-icon-btn" onClick={handleClearSession}>
+                <DeleteOutlined />
+              </span>
+            </Tooltip>
+            {/* 导出当前会话为 Markdown */}
+            <Tooltip title="导出为 Markdown">
+              <span className="tb-icon-btn" onClick={handleExportMarkdown}>
+                <ExportOutlined />
+              </span>
+            </Tooltip>
             {/* 模型单选菜单：选中即切换激活模型，末项固定为「管理模型」 */}
             <Dropdown
               trigger={["click"]}
@@ -519,7 +702,7 @@ export default function App() {
                 <DownOutlined className="model-chip-caret" />
               </span>
             </Dropdown>
-            <ModeBar mode={mode} web={web} state={state} onMode={setMode} onWeb={setWeb} />
+            <ModeBar web={web} state={state} onWeb={setWeb} />
           </div>
         </header>
 
@@ -527,6 +710,9 @@ export default function App() {
           items={items}
           busy={busy}
           mode={mode}
+          onMode={setMode}
+          approval={approval}
+          onApproval={setApproval}
           onSend={send}
           onStop={stop}
           focusId={focus?.id ?? null}
@@ -534,6 +720,11 @@ export default function App() {
           workspaceId={ws}
           onWorkspaceChange={(id) => setWs(id)}
           workspaceLocked={!!currentSession && currentSession.message_count > 0}
+          onRegenerate={busy ? undefined : handleRegenerate}
+          onEditResend={busy ? undefined : handleEditResend}
+          onDelete={busy ? undefined : handleDeleteMessage}
+          contextUsage={contextUsage}
+          contextLimit={contextLimit}
         />
 
         <ConfirmModal
@@ -557,6 +748,7 @@ export default function App() {
         <SettingsModal
           open={settingsOpen}
           tab={settingsTab}
+          remote={!!state?.remote}
           onTab={setSettingsTab}
           onClose={() => setSettingsOpen(false)}
           onChanged={() => {
@@ -564,6 +756,79 @@ export default function App() {
             refreshModels();
           }}
         />
+
+        {/* 用量统计面板 */}
+        <Modal
+          open={statsOpen}
+          title="用量统计"
+          width={640}
+          onCancel={() => setStatsOpen(false)}
+          footer={null}
+        >
+          {(() => {
+            const valid = items.filter((it) => it.role !== "notice");
+            const userCount = valid.filter((it) => it.role === "user").length;
+            const asstCount = valid.filter((it) => it.role === "assistant").length;
+            let totalPrompt = 0, totalCompletion = 0, totalTokens = 0, totalSec = 0, totalLlm = 0, totalTools = 0;
+            valid.forEach((it) => {
+              if (it.usage) {
+                totalPrompt += it.usage.prompt_tokens;
+                totalCompletion += it.usage.completion_tokens;
+                totalTokens += it.usage.total_tokens;
+                totalLlm += it.usage.llm_calls;
+                totalTools += it.usage.tool_calls;
+              }
+              if (it.sec) totalSec += it.sec;
+            });
+            const avgTokens = asstCount > 0 ? Math.round(totalTokens / asstCount) : 0;
+            return (
+              <div>
+                <div className="stats-grid">
+                  <div className="stat-card">
+                    <div className="stat-value">{valid.length}</div>
+                    <div className="stat-label">总消息数</div>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-value">{userCount} / {asstCount}</div>
+                    <div className="stat-label">用户 / 助手</div>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-value">{totalTokens.toLocaleString()}</div>
+                    <div className="stat-label">总 tokens</div>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-value">{avgTokens}</div>
+                    <div className="stat-label">平均每轮</div>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-value">{totalSec.toFixed(1)}s</div>
+                    <div className="stat-label">总耗时</div>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-value">{totalLlm} / {totalTools}</div>
+                    <div className="stat-label">LLM / 工具调用</div>
+                  </div>
+                </div>
+                <div className="stats-detail">
+                  <div className="stats-detail-title">逐条明细</div>
+                  {valid.map((it, i) => (
+                    <div className="stats-row" key={it.id}>
+                      <span className="stats-row-idx">{i + 1}</span>
+                      <span className="stats-row-role">{it.role === "user" ? "用户" : "助手"}</span>
+                      <span className="stats-row-content" title={it.content}>
+                        {it.content.slice(0, 40)}{it.content.length > 40 ? "…" : ""}
+                      </span>
+                      <span className="stats-row-usage">
+                        {it.usage ? `${it.usage.total_tokens} tok` : "-"}
+                      </span>
+                      <span className="stats-row-sec">{it.sec ? `${it.sec}s` : "-"}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+        </Modal>
       </div>
     </div>
   );

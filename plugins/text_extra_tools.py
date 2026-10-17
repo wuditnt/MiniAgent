@@ -14,7 +14,7 @@ import json as _json
 import re
 import urllib.parse
 
-from core import decode_bytes, read_bytes, safe_path, tool
+from core import decode_bytes, read_bytes, read_path, tool
 
 PLUGIN_INFO = {"name": "文本增强", "version": "1.0", "author": "mini-agent"}
 
@@ -31,7 +31,7 @@ PLUGIN_INFO = {"name": "文本增强", "version": "1.0", "author": "mini-agent"}
 )
 def json_query(path: str = "", text: str = "", query: str = "") -> str:
     if path:
-        ap = safe_path(path)
+        ap = read_path(path)
         raw, _ = decode_bytes(read_bytes(ap))
     else:
         raw = text

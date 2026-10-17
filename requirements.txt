@@ -5,3 +5,12 @@ openai>=1.30.0
 # 不装也能跑（自动退回纯文本输出）。
 rich>=13.0
 prompt_toolkit>=3.0
+
+# 可选：内置插件增强。装了插件功能更全；
+# 不装也能跑（插件自动退回系统命令或给出提示）。
+#   pillow     —— image_meta_tools：读取图片格式/尺寸/EXIF
+#   psutil     —— sys_monitor / sys_tools：进程 CPU/内存、端口占用
+#   pyperclip  —— sys_extra_tools：剪贴板读写
+pillow>=10.0
+psutil>=5.9
+pyperclip>=1.8

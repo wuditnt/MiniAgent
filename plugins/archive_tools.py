@@ -11,7 +11,7 @@ import os
 import tarfile
 import zipfile
 
-from core import safe_path, tool, workspace
+from core import read_path, safe_path, tool, workspace
 
 PLUGIN_INFO = {"name": "压缩归档", "version": "1.0", "author": "mini-agent"}
 
@@ -24,6 +24,19 @@ def _detect_kind(path: str) -> str:
         if low.endswith(suf):
             return "tar"
     return "zip"  # 默认按 zip 处理
+
+
+def _safe_join_members(base: str, names: list[str]) -> tuple[list[str] | None, str | None]:
+    """zip-slip 防护：每个条目解析后必须落在 base 内（base 自身也算）。
+
+    返回 (安全条目名列表, None) 或 (None, 越界条目名)。
+    """
+    dest = os.path.realpath(base)
+    for name in names:
+        out = os.path.realpath(os.path.join(dest, name))
+        if out != dest and not out.startswith(dest + os.sep):
+            return None, name
+    return names, None
 
 
 @tool(
@@ -47,7 +60,7 @@ def zip_create(paths: list[str], archive: str) -> str:
         if kind == "zip":
             with zipfile.ZipFile(ap, "w", zipfile.ZIP_DEFLATED) as zf:
                 for p in paths:
-                    src = safe_path(p)
+                    src = read_path(p)
                     if os.path.isdir(src):
                         for root, _dirs, files in os.walk(src):
                             for f in files:
@@ -64,7 +77,7 @@ def zip_create(paths: list[str], archive: str) -> str:
                    "w:xz" if ap.lower().endswith((".tar.xz", ".txz")) else "w"
             with tarfile.open(ap, mode) as tf:
                 for p in paths:
-                    src = safe_path(p)
+                    src = read_path(p)
                     tf.add(src, arcname=os.path.basename(src))
                     added.append(os.path.basename(src))
     except Exception as e:  # noqa: BLE001
@@ -83,21 +96,41 @@ def zip_create(paths: list[str], archive: str) -> str:
     dangerous=True,
 )
 def zip_extract(archive: str, path: str = "") -> str:
-    ap = safe_path(archive)
+    # 压缩包本身是读取（可来自沙箱外）；解压目标是写入，严格限定工作区内
+    ap = read_path(archive)
     if not os.path.isfile(ap):
         return f"[error] 压缩包不存在：{ap}"
     kind = _detect_kind(ap)
-    target = safe_path(path) if path else os.path.splitext(ap)[0]
+    if path:
+        target = safe_path(path)
+    else:
+        # 压缩包在沙箱外时，同名目录会落在外部 —— 兜底到工作区内
+        default = os.path.splitext(ap)[0]
+        try:
+            target = safe_path(default)
+        except Exception:
+            target = os.path.join(workspace(), os.path.basename(default))
     os.makedirs(target, exist_ok=True)
 
     try:
         if kind == "zip":
             with zipfile.ZipFile(ap) as zf:
                 names = zf.namelist()
+                _ok, bad = _safe_join_members(target, names)
+                if bad is not None:
+                    return f"[blocked] 压缩包含越界条目（zip-slip）：{bad}，已拒绝解压"
                 zf.extractall(target)
         else:
             with tarfile.open(ap) as tf:
-                names = tf.getnames()
+                members = tf.getmembers()
+                names = [m.name for m in members]
+                _ok, bad = _safe_join_members(target, names)
+                if bad is not None:
+                    return f"[blocked] 压缩包含越界条目（tar-slip）：{bad}，已拒绝解压"
+                # tar 的软/硬链接成员也可能指向目标目录外，一律拒绝
+                linked = next((m.name for m in members if m.issym() or m.islnk()), None)
+                if linked is not None:
+                    return f"[blocked] 压缩包含链接条目：{linked}，为防越界已拒绝解压"
                 tf.extractall(target)
     except Exception as e:  # noqa: BLE001
         return f"[error] {type(e).__name__}: {e}"
@@ -114,7 +147,7 @@ def zip_extract(archive: str, path: str = "") -> str:
     required=["archive"],
 )
 def list_archive(archive: str, max_items: int = 200) -> str:
-    ap = safe_path(archive)
+    ap = read_path(archive)
     if not os.path.isfile(ap):
         return f"[error] 压缩包不存在：{ap}"
     kind = _detect_kind(ap)

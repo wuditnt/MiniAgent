@@ -14,7 +14,7 @@ import difflib
 import os
 import shutil
 
-from core import safe_path, tool, workspace
+from core import read_path, safe_path, tool, workspace
 
 PLUGIN_INFO = {"name": "文件操作", "version": "1.0", "author": "mini-agent"}
 
@@ -29,7 +29,8 @@ PLUGIN_INFO = {"name": "文件操作", "version": "1.0", "author": "mini-agent"}
     required=["src", "dst"],
 )
 def copy_file(src: str, dst: str) -> str:
-    sp = safe_path(src)
+    # 源只读：允许按读取策略从沙箱外复制进来；目标严格：只能写工作区内
+    sp = read_path(src)
     dp = safe_path(dst)
     if not os.path.exists(sp):
         return f"[error] 源不存在：{sp}"
@@ -154,11 +155,11 @@ def diff_files(path_a: str, path_b: str, context: int = 3) -> str:
     from core import decode_bytes, looks_binary, read_bytes
 
     for label, p in (("A", path_a), ("B", path_b)):
-        if not os.path.isfile(safe_path(p)):
+        if not os.path.isfile(read_path(p)):
             return f"[error] 文件 {label} 不存在：{p}"
 
-    data_a = read_bytes(safe_path(path_a))
-    data_b = read_bytes(safe_path(path_b))
+    data_a = read_bytes(read_path(path_a))
+    data_b = read_bytes(read_path(path_b))
     if looks_binary(data_a) or looks_binary(data_b):
         return "[error] 二进制文件不支持文本 diff"
 

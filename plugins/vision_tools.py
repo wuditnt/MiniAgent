@@ -15,7 +15,7 @@ from __future__ import annotations
 import base64
 import os
 
-from core import attach_image, safe_path, tool
+from core import attach_image, read_path, tool
 
 # 魔数嗅探表：只认扩展名是不可靠的（demo_case 里就有刻意伪造的）
 _MAGIC = (
@@ -45,7 +45,7 @@ def view_image(path: str) -> str:
     Args:
         path: 相对工作区的图片路径（支持 png / jpeg / gif / bmp / webp）
     """
-    fp = safe_path(path)
+    fp = read_path(path)
     if not os.path.isfile(fp):
         return f"[error] 文件不存在：{path}"
     size = os.path.getsize(fp)

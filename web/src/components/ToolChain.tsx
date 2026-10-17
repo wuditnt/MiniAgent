@@ -6,20 +6,29 @@ import { CheckCircleFilled, CloseCircleFilled, LoadingOutlined } from "@ant-desi
 import { ThoughtChain } from "@ant-design/x";
 import { Collapse } from "antd";
 import type { ToolCall } from "../types";
+import CodeBlock from "./CodeBlock";
 
 function ToolDetail({ call }: { call: ToolCall }) {
   const items = [
     {
       key: "args",
       label: "参数",
-      children: <pre>{JSON.stringify(call.args ?? {}, null, 2)}</pre>,
+      children: (
+        <div className="tool-detail-block">
+          <CodeBlock code={JSON.stringify(call.args ?? {}, null, 2)} lang="json" />
+        </div>
+      ),
     },
   ];
   if (call.result !== undefined) {
     items.push({
       key: "result",
       label: "结果",
-      children: <pre>{call.result || "（空）"}</pre>,
+      children: (
+        <div className="tool-detail-block">
+          <CodeBlock code={call.result || "（空）"} />
+        </div>
+      ),
     });
   }
   return <Collapse ghost size="small" className="tool-detail" items={items} />;
