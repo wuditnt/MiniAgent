@@ -17,7 +17,7 @@ import traceback
 from dataclasses import dataclass, field
 
 from core.logging_setup import get_logger
-from core.registry import REGISTRY, Tool, ToolRegistry, use_registry
+from core.registry import REGISTRY, ToolRegistry, use_registry
 
 DEFAULT_PLUGIN_DIRS = ("plugins", "plugins_user")
 

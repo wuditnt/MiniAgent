@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from subprocess import PIPE, Popen
 
 from core import check_command, read_path, run_process, tool
 
@@ -102,7 +103,8 @@ def clipboard_write(text: str) -> str:
     if sys.platform == "win32":
         # 用 clip 命令；注意结尾会加换行
         cmd = check_command("clip")
-        from subprocess import Popen, PIPE
+        if not cmd:
+            return "[error] 系统缺少 clip 命令"
 
         p = Popen(cmd, stdin=PIPE, shell=True)
         p.communicate(text.encode("utf-8"))
@@ -110,8 +112,6 @@ def clipboard_write(text: str) -> str:
             return f"[error] 写入剪贴板失败"
         return f"[ok] 已写入剪贴板（{len(text)} 字符）"
     elif sys.platform == "darwin":
-        from subprocess import Popen, PIPE
-
         p = Popen("pbcopy", stdin=PIPE)
         p.communicate(text.encode("utf-8"))
         return f"[ok] 已写入剪贴板（{len(text)} 字符）"

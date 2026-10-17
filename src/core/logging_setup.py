@@ -53,7 +53,7 @@ _signature: tuple | None = None
 # ---------------------------------------------------------------- 内部
 
 def _level(value: str) -> int:
-    return _LEVELS.get(str(value or "").strip().upper(), logging.INFO)
+    return _LEVELS.get((value or "").strip().upper(), logging.INFO)
 
 
 def _formatter() -> logging.Formatter:
@@ -84,7 +84,7 @@ class _DailyDirHandler(logging.Handler):
         super().__init__(level)
         self.log_dir = log_dir
         self.filename = filename
-        self.retention_days = max(1, int(retention_days))
+        self.retention_days = max(1, retention_days)
         self._stream = None
         self._day = ""
         self._last_prune = ""
@@ -132,8 +132,10 @@ class _DailyDirHandler(logging.Handler):
             if day != self._last_prune:
                 self._prune(day)
                 self._last_prune = day
-            self._stream.write(self.format(record) + self.terminator)
-            self._stream.flush()
+            stream = self._stream
+            assert stream is not None, "日志流未打开"
+            stream.write(self.format(record) + self.terminator)
+            stream.flush()
         except Exception:  # noqa: BLE001 —— 写日志失败不能拖垮业务
             self.handleError(record)
 
@@ -183,7 +185,7 @@ _install_null()
 
 def get_logger(category: str) -> logging.Logger:
     """取某类别的 logger：app / llm / tool。"""
-    name = str(category or "").strip().lower()
+    name = (category or "").strip().lower()
     if name not in _CATEGORY_FILES:
         name = "app"
     return logging.getLogger(f"{_ROOT_NAME}.{name}")
@@ -200,8 +202,8 @@ def init(
 
     directory = os.path.abspath(log_dir or LOG_DIR)
     lvl = _level(level)
-    days = max(1, int(retention_days))
-    sig = (directory, lvl, days, bool(enabled))
+    days = max(1, retention_days)
+    sig = (directory, lvl, days, enabled)
 
     with _lock:
         if _signature == sig:

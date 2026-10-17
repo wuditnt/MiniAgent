@@ -96,7 +96,7 @@ def _safe_print(text: str) -> None:
         print(text)
     except UnicodeEncodeError:
         try:
-            sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
+            sys.stdout.reconfigure(errors="replace")  # type: ignore[attr-defined]
             print(text)
         except Exception:  # noqa: BLE001
             pass
@@ -176,7 +176,9 @@ def _bootstrap(args: argparse.Namespace) -> tuple[Any, SkillLoader, SkillLoadRep
 
     ui = make_ui(prefer_rich=not args.plain, enabled=not args.quiet)
 
-    import tools  # noqa: F401  —— 导入即加载插件
+    import importlib
+
+    importlib.import_module("tools")  # 导入即加载插件
 
     from core.registry import REGISTRY
     from core.skills import SkillLoader, register_use_skill_tool

@@ -43,3 +43,29 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["core*"]
+
+# ---------------------------------------------------------------------------
+# 静态检查配置
+#
+# 本项目刻意把 src/core 也当成「裸模块」导入根：main.py 脚本模式下的
+# `from _paths import ...`、插件作者写的 `import tools`，运行时由
+# core/_paths.py 的 install_import_paths() 铺好 sys.path。
+# 类型检查器默认只认 src/，所以这里显式补上 src/core，避免误报找不到模块。
+# ---------------------------------------------------------------------------
+[tool.pyrefly]
+search-path = [".", "src", "src/core"]
+
+[tool.pyright]
+extraPaths = [".", "src", "src/core"]
+typeCheckingMode = "basic"
+
+# Trae 的 basedpyright 比 pyright 多出若干严格检查；本项目大量使用动态导入、
+# 插件装饰器和模块级可变配置，这些检查只产生噪音，不反映真实缺陷。
+[tool.basedpyright]
+extraPaths = [".", "src", "src/core"]
+typeCheckingMode = "basic"
+reportImportCycles = "none"
+reportUnusedCallResult = "none"
+reportConstantRedefinition = "none"
+reportMissingTypeArgument = "none"
+reportUntypedFunctionDecorator = "none"

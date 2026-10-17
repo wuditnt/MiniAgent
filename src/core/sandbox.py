@@ -48,7 +48,7 @@ def set_workspace(path: str) -> str:
 def set_max_output_chars(n: int) -> int:
     """运行时调整工具输出上限（Web UI 的「通用配置」改完立刻生效）。"""
     global MAX_OUTPUT_CHARS
-    MAX_OUTPUT_CHARS = max(1, int(n))
+    MAX_OUTPUT_CHARS = max(1, n)
     return MAX_OUTPUT_CHARS
 
 
@@ -158,7 +158,7 @@ def assert_can_write(p: str) -> str:
     给 run_python 的同进程护栏与命令检测复用 —— 与 safe_path 的区别只是
     错误信息面向「脚本越权」场景。返回规范化绝对路径。
     """
-    ap = os.path.abspath(os.path.expanduser(str(p)))
+    ap = os.path.abspath(os.path.expanduser(p))
     if not _within(ap, _WORKSPACE):
         raise PermissionError(
             f"沙箱外路径只读，禁止写入/删除：{ap}（工作区 {_WORKSPACE}）"

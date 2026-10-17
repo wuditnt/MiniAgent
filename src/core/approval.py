@@ -68,13 +68,13 @@ def register(reg: ToolRegistry | None = None) -> None:
 
 
 def request_approval(reason: str) -> str:
-    text = str(reason or "").strip() or "(未填写理由)"
+    text = (reason or "").strip() or "(未填写理由)"
     asker = _asker
     if asker is None:
         # 无 UI 桥（脚本/测试直调）：不替用户做拒绝决定，默认放行并留痕
         return "[approved] 当前环境没有人工确认通道，默认放行。"
     try:
-        ok = bool(asker(text))
+        ok = asker(text)
     except Exception:  # noqa: BLE001 —— 询问桥故障时按拒绝处理更安全
         return "[denied] 授权询问失败，为安全起见按未获批准处理。请换方案或稍后再试。"
     if ok:

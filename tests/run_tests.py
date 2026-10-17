@@ -71,7 +71,7 @@ SUITES: list[tuple[str, str, bool]] = [
 ]
 
 
-def _env() -> dict:
+def _env() -> dict[str, str]:
     """给测试进程准备环境。
 
     三件事必须做对，否则测试会莫名其妙地失败：

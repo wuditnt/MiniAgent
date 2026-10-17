@@ -23,6 +23,7 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from core._paths import ROOT
@@ -187,7 +188,7 @@ class _Session:
             for m in data.get("messages", []):
                 role, content = m.get("role"), m.get("content")
                 if role in ("user", "assistant") and isinstance(content, str) and content:
-                    msg = {"role": role, "content": content}
+                    msg: dict[str, Any] = {"role": role, "content": content}
                     # 每轮的用量/耗时一并灌回内存（_ 前缀字段不会发给模型接口）
                     if role == "assistant" and (m.get("usage") or m.get("sec") is not None):
                         msg["_stats"] = {"usage": m.get("usage"), "sec": m.get("sec")}
@@ -246,7 +247,7 @@ class _Session:
             pending = self.pending_confirm
             if not pending or pending[0] != cid:
                 return False
-            pending[2]["approve"] = bool(approve)
+            pending[2]["approve"] = approve
             pending[1].set()
         return True
 
@@ -291,14 +292,14 @@ class WebUI:
     def turn_start(self, turn: int) -> None:
         self._push({"type": "turn", "turn": turn, "mode": self.session.mode})
 
-    def llm_delta(self, turn: int, text: str, kind: str = "content") -> bool:
+    def llm_delta(self, _turn: int, text: str, kind: str = "content") -> bool:
         if not text:
             return False
         self._push({"type": "delta", "text": text, "kind": kind})
         # 返回 True 仅限正文：agent 靠它判断「回答已经上屏过」，网页上确实上屏了
         return kind == "content"
 
-    def llm_done(self, turn: int, latency: float, streamed: bool = False) -> None:
+    def llm_done(self, _turn: int, latency: float, streamed: bool = False) -> None:
         self._push({"type": "llm_done", "sec": round(latency, 2), "streamed": streamed})
 
     def tools_start(self, turn: int, items: list) -> None:
@@ -679,7 +680,7 @@ def _lan_addresses() -> list[str]:
         pass
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
+            ip = str(info[4][0])
             if not ip.startswith("127.") and ip not in out:
                 out.append(ip)
     except OSError:
@@ -773,9 +774,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     # ---------------------------------------------------------- 基础设施
 
-    def log_message(self, fmt: str, *args) -> None:  # noqa: A003
+    def log_message(self, format: str, *args) -> None:  # noqa: A002, A003
         # 默认 INFO 级别不落盘（逐请求日志会刷屏）；排查时把 log_level 调到 DEBUG
-        _log.debug("http %s %s", getattr(self, "command", "?"), getattr(self, "path", "?"))
+        _log.debug("http %s %s | %s", getattr(self, "command", "?"),
+                   getattr(self, "path", "?"), format % args)
 
     def _json(self, obj, status: int = 200) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")

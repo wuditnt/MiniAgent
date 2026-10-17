@@ -240,8 +240,8 @@ def build_prelude(workspace: str) -> str:
     """
     body = (
         _BODY
-        .replace("__MA_WORKSPACE__", repr(str(workspace)))
-        .replace("__MA_MEMORY__", repr(os.path.join(str(workspace), ".memory")))
+        .replace("__MA_WORKSPACE__", repr(workspace))
+        .replace("__MA_MEMORY__", repr(os.path.join(workspace, ".memory")))
     )
     return (
         "# === mini-agent 沙箱写护栏（自动注入）===\n"

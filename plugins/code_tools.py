@@ -13,7 +13,6 @@ from __future__ import annotations
 import ast
 import os
 import re
-import sys
 
 from core import decode_bytes, is_memory_path, looks_binary, read_bytes, read_path, safe_path, tool, workspace
 
