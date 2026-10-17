@@ -11,6 +11,7 @@ Web UI 端到端验证：真实 WebServer + mock OpenAI 兼容服务，断言 SS
   ⑦ 危险确认（允许）：文件真的被删除，tool_end ok
   ⑧ 并发保护：同会话第二个 /api/chat → 409
   ⑨ /api/state 与静态引导页
+  ⑭ keep-alive：未读的请求体不影响同一条连接上的后续请求
 
 运行：python test_webui.py
 """
@@ -573,6 +574,35 @@ def scenario_settings() -> None:
     print("  [13] 通用配置：默认/校验/生效/恢复默认 通过")
 
 
+def scenario_keepalive_body() -> None:
+    """⑭ keep-alive 复用：没读的请求体不能污染下一个请求。
+
+    回归点：前端「设为当前 / 连接测试」会带 `{}` 请求体，而处理函数只用路径参数。
+    HTTP/1.1 复用连接时若不消费这段字节，后续 GET 会被解析成畸形请求（400），
+    前端表现就是「点一下按钮，模型列表突然变空」。
+    """
+    import http.client
+
+    conn = http.client.HTTPConnection("127.0.0.1", WEB_PORT, timeout=15)
+    try:
+        conn.request("POST", "/api/models/default/activate", body=b"{}",
+                     headers={"Content-Type": "application/json"})
+        r1 = conn.getresponse()
+        first = (r1.status, json.loads(r1.read() or b"{}"))
+
+        # 同一条连接上紧接着发 GET —— 修复前这里会收到 400 / 错位的响应
+        conn.request("GET", "/api/models")
+        r2 = conn.getresponse()
+        second = (r2.status, json.loads(r2.read() or b"{}"))
+    finally:
+        conn.close()
+
+    assert first[0] == 200, f"activate 应 200：{first}"
+    assert second[0] == 200, f"同连接上的 GET 应 200：{second}"
+    assert len(second[1].get("providers") or []) >= 1, f"列表不应为空：{second[1]}"
+    print("  [14] keep-alive：未读请求体不污染下一个请求 通过")
+
+
 # ---------------------------------------------------------------- 主流程
 
 def main() -> int:
@@ -627,6 +657,7 @@ def main() -> int:
         ("模型配置", scenario_models),
         ("会话搜索", scenario_search),
         ("通用配置", scenario_settings),
+        ("keep-alive 请求体", scenario_keepalive_body),
     ]
     for name, fn in scenarios:
         try:

@@ -53,16 +53,16 @@ include = ["core*"]
 # 类型检查器默认只认 src/，所以这里显式补上 src/core，避免误报找不到模块。
 # ---------------------------------------------------------------------------
 [tool.pyrefly]
-search-path = [".", "src", "src/core"]
+search-path = [".", "src", "src/core", "tests"]
 
 [tool.pyright]
-extraPaths = [".", "src", "src/core"]
+extraPaths = [".", "src", "src/core", "tests"]
 typeCheckingMode = "basic"
 
 # Trae 的 basedpyright 比 pyright 多出若干严格检查；本项目大量使用动态导入、
 # 插件装饰器和模块级可变配置，这些检查只产生噪音，不反映真实缺陷。
 [tool.basedpyright]
-extraPaths = [".", "src", "src/core"]
+extraPaths = [".", "src", "src/core", "tests"]
 typeCheckingMode = "basic"
 reportImportCycles = "none"
 reportUnusedCallResult = "none"

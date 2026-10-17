@@ -22,11 +22,18 @@ mini-agent/
 │   ├── sandbox.py                工作区沙箱（读写双通道 / 三档读取 / 越界写检测）/ 截断
 │   ├── approval.py               三档确认模式（ask/auto/full）+ request_approval 核心工具
 │   ├── python_prelude.py         run_python 注入的写护栏（区外写/删/改一律拦截）
+│   ├── memory.py                 记忆系统：三层存储 / 保护区判定 / 注入渲染 / remember
 │   ├── cancel.py                 取消令牌 / 杀进程树 / 原因留痕
 │   ├── mcp.py                    MCP stdio 客户端 + 桥接成 Tool（并发 / 取消通知）
+│   ├── webui.py                  Web UI 服务（ThreadingHTTPServer + SSE）
+│   ├── workspace_config.py       工作区注册表与路径解析（沙箱根）
+│   ├── model_config.py           模型配置：多服务商配置读写与连接测试
+│   ├── settings.py               通用配置：settings.json 读写与应用
+│   ├── logging_setup.py          文件日志：按日目录分文件 / 保留清理
+│   ├── mhtml.py                  MHTML 解析：主 HTML + 内嵌资源（data: URL）
 │   └── images.py                 图片附件通道（view_image 的底层）
 │
-├── plugins/           自带插件（fs / exec / net / vision）
+├── plugins/           自带插件（文件 / 代码 / 执行 / 网络 / 视觉 / 系统 / 数据 等，共 21 个）
 ├── plugins_user/      ← 你的插件放这里，丢个 .py 就多一个工具
 ├── skills/            自带技能（一个目录 + SKILL.md = 一段可复用工作流）
 ├── skills_user/       ← 你的技能放这里，丢个含 SKILL.md 的目录就多一个技能
@@ -144,6 +151,7 @@ cd web; npm run dev                  # 终端 2：Vite :5173，/api 自动代理
   - 通用配置 → **沙箱读取范围**（`sandbox_read`，默认 `strict`）：控制 Agent 读工作区**之外**文件的口径 —— `strict` 越界读写全拦；`whitelist` 仅白名单绝对路径可读（TextArea 每行一条）；`open` 沙箱外全部只读放开。**任何档位下，沙箱外的写入 / 删除 / 移动一律硬禁**，没有放开开关；此外 `run_python` 注入写护栏、`run_shell` 检测越界写命令、zip/tar 解压防路径穿越（混淆写法无法 100% 拦截，详见下文「沙箱」一节）
   - **记忆**页签：编辑用户画像与项目记忆、查看/删除会话摘要、开关「启用记忆 / 自动提炼」与注入预算（详见下文「记忆系统」一节）
   - 插件管理：展示当前全部工具（名称 / 来源 / 分组 / 签名），按来源标记为 core / builtin / user / mcp，支持查看 dangerous / exclusive 标记与分组汇总，便于快速了解 Agent 当前具备的能力
+- **右侧工作台抽屉**：顶栏最右侧图标展开/收起。初始为「开始」页，点击「工作区文件」进入目录列表；点文件新建标签页，支持代码/文本（行号+高亮）、Markdown（预览/源码）、HTML / MHTML（iframe 预览/源码，默认预览，脚本沙箱隔离）、图片预览；关闭全部标签后抽屉自动收起，再次打开回到开始页（只读，不修改文件）
 - **多会话与搜索**：对话本地持久化（`web_data/sessions/*.json`，原子写），搜索支持标题 + 全文、空格分隔的多词 AND、命中片段高亮，点结果直接滚动定位到那条消息并闪烁
 - **上下文记忆**：超长对话三级收敛 —— 先裁较早的工具结果、再把较早整轮滚动摘要成一段（保留任务目标/决策/进度/待办）、最后滑动窗口硬截断（保留 system + 摘要 + 最近 8 轮）。裁剪以「轮」为单位，`tool_calls` 与 `tool` 结果要么一起留要么一起删，不会配对错位导致接口报错
 - 后端为 `src/core/webui.py`：stdlib `ThreadingHTTPServer` + SSE，Python 侧零新依赖；协议与设计见 [docs/WEBUI_ANTDX_PLAN.md](docs/WEBUI_ANTDX_PLAN.md)
@@ -230,6 +238,28 @@ logs/
   `DEBUG` 会额外记录每条 HTTP 请求；`INFO` 下访问日志不落盘，避免刷屏。
 - 配置存 `web_data/settings.json`（`log_enabled` / `log_level` / `log_retention_days`），
   保存即时生效，无需重启。
+
+---
+
+## 工作区文件抽屉
+
+右侧抽屉用于浏览当前工作区，只读，不提供编辑保存：
+
+- 入口：主界面顶栏最右侧的布局图标；桌面端默认 420px，可拖拽左边缘调整宽度并记住；右上角「全屏」让抽屉占满主区（保留左侧导航栏），再次点击还原。窄屏（≤1000px）为右侧浮层。
+- 顶部标签页：`文件` 列表页 + 每个已打开文件一个标签；同一文件不会重复开标签。
+- 文件列表：单层目录 + 面包屑，目录在前、文件在后；隐藏 `.memory` 与 `.attachments`。
+- 预览格式：代码/纯文本（Prism 高亮 + 行号）、Markdown（预览/源码切换）、HTML / MHTML（sandbox iframe 预览，可切源码）、图片（png/jpg/gif/webp/bmp/svg）；文件工具栏支持一键复制内容与重新加载。
+- 其他二进制/超大文件显示占位说明；文本最多展示 1MB / 5000 行。
+- 关闭全部标签 → 抽屉自动收起；再次打开回到「开始」页。
+- 安全边界：接口严格限制在当前工作区内，`../`、绝对路径与 `.memory` 均被拒绝。
+
+对应后端接口：`/api/workspace/dir`、`/api/workspace/file`、`/api/workspace/raw`、`/api/workspace/asset`。
+
+HTML / MHTML 预览说明：
+
+- `.html` / `.htm` 在 sandbox iframe 中渲染，默认预览，可切源码；相对 CSS / 图片 / JS 通过 `/api/workspace/asset` 加载。
+- `.mht` / `.mhtml` 由后端解析（Python 标准库 `email`），提取主 HTML 与内嵌资源，资源以 `data:` URL 注入预览。
+- iframe 使用 `sandbox="allow-scripts"`：脚本可运行，但没有同源权限，无法访问父页面 DOM / localStorage / cookie。
 
 ---
 
@@ -571,7 +601,7 @@ python -m core --selftest      # 自检
 
 ## 本地测试
 
-**十一个套件，全部不需要 API Key、不花任何费用，约两分钟跑完。**  
+**十三个套件，全部不需要 API Key、不花任何费用，约一分半钟跑完。**  
 完整指南（虚拟环境、四个真实踩坑、环境变量）见 [docs/LOCAL\_TESTING.md](docs/LOCAL_TESTING.md)。
 
 ```bash
@@ -603,20 +633,30 @@ scripts\run_tests.bat --real           # 额外跑真实 API 用例（消耗 tok
 | `tests/test_cancel.py` | 取消机制 10 项：令牌 / 杀进程 / 流中断 / 消息补齐 / 原因送达 |
 | `tests/test_mcp_cancel.py` | MCP 取消通知 8 项：送达 / 停手 / 迟到响应 / 幂等 / 定向 |
 | `tests/test_http_e2e.py` | 本地 mock HTTP（支持 SSE）：流式三条降级路径 + 并行收益 |
-| `tests/test_webui.py` | Web UI 端到端 12 项：SSE 事件序列 / 双模式工具表 / 停止 / 危险确认 / 409 / 工作区 / 模型配置 / 会话搜索 / 通用配置 |
+| `tests/test_webui.py` | Web UI 端到端 13 项：SSE 事件序列 / 双模式工具表 / 停止 / 危险确认 / 409 / 工作区 / 模型配置 / 会话搜索 / 通用配置 / keep-alive 请求体 |
 | `tests/test_sys_monitor.py` | 系统监控插件 8 项：CPU / 内存 / 磁盘 / 网络 / 开机时长 / 端口占用 |
+| `tests/test_memory.py` | 记忆系统 11 项：存储 / 保护区 / 工具不可见 / prelude / shell / 注入 |
+| `tests/test_logging.py` | 文件日志 6 项：按日目录 / 错误聚合 / 幂等重配 / 关闭 / 配置 / 清理 |
+| `tests/test_workbench.py` | 工作台文件接口 9 项：目录 / 安全 / 编码 / 图片 / HTML / MHTML |
 
 实测（`.venv` 内，Windows）：
 
 ```
-  ✓ test_loop.py                12.35s
-  ✓ test_plugins.py             20.45s
-  ✓ test_stream_parallel.py     10.93s
-  ✓ test_cancel.py              13.14s
-  ✓ test_mcp_cancel.py          28.03s
-  ✓ test_http_e2e.py            27.89s
+  ✓ test_loop.py                 1.54s
+  ✓ test_plugins.py              2.16s
+  ✓ test_skills.py               0.22s
+  ✓ test_vision.py               1.40s
+  ✓ test_stream_parallel.py      4.53s
+  ✓ test_cancel.py               6.63s
+  ✓ test_mcp_cancel.py           6.47s
+  ✓ test_http_e2e.py             7.14s
+  ✓ test_webui.py                5.85s
+  ✓ test_sys_monitor.py         43.12s
+  ✓ test_memory.py               2.39s
+  ✓ test_logging.py              0.26s
+  ✓ test_workbench.py            1.61s
 
-  6/6 通过 | 累计耗时 112.8s
+  13/13 通过 | 累计耗时 83.3s
 ```
 
 `tests/test_http_e2e.py` 会用同一个 mock 服务跑四遍，专门验证流式的三条降级路径
@@ -679,17 +719,39 @@ mini-agent/
 │   │                          shell 越界写检测、可取消的 run_process
 │   ├── approval.py           三档确认模式（ask/auto/full）+ request_approval 工具
 │   ├── memory.py             记忆系统：三层存储 / 保护区判定 / 注入渲染 / remember 工具
+│   ├── webui.py              Web UI 服务：stdlib ThreadingHTTPServer + SSE、工作台/会话/设置接口
+│   ├── workspace_config.py   工作区配置：注册表与路径解析（resolve_path）
+│   ├── model_config.py       模型配置：多服务商配置读写与连接测试（web_data/models.json）
+│   ├── settings.py           通用配置：读写 settings.json 并应用到运行时
+│   ├── logging_setup.py      文件日志：按日目录分文件（app/llm/tool/error）、保留清理、幂等重配
+│   ├── mhtml.py              MHTML（.mht/.mhtml）解析：拆出主 HTML 与内嵌资源（data: URL）
 │   ├── python_prelude.py     run_python 写护栏（open/shutil/pathlib/sqlite 等 patch）
 │   ├── cancel.py             取消令牌：CancellationToken / Cancelled / 杀进程树
 │   ├── mcp.py                MCP stdio 客户端（并发安全 + 可取消 + 取消通知）+ 桥接
 │   └── images.py             图片附件通道（view_image 的底层）
-├── plugins/                  自带插件
-│   ├── fs_tools.py           read_file / write_file / list_dir / glob_files / grep
-│   ├── code_tools.py         edit_file（唯一匹配块编辑）/ re_replace / search_symbol /
-│   │                          py_syntax_check / count_code_lines
-│   ├── exec_tools.py         run_shell / run_python
-│   ├── net_tools.py          fetch_url
-│   └── vision_tools.py       view_image（图片输入：按魔数嗅探格式，附件进对话）
+├── plugins/                  自带插件（21 个，按分组）
+│   ├── fs_tools.py           文件系统：read_file / write_file / list_dir / glob_files / grep
+│   ├── file_ops.py           文件操作
+│   ├── code_tools.py         代码辅助：edit_file（唯一匹配块编辑）/ re_replace /
+│   │                          search_symbol / py_syntax_check / count_code_lines
+│   ├── exec_tools.py         命令执行：run_shell / run_python
+│   ├── net_tools.py          网络：fetch_url
+│   ├── net_extra_tools.py    网络增强
+│   ├── web_search.py         联网搜索：web_search（Tavily / 博查 / Bing 兜底）
+│   ├── vision_tools.py       视觉：view_image（图片输入：按魔数嗅探格式，附件进对话）
+│   ├── image_meta_tools.py   图片元信息
+│   ├── data_tools.py         结构化数据
+│   ├── database_tools.py     数据库
+│   ├── archive_tools.py      压缩归档
+│   ├── git_tools.py          Git
+│   ├── hash_tools.py         哈希与编码
+│   ├── random_tools.py       随机与标识
+│   ├── text_extra_tools.py   文本增强
+│   ├── time_tools.py         时间
+│   ├── time_math_tools.py    时间运算
+│   ├── sys_tools.py          系统信息
+│   ├── sys_extra_tools.py    系统增强
+│   └── sys_monitor.py        系统监控：CPU / 内存 / 磁盘 / 网络 / 开机时长 / 端口占用
 ├── plugins_user/             你的插件（含示例 text_tools.py 与开发指南）
 ├── skills/                   自带技能（csv-analysis 示例）
 ├── skills_user/              你的技能（含约定说明，一个目录 + SKILL.md）
@@ -697,7 +759,7 @@ mini-agent/
 │   ├── mcp_servers.json      MCP 配置
 │   └── mcp_demo_server.py    自带 MCP server（now / sha256 / env_info / sleep /
 │                             stubborn_sleep / cancel_log，后两个服务于取消通知测试）
-├── tests/                    十三个套件 + bootstrap.py（共用引导）+ run_tests.py
+├── tests/                    十四套件（13 免费 + 1 真实）+ bootstrap.py（共用引导）+ run_tests.py
 ├── scripts/                  setup_venv.* / run_tests.* / make_demo_case.py
 ├── docs/                     测试指南与历次专题报告
 ├── logs/                     运行日志（按日期分目录：app / llm / tool / error）

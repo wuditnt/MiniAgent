@@ -124,6 +124,47 @@ export interface WorkspaceItem {
   exists: boolean;
 }
 
+/** 工作台：目录条目 */
+export interface WorkspaceEntry {
+  name: string;
+  /** 相对工作区根的路径，统一用 / 分隔 */
+  path: string;
+  type: "dir" | "file";
+  size: number;
+  mtime: number;
+  ext: string;
+}
+
+/** GET /api/workspace/dir */
+export interface WorkspaceDirData {
+  workspace_id: string;
+  root: string;
+  path: string;
+  parent: string;
+  entries: WorkspaceEntry[];
+  truncated: boolean;
+}
+
+/** GET /api/workspace/file */
+export interface WorkspaceFileData {
+  kind: "text" | "image" | "binary" | "unsupported" | "mhtml";
+  name: string;
+  path: string;
+  ext: string;
+  size: number;
+  mtime: number;
+  encoding?: string;
+  content?: string;
+  lines?: number;
+  truncated?: boolean;
+  reason?: string;
+  url?: string;
+  /** MHTML：提取后的主 HTML */
+  html?: string;
+  /** MHTML：资源键 → data URL */
+  resources?: Record<string, string>;
+}
+
 /** 一份「服务商 + 模型」配置（GET /api/models 返回，API Key 已脱敏） */
 export interface ModelProvider {
   id: string;

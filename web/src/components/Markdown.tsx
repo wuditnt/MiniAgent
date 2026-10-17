@@ -55,7 +55,27 @@ function extractText(node: unknown): string {
   return "";
 }
 
-export default function Markdown({ text, workspaceId }: { text: string; workspaceId?: string }) {
+/** 把相对路径（可含 ../）拼到基准目录上，用于工作台里的 Markdown 图片。 */
+function joinRel(dir: string, src: string): string {
+  const out: string[] = [];
+  for (const part of `${dir ? dir + "/" : ""}${src}`.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") out.pop();
+    else out.push(part);
+  }
+  return out.join("/");
+}
+
+export default function Markdown({
+  text,
+  workspaceId,
+  assetBase,
+}: {
+  text: string;
+  workspaceId?: string;
+  /** 工作台文件预览：把 Markdown 里的相对图片路径映射到当前工作区 */
+  assetBase?: { workspaceId: string; dir: string };
+}) {
   return (
     <div className="md">
       <ReactMarkdown
@@ -96,7 +116,13 @@ export default function Markdown({ text, workspaceId }: { text: string; workspac
           img({ src, alt, ...props }) {
             // 本地附件路径 → 走后端 /api/attachment 读取
             let finalSrc = src || "";
-            if (workspaceId && finalSrc.startsWith(".attachments/")) {
+            if (assetBase && finalSrc && !/^(?:[a-z][a-z0-9+.-]*:|\/|#)/i.test(finalSrc)) {
+              // 工作台里的相对图片：映射到 /api/workspace/raw
+              const rel = joinRel(assetBase.dir, finalSrc);
+              finalSrc =
+                `/api/workspace/raw?workspace_id=${encodeURIComponent(assetBase.workspaceId)}` +
+                `&path=${encodeURIComponent(rel)}`;
+            } else if (workspaceId && finalSrc.startsWith(".attachments/")) {
               finalSrc = `/api/attachment?path=${encodeURIComponent(finalSrc)}&workspace=${encodeURIComponent(workspaceId)}`;
             }
             return <img src={finalSrc} alt={alt || ""} {...props} style={{ maxWidth: "100%", borderRadius: 8 }} />;

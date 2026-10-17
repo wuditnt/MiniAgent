@@ -2,8 +2,8 @@
  * 应用编排：模式/联网开关、消息流、SSE 消费、危险确认都在这里。
  * Chat / ModeBar / WelcomePane / ConfirmModal / ToolChain 是纯展示组件。
  */
-import { useEffect, useRef, useState } from "react";
-import { DownOutlined, DeleteOutlined, ExportOutlined, BarChartOutlined, MenuOutlined, SettingOutlined } from "@ant-design/icons";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { DownOutlined, DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, SettingOutlined } from "@ant-design/icons";
 import { Dropdown, Input, message, Modal, Tooltip } from "antd";
 import {
   activateModel,
@@ -42,6 +42,7 @@ import Sidebar from "./components/Sidebar";
 import WorkspaceModal from "./components/WorkspaceModal";
 import SettingsModal from "./components/SettingsModal";
 import type { SettingsTab } from "./components/SettingsModal";
+import Workbench from "./components/Workbench";
 
 const SESSION_KEY = "miniagent.session";
 const MODE_KEY = "miniagent.mode";
@@ -106,6 +107,8 @@ export default function App() {
   const [ws, setWs] = useState<string>(() => localStorage.getItem(WS_KEY) || "default");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  const [wbFullscreen, setWbFullscreen] = useState(false);
   const [statsOpen, setStatsOpen] = useState(false);
   // 搜索命中后要定位闪烁的消息 id
   const [focus, setFocus] = useState<{ id: string; nonce: number } | null>(null);
@@ -582,7 +585,10 @@ export default function App() {
   };
 
   return (
-    <div className="app">
+    <div
+      className={`app ${wbFullscreen ? "wb-fullscreen" : ""}`}
+      style={{ "--sidebar-w": collapsed ? "0px" : "260px" } as CSSProperties}
+    >
       <aside className={`sidebar-fixed ${collapsed ? "collapsed" : ""}`}>
         <Sidebar
           workspaces={workspaces}
@@ -703,6 +709,22 @@ export default function App() {
               </span>
             </Dropdown>
             <ModeBar web={web} state={state} onWeb={setWeb} />
+            {/* 工作台抽屉开关 */}
+            <Tooltip title={workbenchOpen ? "收起工作区" : "工作区文件"}>
+              <span
+                className={`tb-icon-btn ${workbenchOpen ? "active" : ""}`}
+                onClick={() => {
+                  if (workbenchOpen) {
+                    setWorkbenchOpen(false);
+                    setWbFullscreen(false);
+                  } else {
+                    setWorkbenchOpen(true);
+                  }
+                }}
+              >
+                <LayoutOutlined />
+              </span>
+            </Tooltip>
           </div>
         </header>
 
@@ -830,6 +852,16 @@ export default function App() {
           })()}
         </Modal>
       </div>
+
+      <Workbench
+        open={workbenchOpen}
+        workspaceId={ws}
+        onClose={() => {
+          setWorkbenchOpen(false);
+          setWbFullscreen(false);
+        }}
+        onFullscreenChange={setWbFullscreen}
+      />
     </div>
   );
 }

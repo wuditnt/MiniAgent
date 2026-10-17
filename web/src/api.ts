@@ -18,6 +18,8 @@ import type {
   SSEEvent,
   TestResult,
   ToolInfo,
+  WorkspaceDirData,
+  WorkspaceFileData,
   WorkspaceItem,
 } from "./types";
 
@@ -163,6 +165,34 @@ export async function fetchWorkspaces(): Promise<WorkspaceItem[]> {
   const res = await fetch("/api/workspaces");
   if (!res.ok) throw new Error(await readError(res));
   return (await res.json()).workspaces;
+}
+
+// ---------------------------------------------------------- 工作台文件浏览
+
+export async function fetchWorkspaceDir(
+  workspaceId: string,
+  path = ""
+): Promise<WorkspaceDirData> {
+  const qs = new URLSearchParams({ workspace_id: workspaceId, path });
+  const res = await fetch(`/api/workspace/dir?${qs}`);
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function fetchWorkspaceFile(
+  workspaceId: string,
+  path: string
+): Promise<WorkspaceFileData> {
+  const qs = new URLSearchParams({ workspace_id: workspaceId, path });
+  const res = await fetch(`/api/workspace/file?${qs}`);
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/** 图片预览地址（raw 接口只服务图片） */
+export function workspaceRawUrl(workspaceId: string, path: string): string {
+  const qs = new URLSearchParams({ workspace_id: workspaceId, path });
+  return `/api/workspace/raw?${qs}`;
 }
 
 export async function createWorkspace(

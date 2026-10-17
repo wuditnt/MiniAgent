@@ -44,6 +44,11 @@ const EXT_LANG: Record<string, string> = {
   css: "css", yml: "yaml", yaml: "yaml", md: "markdown",
 };
 
+/** 按文件扩展名推断高亮语言（工作台文件预览用）。 */
+export function langFromExt(ext: string): string | undefined {
+  return EXT_LANG[String(ext || "").replace(/^\./, "").toLowerCase()];
+}
+
 /** 参数语义优先：code/command/sql；path 类参数用扩展名兜底。 */
 export function guessLang(tool: string | undefined, key: string, value: string): string | undefined {
   if (key === "code") return tool === "run_shell" ? "powershell" : "python";
@@ -60,9 +65,11 @@ interface Props {
   code: string;
   lang?: string;
   maxHeight?: number;
+  /** 工作台文件预览：显示行号 */
+  showLineNumbers?: boolean;
 }
 
-export default function CodeBlock({ code, lang, maxHeight }: Props) {
+export default function CodeBlock({ code, lang, maxHeight, showLineNumbers }: Props) {
   const style: React.CSSProperties = {
     background: "transparent",
     margin: 0,
@@ -81,6 +88,13 @@ export default function CodeBlock({ code, lang, maxHeight }: Props) {
       language={lang}
       style={oneLight}
       customStyle={style}
+      showLineNumbers={showLineNumbers}
+      lineNumberStyle={{
+        minWidth: "2.6em",
+        paddingRight: "1em",
+        color: "#bbb",
+        userSelect: "none",
+      }}
       codeTagProps={{ style: { fontFamily: "ui-monospace, Consolas, monospace" } }}
     >
       {code}

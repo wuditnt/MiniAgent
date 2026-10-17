@@ -24,7 +24,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from core._paths import ROOT
 from core import logging_setup
@@ -122,6 +122,23 @@ _CONTENT_TYPES = {
     ".woff2": "font/woff2",
     ".txt": "text/plain; charset=utf-8",
 }
+
+# 工作台文件浏览：只读、只允许工作区内
+_TEXT_PREVIEW_BYTES = 1 * 1024 * 1024   # 文本最多读 1MB
+_TEXT_PREVIEW_LINES = 5000              # 最多展示 5000 行
+_DIR_MAX_ENTRIES = 500                  # 目录最多返回 500 项
+_RAW_MAX_BYTES = 20 * 1024 * 1024       # 图片/原始文件上限 20MB
+_HIDDEN_DIRS = frozenset({".memory", ".attachments"})
+_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"})
+
+# 常见文本扩展名：统一按 text/plain 返回，具体高亮交给前端
+for _ext in (
+    ".md", ".markdown", ".csv", ".tsv", ".log", ".yaml", ".yml", ".toml",
+    ".ini", ".cfg", ".conf", ".xml", ".py", ".ts", ".tsx", ".jsx", ".vue",
+    ".c", ".h", ".cpp", ".hpp", ".java", ".go", ".rs", ".rb", ".php",
+    ".bat", ".ps1", ".sh", ".sql",
+):
+    _CONTENT_TYPES.setdefault(_ext, "text/plain; charset=utf-8")
 
 
 # ---------------------------------------------------------------- 会话
@@ -465,6 +482,33 @@ def _resolve_attachments(attachments: list[dict], ws_root: str) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------- 工作台文件浏览
+
+def _workspace_path(workspace_id: str, rel: str) -> tuple[str, str]:
+    """把工作区内的相对路径解析成绝对路径，并做越界/保护区校验。"""
+    from core import memory
+
+    root = os.path.realpath(
+        workspace_config.resolve_path(workspace_id or workspace_config.DEFAULT_ID)
+    )
+    raw = str(rel or "").replace("\\", "/").strip()
+    if raw in ("", "."):
+        ap = root
+    else:
+        if raw.startswith("/") or os.path.isabs(raw):
+            raise ValueError("只支持工作区内的相对路径")
+        ap = os.path.realpath(os.path.join(root, raw))
+    if ap != root and not ap.startswith(root + os.sep):
+        raise PermissionError("路径越界：只能访问当前工作区内的文件")
+    if memory.is_memory_path(ap, root):
+        raise PermissionError(".memory 是系统记忆目录，禁止访问")
+    return root, ap
+
+
+def _posix_rel(path: str, root: str) -> str:
+    return "" if path == root else os.path.relpath(path, root).replace(os.sep, "/")
+
+
 # ---------------------------------------------------------- 会话持久化
 
 def _session_file(sid: str) -> str:
@@ -772,14 +816,49 @@ class _RequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "mini-agent-web/0.1"
 
+    #: 本次请求的 body 是否已从 rfile 读完（keep-alive 下必须保证，见 _drain_body）
+    _body_read = False
+
     # ---------------------------------------------------------- 基础设施
+
+    def handle_one_request(self) -> None:
+        """每个请求开始时重置 body 标记（连接是复用的，状态不能跨请求）。"""
+        self._body_read = False
+        super().handle_one_request()
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002, A003
         # 默认 INFO 级别不落盘（逐请求日志会刷屏）；排查时把 log_level 调到 DEBUG
         _log.debug("http %s %s | %s", getattr(self, "command", "?"),
                    getattr(self, "path", "?"), format % args)
 
+    def _drain_body(self) -> None:
+        """消费掉处理函数没读的请求体。
+
+        为什么必须：protocol_version 是 HTTP/1.1（keep-alive），连接会被复用。
+        处理函数只用了路径参数、没读 body 时（如 POST /api/models/<id>/activate），
+        残留字节会被当成下一个请求的请求行，后续请求直接 400 / 错位 ——
+        前端表现就是「点一下按钮，列表突然空了」。
+        """
+        if self._body_read:
+            return
+        self._body_read = True
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return
+        if length > MAX_BODY:
+            # 超限不读，直接断开连接，避免残留字节污染后续请求
+            self.close_connection = True
+            return
+        try:
+            self.rfile.read(length)
+        except OSError:
+            self.close_connection = True
+
     def _json(self, obj, status: int = 200) -> None:
+        self._drain_body()
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -792,11 +871,17 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self._json({"error": message}, status)
 
     def _read_body(self) -> dict | None:
+        if self._body_read:
+            return None
+        self._body_read = True
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             return None
-        if length <= 0 or length > MAX_BODY:
+        if length <= 0:
+            return None
+        if length > MAX_BODY:
+            self.close_connection = True
             return None
         try:
             data = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -845,6 +930,14 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_memory_get(parse_qs(parsed.query))
         elif route == "/api/tools":
             self._handle_tools_list()
+        elif route == "/api/workspace/dir":
+            self._handle_workspace_dir(parse_qs(parsed.query))
+        elif route == "/api/workspace/file":
+            self._handle_workspace_file(parse_qs(parsed.query))
+        elif route == "/api/workspace/raw":
+            self._handle_workspace_raw(parse_qs(parsed.query))
+        elif (m := re.match(r"^/api/workspace/asset/([^/]+)/(.+)$", route)):
+            self._handle_workspace_asset(m.group(1), unquote(m.group(2)))
         elif route == "/api/attachment":
             self._handle_attachment_serve(parse_qs(parsed.query))
         else:
@@ -1484,6 +1577,251 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    # ---------------------------------------------------------- 工作台文件浏览
+
+    def _handle_workspace_dir(self, params: dict) -> None:
+        wid = (params.get("workspace_id") or [workspace_config.DEFAULT_ID])[0]
+        rel = (params.get("path") or [""])[0]
+        try:
+            root, ap = _workspace_path(wid, rel)
+        except ValueError as e:
+            self._fail(400, str(e))
+            return
+        except PermissionError as e:
+            self._fail(403, str(e))
+            return
+        if not os.path.isdir(ap):
+            self._fail(404, "目录不存在")
+            return
+
+        entries: list[dict] = []
+        truncated = False
+        try:
+            with os.scandir(ap) as it:
+                for entry in it:
+                    if len(entries) >= _DIR_MAX_ENTRIES:
+                        truncated = True
+                        break
+                    try:
+                        is_dir = entry.is_dir()
+                        is_file = entry.is_file()
+                    except OSError:
+                        continue
+                    if not is_dir and not is_file:
+                        continue
+                    if is_dir and entry.name in _HIDDEN_DIRS:
+                        continue
+                    # 指向工作区外的符号链接不展示，避免点开才发现 403
+                    if entry.is_symlink():
+                        real = os.path.realpath(entry.path)
+                        if real != root and not real.startswith(root + os.sep):
+                            continue
+                    try:
+                        st = entry.stat()
+                    except OSError:
+                        continue
+                    entries.append({
+                        "name": entry.name,
+                        "path": _posix_rel(os.path.realpath(entry.path), root),
+                        "type": "dir" if is_dir else "file",
+                        "size": 0 if is_dir else st.st_size,
+                        "mtime": st.st_mtime,
+                        "ext": "" if is_dir else os.path.splitext(entry.name)[1].lower(),
+                    })
+        except OSError as e:
+            self._fail(500, f"读取目录失败：{e}")
+            return
+
+        entries.sort(key=lambda x: (x["type"] != "dir", x["name"].lower()))
+        rel_path = _posix_rel(ap, root)
+        parent = "/".join(rel_path.split("/")[:-1]) if rel_path else ""
+        self._json({
+            "workspace_id": wid,
+            "root": root,
+            "path": rel_path,
+            "parent": parent,
+            "entries": entries,
+            "truncated": truncated,
+        })
+
+    def _handle_workspace_file(self, params: dict) -> None:
+        wid = (params.get("workspace_id") or [workspace_config.DEFAULT_ID])[0]
+        rel = (params.get("path") or [""])[0]
+        try:
+            root, ap = _workspace_path(wid, rel)
+        except ValueError as e:
+            self._fail(400, str(e))
+            return
+        except PermissionError as e:
+            self._fail(403, str(e))
+            return
+        if not os.path.isfile(ap):
+            self._fail(404, "文件不存在")
+            return
+
+        name = os.path.basename(ap)
+        ext = os.path.splitext(name)[1].lower()
+        rel_path = _posix_rel(ap, root)
+        try:
+            st = os.stat(ap)
+        except OSError as e:
+            self._fail(500, f"读取文件信息失败：{e}")
+            return
+        base = {
+            "name": name,
+            "path": rel_path,
+            "ext": ext,
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+        }
+
+        if ext in _IMAGE_EXTS:
+            if st.st_size > _RAW_MAX_BYTES:
+                self._json({**base, "kind": "unsupported",
+                            "reason": f"图片超过 {_RAW_MAX_BYTES // (1024 * 1024)}MB，暂不预览"})
+                return
+            url = (
+                f"/api/workspace/raw?workspace_id={quote(wid)}"
+                f"&path={quote(rel_path)}"
+            )
+            self._json({**base, "kind": "image", "url": url})
+            return
+
+        if ext in (".mht", ".mhtml"):
+            if st.st_size > _RAW_MAX_BYTES:
+                self._json({**base, "kind": "unsupported",
+                            "reason": f"归档超过 {_RAW_MAX_BYTES // (1024 * 1024)}MB，暂不预览"})
+                return
+            try:
+                with open(ap, "rb") as f:
+                    archive = f.read()
+                from core.mhtml import parse_mhtml
+
+                html, resources = parse_mhtml(archive, name)
+            except Exception as e:  # noqa: BLE001 —— 损坏归档降级为不支持
+                self._json({**base, "kind": "unsupported",
+                            "reason": f"MHTML 解析失败：{e}"})
+                return
+            self._json({
+                **base,
+                "kind": "mhtml",
+                "html": html,
+                "resources": resources,
+            })
+            return
+
+        if st.st_size > _RAW_MAX_BYTES:
+            self._json({**base, "kind": "unsupported",
+                        "reason": f"文件超过 {_RAW_MAX_BYTES // (1024 * 1024)}MB，暂不预览"})
+            return
+
+        try:
+            with open(ap, "rb") as f:
+                data = f.read(_TEXT_PREVIEW_BYTES + 1)
+        except OSError as e:
+            self._fail(500, f"读取文件失败：{e}")
+            return
+
+        truncated = len(data) > _TEXT_PREVIEW_BYTES
+        if truncated:
+            data = data[:_TEXT_PREVIEW_BYTES]
+            # 尽量在换行处截断，避免把多字节字符切成乱码
+            cut = data.rfind(b"\n")
+            if cut > _TEXT_PREVIEW_BYTES // 2:
+                data = data[:cut]
+
+        from core.sandbox import decode_bytes, looks_binary
+
+        if looks_binary(data):
+            self._json({**base, "kind": "binary",
+                        "reason": "二进制文件，暂不支持预览"})
+            return
+
+        text, encoding = decode_bytes(data)
+        lines = text.splitlines()
+        if len(lines) > _TEXT_PREVIEW_LINES:
+            lines = lines[:_TEXT_PREVIEW_LINES]
+            truncated = True
+        self._json({
+            **base,
+            "kind": "text",
+            "encoding": encoding,
+            "content": "\n".join(lines),
+            "lines": len(lines),
+            "truncated": truncated,
+        })
+
+    def _handle_workspace_raw(self, params: dict) -> None:
+        wid = (params.get("workspace_id") or [workspace_config.DEFAULT_ID])[0]
+        rel = (params.get("path") or [""])[0]
+        try:
+            _root, ap = _workspace_path(wid, rel)
+        except ValueError as e:
+            self._fail(400, str(e))
+            return
+        except PermissionError as e:
+            self._fail(403, str(e))
+            return
+        ext = os.path.splitext(ap)[1].lower()
+        if ext not in _IMAGE_EXTS:
+            self._fail(403, "raw 接口只用于图片预览")
+            return
+        if not os.path.isfile(ap):
+            self._fail(404, "文件不存在")
+            return
+        try:
+            size = os.path.getsize(ap)
+            if size > _RAW_MAX_BYTES:
+                self._fail(413, "图片过大，暂不预览")
+                return
+            with open(ap, "rb") as f:
+                data = f.read()
+        except OSError:
+            self._fail(500, "读取失败")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", _CONTENT_TYPES.get(ext, "application/octet-stream"))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _handle_workspace_asset(self, workspace_id: str, rel: str) -> None:
+        """HTML 预览的静态资源：按路径读取工作区内任意文件。
+
+        为什么用路径而不是 query：预览会注入 `<base href="/api/workspace/asset/<wid>/<dir>/">`，
+        相对 URL（含 CSS 内部的 url(...)）才能被浏览器自然解析。
+        """
+        try:
+            _root, ap = _workspace_path(workspace_id, rel)
+        except ValueError as e:
+            self._fail(400, str(e))
+            return
+        except PermissionError as e:
+            self._fail(403, str(e))
+            return
+        if not os.path.isfile(ap):
+            self._fail(404, "文件不存在")
+            return
+        try:
+            size = os.path.getsize(ap)
+            if size > _RAW_MAX_BYTES:
+                self._fail(413, "文件过大，暂不加载")
+                return
+            with open(ap, "rb") as f:
+                data = f.read()
+        except OSError:
+            self._fail(500, "读取失败")
+            return
+        ext = os.path.splitext(ap)[1].lower()
+        self.send_response(200)
+        self.send_header("Content-Type", _CONTENT_TYPES.get(ext, "application/octet-stream"))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)
 
