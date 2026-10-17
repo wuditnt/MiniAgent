@@ -39,6 +39,7 @@ Web UI 开关（配合 --web）：
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from typing import TYPE_CHECKING, Any
@@ -300,6 +301,8 @@ def _build_agent(
         stream=False if args.no_stream else None,
         parallel_tools=False if args.no_parallel else None,
         max_workers=args.workers,
+        # 控制台交互共用一条长期会话记忆；一次性 -p 模式在运行前置空
+        session_id="repl",
     )
     return agent, DEFAULT_SYSTEM_PROMPT
 
@@ -309,6 +312,8 @@ def _run_prompt_once(agent: Agent, prompt: str, mcp_manager: MCPManager | None) 
     from core.cancel import Cancelled
 
     cancels_before = mcp_manager.cancel_stats()["cancellations"] if mcp_manager else 0
+    # 一次性脚本模式不沉淀主题摘要，也不触发额外提炼调用
+    agent.session_id = None
     try:
         answer = agent.run(prompt)
     except Cancelled as e:
@@ -328,6 +333,10 @@ def _run_prompt_once(agent: Agent, prompt: str, mcp_manager: MCPManager | None) 
     if not agent.last_answer_streamed:
         _safe_print(answer)
     u = agent.usage
+    logging.getLogger("mini-agent.app").info(
+        "prompt.done llm_calls=%d tool_calls=%d tokens=%d",
+        u["llm_calls"], u["tool_calls"], u["total_tokens"],
+    )
     print(
         f"\n[统计] LLM 调用 {u['llm_calls']} 次 | 工具调用 {u['tool_calls']} 次 | "
         f"tokens 输入 {u['prompt_tokens']} + 输出 {u['completion_tokens']} = {u['total_tokens']}",
@@ -391,6 +400,7 @@ def _run_web(
             max_turns=args.max_turns,
         )
     except OSError as e:
+        logging.getLogger("mini-agent.app").exception("Web UI 启动失败：%s", e)
         print(f"错误：Web UI 启动失败（{e}）。端口 {args.port} 可能已被占用。", file=sys.stderr)
         return 1
     finally:
@@ -411,6 +421,18 @@ def main() -> int:
 
     settings.apply_to_runtime()
 
+    # 文件日志已由 apply_to_runtime → logging_setup.reconfigure() 按配置初始化
+    from core import logging_setup
+    from core.sandbox import workspace as _workspace
+
+    _app_log = logging_setup.get_logger("app")
+    _mode = "web" if args.web else ("prompt" if args.prompt else "console")
+    _app_log.info(
+        "启动 mode=%s workspace=%s model=%s host=%s port=%s",
+        _mode, _workspace(), os.environ.get("OPENAI_MODEL") or "(默认)",
+        args.host, args.port,
+    )
+
     # ---- 只读子命令：看完就走，不需要模型 ----
     if args.tools or args.selftest:
         return _cmd_list_tools(selftest=args.selftest)
@@ -428,6 +450,7 @@ def main() -> int:
 
     # ---- 以下需要模型 ----
     if not os.environ.get("OPENAI_API_KEY"):
+        _app_log.warning("未设置 OPENAI_API_KEY，已中止启动")
         print(
             "错误：未设置 OPENAI_API_KEY。请复制 .env.example 为 .env 并填写，或直接导出环境变量。",
             file=sys.stderr,

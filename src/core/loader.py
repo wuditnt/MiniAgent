@@ -16,9 +16,12 @@ import sys
 import traceback
 from dataclasses import dataclass, field
 
+from core.logging_setup import get_logger
 from core.registry import REGISTRY, Tool, ToolRegistry, use_registry
 
 DEFAULT_PLUGIN_DIRS = ("plugins", "plugins_user")
+
+_log = get_logger("app")
 
 
 def default_dirs() -> list[str]:
@@ -149,6 +152,7 @@ class PluginLoader:
             tb = traceback.format_exc().strip().splitlines()
             report.failed[module_name] = f"{type(e).__name__}: {e}"
             self._last_traceback = "\n".join(tb)
+            _log.error("plugin.load_failed module=%s\n%s", module_name, self._last_traceback)
 
     # ------------------------------------------------------------ 热重载
 

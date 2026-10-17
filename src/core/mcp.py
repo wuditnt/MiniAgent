@@ -44,7 +44,10 @@ import time
 from dataclasses import dataclass, field
 
 from core.cancel import Cancelled, current_token
+from core.logging_setup import get_logger
 from core.registry import Tool, ToolRegistry
+
+_log = get_logger("app")
 
 PROTOCOL_VERSION = "2024-11-05"
 CLIENT_NAME = "mini-agent"
@@ -559,10 +562,13 @@ class MCPManager:
             except MCPError as e:
                 state.status = "failed"
                 state.error = str(e)
+                _log.error("mcp.start_failed name=%s error=%s stderr=%s",
+                           name, state.error, " / ".join(client.stderr_tail())[:400])
                 client.stop()
             except Exception as e:  # noqa: BLE001
                 state.status = "failed"
                 state.error = f"{type(e).__name__}: {e}"
+                _log.exception("mcp.start_crashed name=%s", name)
                 client.stop()
 
             report.servers[name] = state

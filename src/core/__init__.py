@@ -86,6 +86,10 @@ from .schema import (  # noqa: E402,F401
     schema_from_callable,
     summary,
 )
+from .memory import (  # noqa: E402,F401
+    MEMORY_DIRNAME,
+    is_memory_path,
+)
 
 __all__ = [
     # 包
@@ -105,4 +109,6 @@ __all__ = [
     "attach_image", "take_images",
     # Schema
     "schema_from_callable", "param_docs", "json_type", "summary",
+    # 记忆保护区
+    "is_memory_path", "MEMORY_DIRNAME",
 ]

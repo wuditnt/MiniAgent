@@ -26,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from core._paths import ROOT
+from core import logging_setup
 from core import model_config
 from core import settings
 from core import workspace_config
@@ -42,34 +43,18 @@ MAX_UPLOAD_BYTES = 24 * 1024 * 1024   # 单个附件解码后上限
 MAX_ATTACHMENT_TEXT = 8000     # 文本附件注入消息的内容节选上限（字符）
 ATTACH_DIR = ".attachments"    # 工作区内附件存放子目录
 
-# 远程访问控制：服务按 0.0.0.0 监听（手机/局域网可访问），但只有本机能改主机侧配置。
-# 判定依据是 TCP 对端地址 —— 回环地址视为本机，其余一律视为远程。
+# 远程访问识别：判定依据是 TCP 对端地址 —— 回环地址视为本机，其余视为远程。
+# 该标志目前仅用于 /api/state → 前端侧栏隐藏工作区管理入口（软性收窄）；
+# 接口层面不拦截，远程仍可完整使用包括设置在内的全部功能。多用户权限体系后续再议。
 _LOCAL_CLIENTS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1"})
-
-# 远程禁用清单（method, 路由正则）：
-# · 工作区增删改 / 弹目录框 —— 等于重定向沙箱锚点、把任意主机目录挂进沙箱，
-#   且原生目录框会弹在主机屏幕上卡住请求
-# · 模型配置增删改 / 切换 / 连通测试 —— 涉及 API Key 与全局生效配置
-# · 通用设置保存 —— 含沙箱读取策略，远程把 sandbox_read 改成 open 等于放开全区读取
-# 聊天 / 确认 / 停止 / 会话管理 / 所有 GET 不受限，保证远程正常使用。
-_REMOTE_BLOCKED = tuple(
-    (method, re.compile(pattern)) for method, pattern in [
-        ("POST", r"^/api/workspaces(?:/pick)?$"),
-        ("PUT", r"^/api/workspaces/[^/]+$"),
-        ("DELETE", r"^/api/workspaces/[^/]+$"),
-        ("POST", r"^/api/models(?:/test)?$"),
-        ("POST", r"^/api/models/[^/]+/(?:test|activate)$"),
-        ("PUT", r"^/api/models/[^/]+$"),
-        ("DELETE", r"^/api/models/[^/]+$"),
-        ("PUT", r"^/api/settings$"),
-    ]
-)
 
 _DIST = os.path.join(ROOT, "web", "dist")
 _SESSIONS_DIR = os.path.join(ROOT, "web_data", "sessions")  # 会话持久化目录
 
 # 原生文件夹选择框一次只允许弹一个（多个 Tk 实例并发会互相干扰）
 _PICK_LOCK = threading.Lock()
+
+_log = logging_setup.get_logger("app")
 
 
 def pick_folder_dialog() -> str | None:
@@ -182,6 +167,7 @@ class _Session:
                 registry=REGISTRY,        # 每条消息会按模式重建
                 ui=None,
                 approval_mode="ask",      # 网页端默认「按需询问」；逐轮可由前端切换
+                session_id=self.id,       # 主题摘要按会话 id 落到工作区 .memory/topics/
             )
             self.agent.ui = WebUI(self)
             self._inject_history()          # 从磁盘恢复历史消息
@@ -407,11 +393,20 @@ def _session_registry(mode: str, web: bool, approval: str = "ask"):
     """
     from core.registry import REGISTRY, ToolRegistry
 
+    # 记忆总开关关闭时，remember 工具也不进会话工具表（模型看不到就不会调）
+    try:
+        from core import settings
+        memory_on = bool(settings.get("memory_enabled"))
+    except Exception:  # noqa: BLE001
+        memory_on = True
+
     reg = ToolRegistry()
     for t in REGISTRY.all():
         if mode == "chat" and not (web and t.name == "web_search"):
             continue
         if t.name == "request_approval" and approval != "auto":
+            continue
+        if t.name == "remember" and not memory_on:
             continue
         reg.add(t)
     return reg
@@ -543,6 +538,102 @@ def _snippet(text: str, pos: int, width: int = 60) -> str:
     return ("…" if start > 0 else "") + text[start:end] + ("…" if end < len(text) else "")
 
 
+def _user_text(content: object) -> str:
+    """多模态 user 消息（content 数组）只取文本分片；普通字符串原样。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            p.get("text", "")
+            for p in content
+            if isinstance(p, dict) and p.get("type") == "text"
+        )
+    return ""
+
+
+def _display_items(raw: list[dict]) -> list[dict]:
+    """原始消息序列 → 前端展示项（历史回放 / 搜索 / keep 截断三处共用，保证索引口径一致）。
+
+    ReAct 一轮里模型可能多次产出 assistant 文本（边解释边调工具，中间夹着
+    tool 角色消息）。这些属于「同一次回复」，必须合并为一个展示气泡，否则
+    刷新/切换会话后一条回答会裂成多个气泡、挂多个小工具栏。
+
+    分组规则：
+      · 每条 user 消息一个展示项；
+      · 相邻的 assistant/tool 消息（直到下一条 user）合并为一个 assistant 项，
+        各段文本用空行连接；用量/耗时取最后一个带统计的段（worker 挂在轮末回答）。
+
+    每个展示项附带 "_end"：该项在 raw 中的最后下标，供 keep 截断映射回原始序列。
+    """
+    items: list[dict] = []
+    n = len(raw)
+    i = 0
+    while i < n:
+        role = raw[i].get("role")
+        if role == "user":
+            text = _user_text(raw[i].get("content"))
+            if text:
+                item: dict = {"role": "user", "content": text, "_end": i}
+                atts = raw[i].get("_attachments") or raw[i].get("attachments")
+                if atts:
+                    item["attachments"] = atts
+                items.append(item)
+            i += 1
+        elif role in ("assistant", "tool"):
+            segs: list[str] = []
+            stats_src: dict | None = None
+            j = i
+            while j < n and raw[j].get("role") in ("assistant", "tool"):
+                seg = raw[j]
+                if seg.get("role") == "assistant":
+                    c = seg.get("content")
+                    if isinstance(c, str) and c:
+                        segs.append(c)
+                    if seg.get("_stats") or seg.get("usage") is not None:
+                        stats_src = seg
+                j += 1
+            if segs:
+                item = {"role": "assistant", "content": "\n\n".join(segs), "_end": j - 1}
+                if stats_src is not None:
+                    usage = stats_src.get("usage") or (stats_src.get("_stats") or {}).get("usage")
+                    sec = stats_src.get("sec")
+                    if sec is None:
+                        sec = (stats_src.get("_stats") or {}).get("sec")
+                    if usage:
+                        item["usage"] = usage
+                    if sec is not None:
+                        item["sec"] = sec
+                items.append(item)
+            i = j
+        else:
+            i += 1
+    return items
+
+
+def _keep_slice(raw: list[dict], keep: int) -> list[dict] | None:
+    """按「展示气泡」口径保留前 keep 项，映射回原始消息切片。
+
+    keep 与前端历史展示项一一对应（同一轮的多段 assistant 合并为一项），
+    这样重新生成 / 编辑重发时前端传的下标才能准确切到轮边界。
+    返回 None 表示 keep 超出当前消息数。
+    """
+    if keep == 0:
+        return []
+    disp = _display_items(raw)
+    if keep > len(disp):
+        return None
+    cut = disp[keep - 1]["_end"]
+    kept = raw[: cut + 1]
+    # 协议补齐：若切点恰好是带 tool_calls 的 assistant，把后续 tool 回复一并带上，
+    # 否则 OpenAI 协议校验会拒绝（每个 tool_call 必须有对应 tool 消息）
+    if raw[cut].get("role") == "assistant" and raw[cut].get("tool_calls"):
+        j = cut + 1
+        while j < len(raw) and raw[j].get("role") == "tool":
+            kept.append(raw[j])
+            j += 1
+    return kept
+
+
 def _match_terms(title: str, msgs: list[str], terms: list[str]):
     """多词 AND 匹配：所有词都出现在标题或正文里才算命中。
 
@@ -567,6 +658,34 @@ def _match_terms(title: str, msgs: list[str], terms: list[str]):
 
 
 # ---------------------------------------------------------------- HTTP 服务
+
+def _lan_addresses() -> list[str]:
+    """本机非回环 IPv4 地址列表，出口网卡优先（用于打印「远程访问」地址）。
+
+    拿出口 IP 用 UDP connect：不真正发包，只让内核选出默认路由的网卡；
+    再用 getaddrinfo 补上其他网卡（多网卡/虚拟网卡环境），去重保序。
+    """
+    out: list[str] = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                out.append(ip)
+        finally:
+            s.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if not ip.startswith("127.") and ip not in out:
+                out.append(ip)
+    except OSError:
+        pass
+    return out
+
 
 class WebServer:
     """HTTP 服务外壳：装配 handler、会话表与静态托管。"""
@@ -619,7 +738,19 @@ class WebServer:
 
         self._httpd = ThreadingHTTPServer((self.host, self.port), _Handler)
         self._httpd.daemon_threads = True
-        print(f"Web UI 已启动：http://{self.host}:{self.port}")
+        _log.info("web.listen host=%s port=%d", self.host, self.port)
+        # 绑通配地址时，0.0.0.0 不是能点的 URL —— 本机用回环，局域网地址单独列出来
+        if self.host in ("0.0.0.0", "::", ""):
+            print(f"Web UI 已启动（本机）：http://127.0.0.1:{self.port}")
+            lans = _lan_addresses()
+            if lans:
+                print(f"远程访问：http://{lans[0]}:{self.port}")
+                for ip in lans[1:]:
+                    print(f"          http://{ip}:{self.port}")
+            else:
+                print("远程访问：未检测到局域网 IP（检查网络连接）")
+        else:
+            print(f"Web UI 已启动：http://{self.host}:{self.port}")
         print("生产模式需先构建前端：cd web && npm run build（开发模式见 README）")
         try:
             self._httpd.serve_forever()
@@ -643,7 +774,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
     # ---------------------------------------------------------- 基础设施
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003
-        pass    # 静默：本地单用户，逐请求日志只会刷屏
+        # 默认 INFO 级别不落盘（逐请求日志会刷屏）；排查时把 log_level 调到 DEBUG
+        _log.debug("http %s %s", getattr(self, "command", "?"), getattr(self, "path", "?"))
 
     def _json(self, obj, status: int = 200) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -654,6 +786,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _fail(self, status: int, message: str) -> None:
+        _log.warning("api.fail status=%d route=%s message=%s", status, self.path, message)
         self._json({"error": message}, status)
 
     def _read_body(self) -> dict | None:
@@ -691,16 +824,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
         """TCP 对端不是回环地址即为远程客户端（手机/局域网其他设备）。"""
         return self.client_address[0] not in _LOCAL_CLIENTS
 
-    def _guard_remote(self, route: str) -> bool:
-        """远程客户端禁用主机配置类接口；命中时回 403 并返回 True。"""
-        if not self._is_remote():
-            return False
-        for method, pattern in _REMOTE_BLOCKED:
-            if method == self.command and pattern.match(route):
-                self._fail(403, "远程访问模式：该操作涉及主机配置，请在本机进行")
-                return True
-        return False
-
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         route = parsed.path
@@ -716,6 +839,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_models_list()
         elif route == "/api/settings":
             self._handle_settings_get()
+        elif route == "/api/memory":
+            self._handle_memory_get(parse_qs(parsed.query))
         elif route == "/api/tools":
             self._handle_tools_list()
         elif route == "/api/attachment":
@@ -725,8 +850,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         route = urlparse(self.path).path
-        if self._guard_remote(route):
-            return
         if route == "/api/chat":
             self._handle_chat()
         elif route == "/api/upload":
@@ -756,10 +879,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:  # noqa: N802
         route = urlparse(self.path).path
-        if self._guard_remote(route):
-            return
         if route == "/api/settings":
             self._handle_settings_put()
+            return
+        if route == "/api/memory":
+            self._handle_memory_put()
             return
         m = re.match(r"^/api/sessions/([^/]+)$", route)
         if m:
@@ -777,7 +901,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         route = urlparse(self.path).path
-        if self._guard_remote(route):
+        if route == "/api/memory/topic":
+            self._handle_memory_topic_delete()
             return
         m = re.match(r"^/api/sessions/([^/]+)$", route)
         if m:
@@ -844,34 +969,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
             src = session.agent.messages[1:]          # [0] 是 system
         else:
             src = (_load_session_file(sid) or {}).get("messages", [])
-        messages: list[dict] = []
-        for m in src:
-            role, content = m.get("role"), m.get("content")
-            # 多模态用户消息（content 数组）只回放文本分片；图片由附件元数据另行渲染
-            if isinstance(content, list):
-                content = "".join(
-                    p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
-                )
-            if role == "user" and isinstance(content, str) and content:
-                item = {"role": "user", "content": content}
-                # 附件元数据：内存消息在 _attachments 里，磁盘消息是 attachments 内联
-                atts = m.get("_attachments") or m.get("attachments")
-                if atts:
-                    item["attachments"] = atts
-                messages.append(item)
-            elif role == "assistant" and isinstance(content, str) and content:
-                item = {"role": "assistant", "content": content}
-                # 用量/耗时：内存消息在 _stats 里，磁盘消息是内联字段
-                usage = m.get("usage") or (m.get("_stats") or {}).get("usage")
-                sec = m.get("sec")
-                if sec is None:
-                    sec = (m.get("_stats") or {}).get("sec")
-                if usage:
-                    item["usage"] = usage
-                if sec is not None:
-                    item["sec"] = sec
-                messages.append(item)
-            # tool 消息与无正文的 tool_calls 消息不回放：轨迹只在实时事件里展示
+        # 同一轮 ReAct 的多个 assistant 文本段合并成一个气泡（_end 是内部字段，不外发）
+        messages = [
+            {k: v for k, v in it.items() if k != "_end"}
+            for it in _display_items(src)
+        ]
         self._json({"session": sid, "messages": messages})
 
     def _handle_sessions_list(self, params: dict) -> None:
@@ -892,7 +994,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 data = _load_session_file(it["id"])
                 if not data:
                     continue
-                msgs = [str(m.get("content") or "") for m in data.get("messages", [])]
+                # 索引口径必须与历史回放一致（同一轮多段 assistant 已合并），
+                # 否则 hit_index 定位会错位
+                msgs = [d["content"] for d in _display_items(data.get("messages", []))]
                 matched = _match_terms(it["title"], msgs, terms)
                 if matched is None:
                     continue
@@ -918,11 +1022,26 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self._json({"id": sid, "title": "新对话", "workspace_id": wid})
 
     def _handle_session_delete(self, sid: str) -> None:
-        """删除一个会话（磁盘文件 + 内存）。"""
+        """删除一个会话（磁盘文件 + 内存 + 对应主题摘要）。"""
         sid = sid[:64]
+        # 先解析工作区（内存对象优先，否则读磁盘），用于删掉 .memory/topics 下的摘要
+        wid = "default"
+        sess = self.web.sessions.get(sid)
+        if sess is not None:
+            wid = sess.workspace_id or "default"
+        else:
+            data = _load_session_file(sid)
+            if data:
+                wid = data.get("workspace_id") or "default"
         with self.web._lock:
             self.web.sessions.pop(sid, None)
         ok = _delete_session_file(sid)
+        # 摘要清理失败不阻断会话删除（记忆是衍生物）
+        try:
+            from core import memory
+            memory.delete_topic(sid, workspace_config.resolve_path(wid))
+        except Exception:  # noqa: BLE001
+            pass
         if ok:
             self._json({"ok": True})
         else:
@@ -943,30 +1062,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
         session = self.web.session(sid)
         # 内存优先（含最新态），否则从磁盘恢复后再改
         if session.agent is not None:
-            # agent.messages[0] = system，之后是 user/assistant/tool 交替
-            msgs = session.agent.messages[1:]
-            if keep == 0:
-                kept = []
-            else:
-                count = 0
-                cut = -1
-                for i, m in enumerate(msgs):
-                    if m.get("role") in ("user", "assistant"):
-                        count += 1
-                        if count >= keep:
-                            cut = i
-                            break
-                if cut < 0:
-                    self._fail(400, "keep 超出当前消息数量")
-                    return
-                kept = msgs[: cut + 1]
-                # 若截断点是带 tool_calls 的 assistant，把它后续的 tool 回复一并保留，
-                # 否则 OpenAI 协议校验会拒绝（每个 tool_call 必须有对应 tool 消息）
-                if msgs[cut].get("role") == "assistant" and msgs[cut].get("tool_calls"):
-                    j = cut + 1
-                    while j < len(msgs) and msgs[j].get("role") == "tool":
-                        kept.append(msgs[j])
-                        j += 1
+            # keep 按前端展示气泡计数：同一轮多段 assistant 合并为一项
+            msgs = session.agent.messages[1:]   # [0] 是 system
+            kept = _keep_slice(msgs, keep)
+            if kept is None:
+                self._fail(400, "keep 超出当前消息数量")
+                return
             session.agent.messages = session.agent.messages[:1] + kept
             session.save()
         else:
@@ -974,20 +1075,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if data is None:
                 self._fail(404, "会话不存在")
                 return
-            if keep == 0:
-                kept = []
-            else:
-                kept = []
-                count = 0
-                for m in data.get("messages", []):
-                    if m.get("role") in ("user", "assistant"):
-                        count += 1
-                        kept.append(m)
-                        if count >= keep:
-                            break
-                else:
-                    self._fail(400, "keep 超出当前消息数量")
-                    return
+            kept = _keep_slice(data.get("messages", []), keep)
+            if kept is None:
+                self._fail(400, "keep 超出当前消息数量")
+                return
             data["messages"] = kept
             _save_session_file(sid, data)
         self._json({"ok": True, "keep": keep})
@@ -1234,6 +1325,83 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.web.reset_agents()
         self._json({"values": settings.get_all(), "defaults": settings.defaults()})
 
+    # ------------------------------------------------------------ 记忆管理
+
+    def _handle_memory_get(self, params: dict) -> None:
+        """读取三层记忆：?workspace_id=xxx（缺省=默认工作区）。
+
+        返回用户画像全文、当前项目记忆全文与真实磁盘路径、主题摘要列表（含正文）。
+        记忆是用户自己的数据，远程访问同样可读写（多用户鉴权未来统一接入）。
+        """
+        from core import memory
+
+        wid = (params.get("workspace_id") or ["default"])[0]
+        try:
+            ws_root = workspace_config.resolve_path(wid)
+        except Exception:  # noqa: BLE001
+            self._fail(400, "工作区不存在")
+            return
+        topics = []
+        for it in memory.list_topics(ws_root):
+            topics.append({
+                "session": it["session"],
+                "mtime": it["mtime"],
+                "mtime_text": time.strftime("%Y-%m-%d %H:%M", time.localtime(it["mtime"])),
+                "size": it["size"],
+                "content": memory.load_topic(it["session"], ws_root),
+            })
+        self._json({
+            "user_profile": memory.load_user_profile(),
+            "user_profile_path": memory.user_profile_path(),
+            "project": memory.load_project(ws_root),
+            "project_path": memory.project_path(ws_root),
+            "workspace_root": ws_root,
+            "topics": topics,
+        })
+
+    def _handle_memory_put(self) -> None:
+        """保存手工编辑的记忆：{scope: user|project, content, workspace_id?}。"""
+        from core import memory
+
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON")
+            return
+        scope = str(body.get("scope") or "").strip()
+        content = str(body.get("content") or "")
+        if scope not in ("user", "project"):
+            self._fail(400, "scope 只能是 user / project")
+            return
+        try:
+            if scope == "user":
+                memory.save_user_profile(content)
+            else:
+                wid = str(body.get("workspace_id") or "default")
+                ws_root = workspace_config.resolve_path(wid)
+                memory.save_project(content, ws_root)
+        except Exception as e:  # noqa: BLE001
+            self._fail(500, f"保存失败：{e}")
+            return
+        self._json({"ok": True})
+
+    def _handle_memory_topic_delete(self) -> None:
+        """删除一条主题摘要：{session, workspace_id?}。"""
+        from core import memory
+
+        body = self._read_body() or {}
+        sid = str(body.get("session") or "")[:80]
+        if not sid:
+            self._fail(400, "缺少 session")
+            return
+        wid = str(body.get("workspace_id") or "default")
+        try:
+            ws_root = workspace_config.resolve_path(wid)
+            memory.delete_topic(sid, ws_root)
+        except Exception as e:  # noqa: BLE001
+            self._fail(500, f"删除失败：{e}")
+            return
+        self._json({"ok": True})
+
     def _handle_upload(self) -> None:
         """接收 base64 附件，写入工作区 .attachments/，返回元数据。
 
@@ -1417,11 +1585,17 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
         t0 = time.time()
         before = dict(agent.usage)
+        _log.info(
+            "chat.start session=%s workspace=%s mode=%s approval=%s chars=%d attachments=%d",
+            session.id, session.workspace_id, mode, approval, len(message),
+            len(attachments or []),
+        )
         try:
             # 把沙箱根切到本会话所属工作区，之后工具的相对路径都落在这里
             ws_root = workspace_config.resolve_path(session.workspace_id)
             set_workspace(ws_root)
             agent.approval_mode = approval   # 三档确认逐轮生效
+            agent.session_id = session.id   # 工作区切换后仍按本会话沉淀摘要
             agent.registry = _session_registry(mode, web, approval)
             answer = agent.run(
                 message, attachments=_resolve_attachments(attachments or [], ws_root)
@@ -1437,15 +1611,23 @@ class _RequestHandler(BaseHTTPRequestHandler):
             # 先落盘再发终态：前端收到 done 就会刷新会话列表，
             # 反过来的话文件还没写完，新会话/新标题会漏掉一拍
             session.save()
+            _log.info(
+                "chat.done session=%s sec=%.1f llm_calls=%d tool_calls=%d "
+                "prompt_tokens=%d completion_tokens=%d answer_chars=%d",
+                session.id, sec, usage["llm_calls"], usage["tool_calls"],
+                usage["prompt_tokens"], usage["completion_tokens"], len(answer or ""),
+            )
             q.put({"type": "done", "answer": answer,
                    "sec": sec,
                    "usage": usage})
         except Cancelled as e:
+            _log.info("chat.cancelled session=%s reason=%s", session.id, e)
             # ui.cancelled 已发过 cancelled 事件（终态，泵会停）；没发过才补发
             if not getattr(agent, "last_cancel_notice_shown", False):
                 q.put({"type": "cancelled", "reason": str(e),
                        "usage": _usage_delta(before, agent.usage)})
         except Exception as e:  # noqa: BLE001 —— 任何异常都转成 error 事件
+            _log.exception("chat.error session=%s", session.id)
             q.put({"type": "error", "message": f"{type(e).__name__}: {e}",
                    "usage": _usage_delta(before, agent.usage)})
 
@@ -1533,7 +1715,7 @@ def serve(
     max_turns: int | None = None,
 ) -> None:
     """便捷入口：构建服务并阻塞运行（main.py 的 --web 走这里）。"""
-    settings.apply_to_runtime()      # 通用配置里的运行时项（工具输出上限）先落地
+    settings.apply_to_runtime()      # 通用配置里的运行时项（工具输出上限、日志）先落地
     WebServer(
         host=host, port=port, model=model,
         system_prompt=system_prompt, max_turns=max_turns,

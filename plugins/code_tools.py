@@ -15,7 +15,7 @@ import os
 import re
 import sys
 
-from core import decode_bytes, looks_binary, read_bytes, read_path, safe_path, tool, workspace
+from core import decode_bytes, is_memory_path, looks_binary, read_bytes, read_path, safe_path, tool, workspace
 
 PLUGIN_INFO = {"name": "代码辅助", "version": "1.0", "author": "mini-agent"}
 
@@ -69,6 +69,8 @@ def count_code_lines(path: str = ".", max_files: int = 2000) -> str:
         if scanned >= max_files:
             break
         if not os.path.isfile(fp):
+            continue
+        if is_memory_path(fp):  # .memory 保护区不参与统计
             continue
         # 防符号链接把扫描带出允许范围
         try:

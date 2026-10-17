@@ -5,26 +5,33 @@
  *   凡是「影响 Agent 怎么跑」的设置都收在这里，用户只需要记住一个入口；
  *   顶栏点模型名也能进来，只是直接落在「模型配置」页。
  */
-import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Input, InputNumber, Modal, Radio, Spin, Switch, Tabs, Tag } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { Alert, Button, Input, InputNumber, Modal, Radio, Select, Spin, Switch, Tag } from "antd";
+import {
+  ApiOutlined,
+  AppstoreOutlined,
+  BulbOutlined,
+  ReloadOutlined,
+  SettingOutlined,
+} from "@ant-design/icons";
 import { fetchSettings, fetchTools, updateSettings } from "../api";
 import type { GeneralSettings, SandboxReadMode, SettingsInfo, ToolInfo } from "../types";
+import MemoryPanel from "./MemoryPanel";
 import ModelSettingsPanel from "./ModelSettings";
 
 interface Props {
   open: boolean;
   /** 打开时停在哪个页签 */
   tab: SettingsTab;
-  /** 远程访问：配置只读，禁止保存（后端同样 403 拦截） */
-  remote?: boolean;
   onTab?: (t: SettingsTab) => void;
   onClose: () => void;
   /** 任意配置变更后通知 App 刷新 /api/state */
   onChanged: () => void;
+  /** 当前工作区 id：记忆面板按工作区读取 / 保存项目记忆 */
+  workspaceId: string;
 }
 
-export type SettingsTab = "model" | "general" | "plugins";
+export type SettingsTab = "model" | "general" | "memory" | "plugins";
 
 /** 每个字段的界面元信息：标签、说明、区间、步进 */
 const FIELDS: {
@@ -89,7 +96,22 @@ const FIELDS: {
   },
 ];
 
-export default function SettingsModal({ open, tab, remote = false, onTab, onClose, onChanged }: Props) {
+/** 左侧导航的分组与条目（顺序即展示顺序） */
+const NAV_GROUPS = ["设置", "数据与扩展"] as const;
+
+const NAV: {
+  key: SettingsTab;
+  label: string;
+  icon: ReactNode;
+  group: (typeof NAV_GROUPS)[number];
+}[] = [
+  { key: "model", label: "模型配置", icon: <ApiOutlined />, group: "设置" },
+  { key: "general", label: "通用配置", icon: <SettingOutlined />, group: "设置" },
+  { key: "memory", label: "记忆", icon: <BulbOutlined />, group: "数据与扩展" },
+  { key: "plugins", label: "插件管理", icon: <AppstoreOutlined />, group: "数据与扩展" },
+];
+
+export default function SettingsModal({ open, tab, onTab, onClose, onChanged, workspaceId }: Props) {
   const [info, setInfo] = useState<SettingsInfo | null>(null);
   const [draft, setDraft] = useState<GeneralSettings | null>(null);
   const [tools, setTools] = useState<ToolInfo[]>([]);
@@ -171,11 +193,10 @@ export default function SettingsModal({ open, tab, remote = false, onTab, onClos
     if (!draft) return null;
     const meta = FIELDS.find((f) => f.key === key)!;
     if (key === "stream" || key === "parallel_tools") {
-      return <Switch disabled={remote} checked={draft[key] as boolean} onChange={(v) => patch(key, v)} />;
+      return <Switch checked={draft[key] as boolean} onChange={(v) => patch(key, v)} />;
     }
     return (
       <InputNumber
-        disabled={remote}
         value={draft[key] as number}
         min={meta.min}
         max={meta.max}
@@ -222,19 +243,21 @@ export default function SettingsModal({ open, tab, remote = false, onTab, onClos
     <Modal
       open={open}
       title="系统配置"
-      width={720}
+      width={900}
+      centered
+      className="settings-modal"
       onCancel={onClose}
       destroyOnClose
       footer={
         active === "general"
           ? [
-              <Button key="reset" icon={<ReloadOutlined />} onClick={reset} loading={saving} disabled={remote}>
+              <Button key="reset" icon={<ReloadOutlined />} onClick={reset} loading={saving}>
                 恢复默认
               </Button>,
               <Button key="cancel" onClick={onClose}>
                 关闭
               </Button>,
-              <Button key="save" type="primary" onClick={save} loading={saving} disabled={!dirty || remote}>
+              <Button key="save" type="primary" onClick={save} loading={saving} disabled={!dirty}>
                 保存并生效
               </Button>,
             ]
@@ -245,31 +268,58 @@ export default function SettingsModal({ open, tab, remote = false, onTab, onClos
             ]
       }
     >
-      <Tabs
-        activeKey={active}
-        onChange={(k) => setActive(k as SettingsTab)}
-        onTabClick={(k) => onTab?.(k as SettingsTab)}
-        items={[
-          {
-            key: "model",
-            label: "模型配置",
-            children: <ModelSettingsPanel onChanged={onChanged} remote={remote} />,
-          },
-          {
-            key: "general",
-            label: "通用配置",
-            children: (
-              <Spin spinning={loading}>
-                {error && (
+      <div className="settings-layout">
+        <nav className="settings-nav">
+          {NAV_GROUPS.map((group) => (
+            <div className="settings-nav-group" key={group}>
+              <div className="settings-nav-title">{group}</div>
+              {NAV.filter((n) => n.group === group).map((n) => (
+                <button
+                  key={n.key}
+                  type="button"
+                  className={`settings-nav-item${active === n.key ? " active" : ""}`}
+                  onClick={() => {
+                    setActive(n.key);
+                    onTab?.(n.key);
+                  }}
+                >
+                  <span className="settings-nav-icon">{n.icon}</span>
+                  {n.label}
+                </button>
+              ))}
+            </div>
+          ))}
+        </nav>
+        <div className="settings-content">
+          {active === "model" && <ModelSettingsPanel onChanged={onChanged} />}
+          {active === "memory" && <MemoryPanel workspaceId={workspaceId} />}
+          {active === "plugins" && (
+            <Spin spinning={toolsLoading}>
+              <div className="plugins-list">
+                {tools.map((t) => (
+                  <div className="plugin-item" key={t.name}>
+                    <div className="plugin-header">
+                      <span className="plugin-name">{t.name}</span>
+                      <Tag color={t.source === "core" ? "blue" : t.source === "builtin" ? "green" : t.source === "user" ? "orange" : "purple"}>
+                        {t.source}
+                      </Tag>
+                      {t.dangerous && <Tag color="red">危险</Tag>}
+                      {t.exclusive && <Tag color="cyan">独占</Tag>}
+                    </div>
+                    <div className="plugin-desc">{t.description}</div>
+                    <div className="plugin-meta">
+                      <span className="plugin-sig">{t.signature}</span>
+                      <span className="plugin-group">分组：{t.group}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Spin>
+          )}
+          {active === "general" && (
+            <Spin spinning={loading}>
+              {error && (
                   <Alert type="error" showIcon message={error} style={{ marginBottom: 12 }} />
-                )}
-                {remote && (
-                  <Alert
-                    type="info"
-                    showIcon
-                    message="远程访问模式：配置仅供查看，修改请在主机本机进行"
-                    style={{ marginBottom: 12 }}
-                  />
                 )}
                 <div className="gs-group-title">对话与上下文</div>
                 {section("context")}
@@ -280,7 +330,6 @@ export default function SettingsModal({ open, tab, remote = false, onTab, onClos
                   <div className="gs-section">
                     <Radio.Group
                       className="sandbox-radio"
-                      disabled={remote}
                       value={draft.sandbox_read || "strict"}
                       onChange={(e) =>
                         patch("sandbox_read", e.target.value as SandboxReadMode)
@@ -302,7 +351,6 @@ export default function SettingsModal({ open, tab, remote = false, onTab, onClos
                     {draft.sandbox_read === "whitelist" && (
                       <Input.TextArea
                         className="sandbox-whitelist"
-                        disabled={remote}
                         value={(draft.sandbox_read_whitelist || []).join("\n")}
                         onChange={(e) =>
                           patch(
@@ -325,6 +373,79 @@ export default function SettingsModal({ open, tab, remote = false, onTab, onClos
                     />
                   </div>
                 )}
+                <div className="gs-group-title">运行日志</div>
+                {draft && (
+                  <div className="gs-section">
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        padding: "8px 0",
+                      }}
+                    >
+                      <div>
+                        <div className="sandbox-opt-name">启用文件日志</div>
+                        <div className="sandbox-opt-desc">
+                          按天写入 logs/&lt;日期&gt;/ 下的 app.log、llm.log、tool.log、error.log（不含对话正文）
+                        </div>
+                      </div>
+                      <Switch
+                        checked={draft.log_enabled}
+                        onChange={(v) => patch("log_enabled", v)}
+                      />
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        padding: "8px 0",
+                      }}
+                    >
+                      <div>
+                        <div className="sandbox-opt-name">日志级别</div>
+                        <div className="sandbox-opt-desc">DEBUG 会额外记录每条 HTTP 请求</div>
+                      </div>
+                      <Select
+                        value={draft.log_level}
+                        style={{ width: 160 }}
+                        disabled={!draft.log_enabled}
+                        onChange={(v) => patch("log_level", v)}
+                        options={[
+                          { value: "DEBUG", label: "DEBUG" },
+                          { value: "INFO", label: "INFO" },
+                          { value: "WARNING", label: "WARNING" },
+                          { value: "ERROR", label: "ERROR" },
+                        ]}
+                      />
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        padding: "8px 0",
+                      }}
+                    >
+                      <div>
+                        <div className="sandbox-opt-name">保留天数</div>
+                        <div className="sandbox-opt-desc">按天分目录，超过天数的旧目录自动清理</div>
+                      </div>
+                      <InputNumber
+                        value={draft.log_retention_days}
+                        min={1}
+                        max={90}
+                        disabled={!draft.log_enabled}
+                        style={{ width: 160 }}
+                        onChange={(v) => patch("log_retention_days", v)}
+                      />
+                    </div>
+                  </div>
+                )}
                 {dirty && (
                   <Alert
                     type="info"
@@ -336,38 +457,10 @@ export default function SettingsModal({ open, tab, remote = false, onTab, onClos
                 <div className="gs-note">
                   取值优先级：命令行显式参数 &gt; 这里保存的值 &gt; 环境变量 &gt; 内置默认。
                 </div>
-              </Spin>
-            ),
-          },
-          {
-            key: "plugins",
-            label: "插件管理",
-            children: (
-              <Spin spinning={toolsLoading}>
-                <div className="plugins-list">
-                  {tools.map((t) => (
-                    <div className="plugin-item" key={t.name}>
-                      <div className="plugin-header">
-                        <span className="plugin-name">{t.name}</span>
-                        <Tag color={t.source === "core" ? "blue" : t.source === "builtin" ? "green" : t.source === "user" ? "orange" : "purple"}>
-                          {t.source}
-                        </Tag>
-                        {t.dangerous && <Tag color="red">危险</Tag>}
-                        {t.exclusive && <Tag color="cyan">独占</Tag>}
-                      </div>
-                      <div className="plugin-desc">{t.description}</div>
-                      <div className="plugin-meta">
-                        <span className="plugin-sig">{t.signature}</span>
-                        <span className="plugin-group">分组：{t.group}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </Spin>
-            ),
-          },
-        ]}
-      />
+            </Spin>
+          )}
+        </div>
+      </div>
     </Modal>
   );
 }

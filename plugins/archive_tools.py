@@ -11,7 +11,7 @@ import os
 import tarfile
 import zipfile
 
-from core import read_path, safe_path, tool, workspace
+from core import is_memory_path, read_path, safe_path, tool, workspace
 
 PLUGIN_INFO = {"name": "压缩归档", "version": "1.0", "author": "mini-agent"}
 
@@ -62,7 +62,10 @@ def zip_create(paths: list[str], archive: str) -> str:
                 for p in paths:
                     src = read_path(p)
                     if os.path.isdir(src):
-                        for root, _dirs, files in os.walk(src):
+                        for root, dirs, files in os.walk(src):
+                            # 剪枝：.memory 个人记忆不进压缩包
+                            dirs[:] = [d for d in dirs
+                                       if not is_memory_path(os.path.join(root, d))]
                             for f in files:
                                 full = os.path.join(root, f)
                                 arc = os.path.relpath(full, os.path.dirname(src))
@@ -75,10 +78,19 @@ def zip_create(paths: list[str], archive: str) -> str:
             mode = "w:gz" if ap.lower().endswith((".tar.gz", ".tgz")) else \
                    "w:bz2" if ap.lower().endswith((".tar.bz2", ".tbz2")) else \
                    "w:xz" if ap.lower().endswith((".tar.xz", ".txz")) else "w"
+
+            def _no_memory(src_root: str):
+                """tarfile filter：排除 src 下的 .memory 条目。"""
+                def _flt(ti: tarfile.TarInfo):
+                    if is_memory_path(os.path.join(src_root, ti.name)):
+                        return None
+                    return ti
+                return _flt
+
             with tarfile.open(ap, mode) as tf:
                 for p in paths:
                     src = read_path(p)
-                    tf.add(src, arcname=os.path.basename(src))
+                    tf.add(src, arcname=os.path.basename(src), filter=_no_memory(src))
                     added.append(os.path.basename(src))
     except Exception as e:  # noqa: BLE001
         return f"[error] {type(e).__name__}: {e}"

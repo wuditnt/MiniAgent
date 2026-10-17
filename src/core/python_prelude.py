@@ -21,6 +21,7 @@ prelude 必须自包含：子进程虽与父进程同环境（PYTHONPATH 含 src
 
 from __future__ import annotations
 
+import os
 import textwrap
 
 # 护栏函数体。_BODY 是原始字符串、不经过 format —— 里面的 f-string
@@ -34,13 +35,26 @@ def _install():
     import pathlib as _pathlib
 
     _WS = __MA_WORKSPACE__
+    _PROT = __MA_MEMORY__
+
+    def _norm(p):
+        return _os.path.normcase(_os.path.abspath(_os.path.expanduser(_os.fspath(p))))
 
     def _within(p):
-        ap = _os.path.normcase(_os.path.abspath(_os.path.expanduser(_os.fspath(p))))
+        ap = _norm(p)
         root = _os.path.normcase(_os.path.abspath(_WS))
         return ap == root or ap.startswith(root + _os.sep)
 
+    def _protected(p):
+        ap = _norm(p)
+        pp = _os.path.normcase(_os.path.abspath(_PROT))
+        return ap == pp or ap.startswith(pp + _os.sep)
+
     def _guard(p, what):
+        if _protected(p):
+            raise PermissionError(
+                f".memory 是系统记忆目录，禁止{what}：{_os.path.abspath(_os.fspath(p))}"
+            )
         if not _within(p):
             raise PermissionError(
                 f"沙箱外路径只读，禁止{what}：{_os.path.abspath(_os.fspath(p))}"
@@ -55,6 +69,10 @@ def _install():
             m = str(mode).lower()
             if any(c in m for c in ("w", "a", "x", "+")):
                 _guard(file, "写入")
+            elif _protected(file):
+                raise PermissionError(
+                    f".memory 是系统记忆目录，禁止读取：{_os.path.abspath(_os.fspath(file))}"
+                )
         return _open_orig(file, mode, *args, **kwargs)
 
     _builtins.open = _open
@@ -126,12 +144,20 @@ def _install():
                 orig = getattr(_shutil, n)
 
                 def wrapper(src, dst, *a, **k):
+                    if _protected(src):
+                        raise PermissionError(
+                            f".memory 是系统记忆目录，禁止读取：{_os.path.abspath(_os.fspath(src))}"
+                        )
                     _guard(dst, "写入")  # 源是读取，可来自区外；目标必须区内
                     return orig(src, dst, *a, **k)
                 setattr(_shutil, n, wrapper)
             _make()
 
     def _copytree(src, dst, *a, **k):
+        if _protected(src):
+            raise PermissionError(
+                f".memory 是系统记忆目录，禁止读取：{_os.path.abspath(_os.fspath(src))}"
+            )
         _guard(dst, "写入")
         return _copytree_orig(src, dst, *a, **k)
     _copytree_orig = _shutil.copytree
@@ -182,12 +208,18 @@ def _install():
             if isinstance(database, str) and database not in (":memory:", ""):
                 uri = database if k.get("uri") else None
                 readonly = bool(uri) and "mode=ro" in uri
+                # .memory 内的库任何连接方式都拦（只读也会泄露记忆内容）
+                if uri and database.startswith("file:"):
+                    from urllib.request import url2pathname
+                    _db_path = url2pathname(database[5:].split("?", 1)[0])
+                else:
+                    _db_path = database
+                if _protected(_db_path):
+                    raise PermissionError(
+                        f".memory 是系统记忆目录，禁止访问数据库：{_os.path.abspath(_db_path)}"
+                    )
                 if not readonly:
-                    path = database
-                    if uri and path.startswith("file:"):
-                        from urllib.request import url2pathname
-                        path = url2pathname(path[5:].split("?", 1)[0])
-                    _guard(path, "写数据库")
+                    _guard(_db_path, "写数据库")
             return _connect_orig(database, *a, **k)
 
         _sqlite3.connect = _connect
@@ -204,8 +236,13 @@ def build_prelude(workspace: str) -> str:
 
     workspace 为当前工作区绝对路径，以 repr 字面量内联（r'' 原始串 +
     占位符替换，避免与函数体里的 f-string 双括号转义互相干扰）。
+    .memory 保护区路径同样内联，子进程不依赖 core 包即可判定。
     """
-    body = _BODY.replace("__MA_WORKSPACE__", repr(str(workspace)))
+    body = (
+        _BODY
+        .replace("__MA_WORKSPACE__", repr(str(workspace)))
+        .replace("__MA_MEMORY__", repr(os.path.join(str(workspace), ".memory")))
+    )
     return (
         "# === mini-agent 沙箱写护栏（自动注入）===\n"
         + textwrap.dedent(body).strip()

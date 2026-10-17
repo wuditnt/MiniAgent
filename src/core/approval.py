@@ -60,7 +60,8 @@ def set_asker(fn: Callable[[str], bool] | None) -> None:
 
 def register(reg: ToolRegistry | None = None) -> None:
     """把 request_approval 注册进指定注册表（默认全局 REGISTRY）。幂等。"""
-    target = reg or REGISTRY
+    # 不能写 `reg or REGISTRY`：ToolRegistry 有 __len__，空注册表是 falsy
+    target = reg if reg is not None else REGISTRY
     if target.get("request_approval") is not None:
         return
     target.add(_REQUEST_APPROVAL_TOOL)

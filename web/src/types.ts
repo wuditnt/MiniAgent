@@ -174,6 +174,36 @@ export interface GeneralSettings {
   sandbox_read: SandboxReadMode;
   /** 沙箱外只读白名单（绝对路径，sandbox_read=whitelist 时生效） */
   sandbox_read_whitelist: string[];
+  /** 记忆系统总开关 */
+  memory_enabled: boolean;
+  /** 每轮结束自动提炼偏好/决定/坑 */
+  memory_auto_extract: boolean;
+  /** 注入 system prompt 的记忆字符预算 */
+  memory_budget_chars: number;
+  /** 是否写本地文件日志（logs/ 下按类别分文件） */
+  log_enabled: boolean;
+  /** 文件日志级别；DEBUG 才能看到 HTTP 访问日志 */
+  log_level: "DEBUG" | "INFO" | "WARNING" | "ERROR";
+  /** 日志按天滚动，保留最近 N 天 */
+  log_retention_days: number;
+}
+
+/** GET /api/memory 返回的三层记忆 */
+export interface MemoryData {
+  user_profile: string;
+  user_profile_path: string;
+  project: string;
+  project_path: string;
+  workspace_root: string;
+  topics: MemoryTopic[];
+}
+
+export interface MemoryTopic {
+  session: string;
+  mtime: number;
+  mtime_text: string;
+  size: number;
+  content: string;
 }
 
 /** GET/PUT /api/settings 返回 */

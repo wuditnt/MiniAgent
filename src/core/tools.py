@@ -64,8 +64,10 @@ _REPORT = _LOADER.load_all()
 
 # 核心工具：三档确认模式之「自主判断」用的授权申请（幂等，不受插件加载时序影响）
 from core.approval import register as _register_approval  # noqa: E402
+from core.memory import register as _register_memory  # noqa: E402
 
 _register_approval()
+_register_memory()
 
 
 def loader() -> PluginLoader:

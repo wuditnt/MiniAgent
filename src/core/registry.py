@@ -22,10 +22,13 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .cancel import Cancelled
+from .logging_setup import get_logger
 from .sandbox import SandboxError, clip
 from .schema import merge_params, schema_from_callable, summary
 
 VALID_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+_log = get_logger("tool")
 
 
 @dataclass
@@ -177,17 +180,22 @@ class ToolRegistry:
         """
         t = self._tools.get(name)
         if t is None:
+            _log.warning("tool.unknown name=%s", name)
             return f"[error] 未知工具：{name}"
         args = arguments if isinstance(arguments, dict) else {}
         try:
             result = t.func(**args)
         except Cancelled:
+            _log.info("tool.cancelled name=%s", name)
             return "[cancelled] 用户取消了本次任务，该工具未完成执行"
         except SandboxError as e:
+            _log.warning("tool.sandbox_denied name=%s reason=%s", name, e)
             return f"[error] {e}"
         except TypeError as e:
+            _log.warning("tool.bad_args name=%s error=%s", name, e)
             return f"[error] 参数不匹配：{e}"
         except Exception as e:  # noqa: BLE001 —— 故意兜住一切
+            _log.exception("tool.crashed name=%s", name)
             return f"[error] {type(e).__name__}: {e}"
         # 截断是默认策略（防止工具刷爆上下文）；声明 no_clip 的工具例外 ——
         # 它的返回值就是给模型的完整正文（如技能指引），截掉反而坏了语义。

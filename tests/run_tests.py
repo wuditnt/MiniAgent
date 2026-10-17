@@ -50,7 +50,7 @@ PKG = os.path.join(SRC, "core")
 
 # (文件名, 说明, 是否需要 API Key) —— 路径相对于本文件所在的 tests/
 #
-# 免费用例 7 个 + 真实用例 1 个。真实用例默认跳过（加 --real 才跑，会消耗 token）。
+# 免费用例 12 个 + 真实用例 1 个。真实用例默认跳过（加 --real 才跑，会消耗 token）。
 # 关于真实用例只有一个：它的价值是「端到端验真」—— 真模型 + 真 MCP 子进程，
 # 一次性覆盖「本端立刻停 + 通知真的发出去 + 服务端真的收手」这条完整链路，
 # 比拆成两个半覆盖的用例更省 token，也不会有「两个都跑一半」的重复开销。
@@ -65,6 +65,8 @@ SUITES: list[tuple[str, str, bool]] = [
     ("test_http_e2e.py", "本地 mock HTTP（支持 SSE）：流式三条降级路径 + 并行收益", False),
     ("test_webui.py", "Web UI 端到端 8 项：SSE 事件序列 / 双模式工具表 / 停止 / 确认 / 409", False),
     ("test_sys_monitor.py", "系统监控插件 8 项：CPU / 内存 / 磁盘 / 网络 / 开机时长 / 端口占用", False),
+    ("test_memory.py", "记忆系统 11 项：存储 / 保护区 / 工具不可见 / prelude / shell / 注入", False),
+    ("test_logging.py", "文件日志 6 项：按日目录 / 错误聚合 / 幂等重配 / 关闭 / 配置 / 清理", False),
     ("test_real_mcp_cancel.py", "真实模型 + 真 MCP server：取消通知全链路", True),
 ]
 

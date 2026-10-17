@@ -99,29 +99,44 @@ class SandboxError(PermissionError):
     """路径越界。"""
 
 
+def _protected(ap: str) -> bool:
+    """是否命中工作区内的系统保护区（.memory 记忆目录）。
+
+    延迟导入避免 sandbox ↔ memory 模块循环；memory 自身不依赖 sandbox 运行期状态。
+    """
+    from .memory import is_memory_path
+    return is_memory_path(ap, _WORKSPACE)
+
+
 def safe_path(p: str) -> str:
     """写通道：把相对路径解析到工作区内，并阻止一切越界访问（读/写都拦）。
 
     这是所有「会修改文件系统」的工具必须走的入口；读类工具请改用 read_path，
     后者会按沙箱读取策略有条件放开沙箱外只读访问。
+    工作区内的系统保护区（.memory）在两个通道里都不可访问 —— 记忆只能由
+    core.memory 模块自己读写。
     """
     raw = p if os.path.isabs(p) else os.path.join(_WORKSPACE, p)
     ap = os.path.abspath(raw)
     if not _within(ap, _WORKSPACE):
         raise SandboxError(f"路径越界：{ap} 不在工作区 {_WORKSPACE} 内")
+    if _protected(ap):
+        raise PermissionError(f".memory 是系统记忆目录，禁止工具访问：{ap}")
     return ap
 
 
 def read_path(p: str) -> str:
     """读通道：相对路径锚定工作区；沙箱外绝对路径按读取策略判定。
 
-      · 工作区内：始终放行；
+      · 工作区内：始终放行（.memory 保护区除外）；
       · 工作区外：strict 拦截 / whitelist 仅白名单 / open 全部只读放开。
     返回解析后的绝对路径；越界时抛 SandboxError。
     """
     raw = p if os.path.isabs(p) else os.path.join(_WORKSPACE, p)
     ap = os.path.abspath(raw)
     if _within(ap, _WORKSPACE):
+        if _protected(ap):
+            raise PermissionError(f".memory 是系统记忆目录，禁止工具访问：{ap}")
         return ap
     if _READ_MODE == "open":
         return ap
@@ -148,6 +163,8 @@ def assert_can_write(p: str) -> str:
         raise PermissionError(
             f"沙箱外路径只读，禁止写入/删除：{ap}（工作区 {_WORKSPACE}）"
         )
+    if _protected(ap):
+        raise PermissionError(f".memory 是系统记忆目录，禁止写入/删除：{ap}")
     return ap
 
 
@@ -262,8 +279,21 @@ def _token_escapes(token: str) -> bool:
     return not _within(os.path.abspath(raw), _WORKSPACE)
 
 
+def _token_hits_memory(token: str) -> bool:
+    """路径 token 是否指向工作区的 .memory 保护区（相对/绝对都查）。"""
+    t = token.strip().strip('"')
+    if not t or t.startswith("-") or re.match(r"^/[A-Za-z]", t):
+        return False
+    if _PATH_TOKEN.match(t):
+        raw = t
+    else:
+        raw = os.path.join(_WORKSPACE, t)
+    from .memory import is_memory_path
+    return is_memory_path(os.path.abspath(raw), _WORKSPACE)
+
+
 def check_command_write(command: str) -> str | None:
-    """检测 shell 命令里「写/删/移动到工作区外」的明显写法。
+    """检测 shell 命令里「写/删/移动到工作区外」或「触碰 .memory 保护区」的明显写法。
 
     覆盖：输出重定向（> / >>）与常见写动词（copy/move/del/rd/mkdir/...）。
     拦不住 powershell -c、程序内部写文件等混淆形式 —— 与 run_python 护栏
@@ -272,8 +302,12 @@ def check_command_write(command: str) -> str | None:
     # 1) 重定向目标（2>&1 这类目标是 &1，会被路径判定自然放过）
     for m in _REDIRECT.finditer(command):
         tok = m.group(2)
-        if tok not in ("&1", "&2", "NUL", "/dev/null") and _token_escapes(tok):
+        if tok in ("&1", "&2", "NUL", "/dev/null"):
+            continue
+        if _token_escapes(tok):
             return f"检测到重定向写入工作区外路径：{tok}（沙箱外只读，请改写到工作区内）"
+        if _token_hits_memory(tok):
+            return f"检测到重定向写入系统记忆目录：{tok}（.memory 受保护，禁止工具访问）"
 
     # 2) 按 & 拆语句，看句首写动词
     for stmt in re.split(r"&&|&|\|\|", command):
@@ -285,16 +319,23 @@ def check_command_write(command: str) -> str | None:
         head = os.path.splitext(head)[0]
         if head not in _SHELL_WRITE_ALL and head not in _SHELL_WRITE_DST:
             continue
-        # 粗分词：去引号，只保留像路径的 token（绝对路径 / 含 ..）
+        # 粗分词：去引号，只保留像路径的 token（绝对路径 / 含 .. / .memory）
         tokens = [t.strip('"') for t in re.split(r"\s+", s)[1:] if t.strip()]
-        paths = [t for t in tokens if _PATH_TOKEN.match(t) or ".." in t]
-        if head in _SHELL_WRITE_DST and paths:
-            paths = [paths[-1]]  # copy/xcopy/robocopy：只管目标
-        for tok in paths:
+        path_like = [t for t in tokens if _PATH_TOKEN.match(t) or ".." in t]
+        if head in _SHELL_WRITE_DST and path_like:
+            path_like = [path_like[-1]]  # copy/xcopy/robocopy：只管目标
+        for tok in path_like:
             if _token_escapes(tok):
                 return (
                     f"写操作 `{head}` 的路径在工作区外：{tok}"
                     f"（沙箱外只读，硬规则不可放开）"
+                )
+        # 保护区检查对全部非开关 token 做（相对锚定工作区，普通目录不会误伤）
+        for tok in tokens:
+            if _token_hits_memory(tok):
+                return (
+                    f"写操作 `{head}` 指向系统记忆目录：{tok}"
+                    f"（.memory 受保护，禁止工具访问）"
                 )
     return None
 

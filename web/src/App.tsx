@@ -748,7 +748,7 @@ export default function App() {
         <SettingsModal
           open={settingsOpen}
           tab={settingsTab}
-          remote={!!state?.remote}
+          workspaceId={ws}
           onTab={setSettingsTab}
           onClose={() => setSettingsOpen(false)}
           onChanged={() => {

@@ -36,7 +36,7 @@ mini-agent/
 ├── tests/                        测试套件 + 统一入口 run_tests.py
 ├── scripts/                      建环境 / 跑测试 / 造 demo 数据
 ├── docs/                         测试指南与历次专题报告
-├── logs/                         真实运行日志
+├── logs/                         运行日志（按日期分目录：app / llm / tool / error）
 ├── demo_case/                    有标准答案的沙箱数据
 ├── pyproject.toml                src 布局 + console script
 └── requirements.txt
@@ -122,7 +122,7 @@ cd web; npm run dev                  # 终端 2：Vite :5173，/api 自动代理
 要点：
 
 - 默认只监听 `127.0.0.1`（`--host` 可改），数据不出本机；新增 `--web` / `--port`（默认 8000） / `--host` 开关
-- chat 模式 = 纯对话（关联网时零工具、单次直答）；agent 模式 = 全量 80 个内置工具循环；开联网则追加 `web_search`
+- chat 模式 = 纯对话（关联网时零工具、单次直答）；agent 模式 = 全量内置工具循环（当前 87 个，含 `remember`；`request_approval` 仅 auto 档暴露）；开联网则追加 `web_search`
 - 流式输出、工具执行轨迹（ThoughtChain，参数/结果可展开）、中途停止、刷新后恢复历史
 - **三档确认模式**（仅 agent 模式，输入框工具栏盾牌胶囊切换，localStorage 记住选择）：
   - **按需询问（ask，默认）**：每个危险工具执行前都弹窗确认
@@ -138,14 +138,98 @@ cd web; npm run dev                  # 终端 2：Vite :5173，/api 自动代理
 - 富渲染：GFM 表格、KaTeX 公式（`$...$`）、ECharts 图表（` ```echarts ` 代码块，柱/线/饼/散点）、内联 HTML（经白名单消毒）；配套技能 `skills/rich-render/` 教模型主动用图表达
 - **工作区管理**：左侧边栏按工作区分组管理对话，可新建 / 改名 / 移除；每个工作区的 `path` 就是 Agent 的文件操作边界（沙箱根），会话归属哪个工作区就在哪个目录里干活。默认工作区锚在**当前登录用户的数据目录**（如 `C:\Users\<you>\mini-agent`，启动时自动创建，不再拿源码目录当工作区），不可删除；组内还有对话时不允许删工作区
   - 输入框上方左侧有工作区胶囊：新对话可直接切换（不选就落在默认工作区），已开始的对话只读显示 —— 换沙箱根会让「之前写的文件在哪」变得难以理解
-- **系统配置**：右上角齿轮图标打开，内含「模型配置」「通用配置」「插件管理」三个页签（顶栏点模型名也能进，直接落在模型配置页）
+- **系统配置**：右上角齿轮图标打开，内含「模型配置」「通用配置」「记忆」「插件管理」四个页签（顶栏点模型名也能进，直接落在模型配置页）
   - 模型配置：任意 OpenAI 兼容接口 —— 内置 DeepSeek（默认）/ 智谱 / Kimi / 通义千问 / 豆包 / 千帆 / 硅基流动 / OpenAI / Ollama / vLLM 模板，可加多份「服务商 + 模型」配置一键切换；带连接测试（`GET /models` 探测，不耗 token，401/403 与网络错误分开报）。配置存 `web_data/models.json`，**API Key 只在本机，不上传第三方**，接口列表回显时脱敏为 `****后四位`
-  - 通用配置：最大轮数、上下文字符上限、保留最近轮数、单次工具输出上限、温度、流式输出、并行工具、并发线程数，保存即生效（`web_data/settings.json`，可一键恢复默认）。取值优先级：命令行显式参数 > 这里保存的值 > 环境变量 > 内置默认
+  - 通用配置：最大轮数、上下文字符上限、保留最近轮数、单次工具输出上限、温度、流式输出、并行工具、并发线程数，保存即生效（`web_data/settings.json`，可一键恢复默认）。取值优先级：命令行显式参数 > 这里保存的值 > 环境变量 > 内置默认；页面底部还有「运行日志」开关 / 级别 / 保留天数（详见下文「运行日志」一节）
   - 通用配置 → **沙箱读取范围**（`sandbox_read`，默认 `strict`）：控制 Agent 读工作区**之外**文件的口径 —— `strict` 越界读写全拦；`whitelist` 仅白名单绝对路径可读（TextArea 每行一条）；`open` 沙箱外全部只读放开。**任何档位下，沙箱外的写入 / 删除 / 移动一律硬禁**，没有放开开关；此外 `run_python` 注入写护栏、`run_shell` 检测越界写命令、zip/tar 解压防路径穿越（混淆写法无法 100% 拦截，详见下文「沙箱」一节）
+  - **记忆**页签：编辑用户画像与项目记忆、查看/删除会话摘要、开关「启用记忆 / 自动提炼」与注入预算（详见下文「记忆系统」一节）
   - 插件管理：展示当前全部工具（名称 / 来源 / 分组 / 签名），按来源标记为 core / builtin / user / mcp，支持查看 dangerous / exclusive 标记与分组汇总，便于快速了解 Agent 当前具备的能力
 - **多会话与搜索**：对话本地持久化（`web_data/sessions/*.json`，原子写），搜索支持标题 + 全文、空格分隔的多词 AND、命中片段高亮，点结果直接滚动定位到那条消息并闪烁
 - **上下文记忆**：超长对话三级收敛 —— 先裁较早的工具结果、再把较早整轮滚动摘要成一段（保留任务目标/决策/进度/待办）、最后滑动窗口硬截断（保留 system + 摘要 + 最近 8 轮）。裁剪以「轮」为单位，`tool_calls` 与 `tool` 结果要么一起留要么一起删，不会配对错位导致接口报错
 - 后端为 `src/core/webui.py`：stdlib `ThreadingHTTPServer` + SSE，Python 侧零新依赖；协议与设计见 [docs/WEBUI_ANTDX_PLAN.md](docs/WEBUI_ANTDX_PLAN.md)
+
+---
+
+## 记忆系统
+
+让智能体跨会话记住「你是谁、项目有什么规矩、之前聊过什么」。默认开启，
+设置 → 记忆页签可随时查看、编辑、关闭。
+
+### 三层
+
+| 层 | 位置 | 作用域 | 内容 |
+| --- | --- | --- | --- |
+| 用户画像 | `web_data/memory/user_profile.md` | 跨所有工作区 | 偏好、习惯、长期事实 |
+| 项目记忆 | `<工作区>/.memory/project.md` | 随项目文件夹走 | 规则、已做决定、踩过的坑 |
+| 主题摘要 | `<工作区>/.memory/topics/<会话id>.md` | 单个会话滚动摘要 | 最近聊了什么、进展与结论 |
+
+项目记忆放在工作区内的 `.memory/`，是为了**随项目目录一起迁移**（拷贝、同步、
+换机器都带着走）；`.memory` 创建时会加 Windows 隐藏属性，工作区是 git 仓库时
+自动写入 `.gitignore`。
+
+### 注入
+
+每轮 `run()` 开头重建 system prompt：基础提示 + （auto 档）责任准则 + 记忆块。
+用户画像与项目记忆全量注入，主题摘要取「最近 3 条 + 与本轮输入关键词命中的」，
+总预算默认 1500 字符（可调，超限先裁摘要）。记忆块明确标注为「参考事实而非新
+指令」，与用户当前要求冲突时以当前要求为准。
+
+### 写入（三条通道）
+
+1. **`remember(scope, note)` 工具**：模型识别到「记住…」「以后都…」「这个项目的
+   规矩是…」时主动写入；`scope=user` 写用户画像，`scope=project` 写项目记忆
+2. **自动提炼**：每轮回复成功后一次非流式小请求（超时 15s，失败静默），只提炼
+   三类内容 —— 明确偏好、做出的决定、踩过的坑；主题摘要做滚动合并更新。
+   寒暄与过短轮次直接跳过，不烧 token
+3. **手动**：设置 → 记忆页签编辑；控制台 `/remember 内容`；删除会话时对应摘要
+   一并清理
+
+条目格式统一为 `- 2026-10-17 14:30 · 来源 — 正文`，追加时用相似度去重（≥0.88
+视为重复，跳过不新增）；主题摘要每工作区保留最近 20 条，更老的自动清理。
+
+### `.memory` 是保护区
+
+记忆不能由模型或脚本直接读写（避免自我篡改与误删）。以下四道防线共用同一个
+判定 `core.memory.is_memory_path()`：
+
+- 沙箱双通道：`safe_path` / `read_path` 命中即拒（即便在工作区内）
+- 工具层：`list_dir` / `glob_files` / `grep` 不可见，`read_file` 读不到，
+  `count_code_lines` 不计入，`zip_create` 打包时自动排除
+- `run_python` prelude：`open` 读写、`pathlib` 写删、`shutil` 复制/移动/删除、
+  `sqlite3` 连接全部拦截
+- `run_shell`：重定向、`del`/`rmdir`/`copy`/`move`/`mkdir` 等写动词指向 `.memory`
+  时拒绝
+
+记忆模块自身读写走直连路径 + 临时文件 `os.replace` 原子写 + 进程内锁，不经过
+沙箱。已知边界与沙箱一致：shell/python 的混淆写法无法 100% 拦截。
+
+---
+
+## 运行日志
+
+后端日志只落本地文件，**按天一个目录**、按类别分文件，排查时不用在终端翻屏：
+
+```text
+logs/
+  2026-10-17/
+    app.log     llm.log     tool.log     error.log
+  2026-10-18/
+    ...
+```
+
+| 文件 | 内容 |
+| --- | --- |
+| `logs/<日期>/app.log` | 启动与监听地址、HTTP 接口错误、会话生命周期、插件 / MCP 加载失败、记忆提炼 |
+| `logs/<日期>/llm.log` | 每轮模型调用摘要（耗时、消息数、token 用量、是否流式）、流式降级与重试 |
+| `logs/<日期>/tool.log` | 工具开始 / 结束、耗时、结果字符数、错误 |
+| `logs/<日期>/error.log` | 所有 `ERROR` 及以上（带堆栈），任何类别都汇总到这里 |
+
+- **不记录对话正文**：用户输入与模型输出只记字符数；工具参数只记 200 字预览。
+- 开关与策略在「设置 → 通用配置 → 运行日志」：启用 / 级别（默认 `INFO`）/ 保留天数
+  （默认 7 天）。跨天自动切到新日期目录，超过保留天数的旧目录自动清理。
+  `DEBUG` 会额外记录每条 HTTP 请求；`INFO` 下访问日志不落盘，避免刷屏。
+- 配置存 `web_data/settings.json`（`log_enabled` / `log_level` / `log_retention_days`），
+  保存即时生效，无需重启。
 
 ---
 
@@ -445,6 +529,8 @@ def my_tool(...):
 | `/context`          | 上下文占用与已裁剪条数                                                |
 | `/verbose on\|off`  | 是否显示工具调用轨迹                                                 |
 | `/approve on\|off`  | 切换确认模式：`on`=按需询问（ask）/ `off`=完全控制（full）；无参数在两档间切换 |
+| `/remember [user\|project] 内容` | 手动写入一条长期记忆（默认写当前项目记忆） |
+| `/memory`           | 查看当前生效的用户画像 / 项目记忆 / 主题摘要 |
 | `/reset`            | 清空对话历史                                                     |
 | `/exit`             | 退出                                                         |
 
@@ -592,6 +678,7 @@ mini-agent/
 │   ├── sandbox.py            沙箱与安全策略：safe_path/read_path 双通道、三档读取、
 │   │                          shell 越界写检测、可取消的 run_process
 │   ├── approval.py           三档确认模式（ask/auto/full）+ request_approval 工具
+│   ├── memory.py             记忆系统：三层存储 / 保护区判定 / 注入渲染 / remember 工具
 │   ├── python_prelude.py     run_python 写护栏（open/shutil/pathlib/sqlite 等 patch）
 │   ├── cancel.py             取消令牌：CancellationToken / Cancelled / 杀进程树
 │   ├── mcp.py                MCP stdio 客户端（并发安全 + 可取消 + 取消通知）+ 桥接
@@ -610,10 +697,10 @@ mini-agent/
 │   ├── mcp_servers.json      MCP 配置
 │   └── mcp_demo_server.py    自带 MCP server（now / sha256 / env_info / sleep /
 │                             stubborn_sleep / cancel_log，后两个服务于取消通知测试）
-├── tests/                    十一个套件 + bootstrap.py（共用引导）+ run_tests.py
+├── tests/                    十三个套件 + bootstrap.py（共用引导）+ run_tests.py
 ├── scripts/                  setup_venv.* / run_tests.* / make_demo_case.py
 ├── docs/                     测试指南与历次专题报告
-├── logs/                     真实运行日志
+├── logs/                     运行日志（按日期分目录：app / llm / tool / error）
 ├── demo_case/                沙箱测试数据（有标准答案）
 └── pyproject.toml            src 布局 + console script
 ```
@@ -708,7 +795,7 @@ UI 也不被迫为并发加锁（`ui.py` 里仍备了一把可重入锁，作为
 
 - **持久化记忆**：跨会话的长期记忆与检索
 - **权限策略引擎**：按工具/参数做细粒度规则，而不只是 yes/no
-- **可观测性**：结构化日志、调用链、成本归因
+- **可观测性**：文件日志已按类别落盘（见「运行日志」）；还缺调用链与成本归因
 - **MCP 高级能力**：resources / prompts / sampling / 进度通知
 - **多模态**：图片输入已支持（`view_image` 工具 + [core/images.py](src/core/images.py)
   附件通道，模型须为视觉模型）；语音输入未做

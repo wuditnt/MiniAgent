@@ -36,6 +36,14 @@ DEFAULTS: dict = {
     "sandbox_read": "strict",
     # 沙箱外只读白名单：每行一个绝对路径（文件或目录），仅 sandbox_read=whitelist 生效
     "sandbox_read_whitelist": [],
+    # ---- 记忆系统 ----
+    "memory_enabled": True,        # 总开关：关闭后不注入、不自动提炼、不暴露 remember
+    "memory_auto_extract": True,   # 每轮结束自动提炼偏好/决定/坑（关闭则只靠手动）
+    "memory_budget_chars": 1500,   # 注入 system prompt 的记忆字符预算
+    # ---- 运行日志 ----
+    "log_enabled": True,           # 是否写本地文件日志（logs/ 下分类文件）
+    "log_level": "INFO",           # DEBUG 才能看到 HTTP 访问日志
+    "log_retention_days": 7,       # 按天滚动，保留最近 N 天
 }
 
 #: 数值型取值区间；未列出的项不做区间限制
@@ -46,15 +54,20 @@ RANGES: dict[str, tuple] = {
     "max_output_chars": (500, 500_000),
     "temperature": (0.0, 2.0),
     "max_workers": (1, 16),
+    "memory_budget_chars": (200, 8_000),
+    "log_retention_days": (1, 90),
 }
 
 #: 整数字段（其余数值字段按浮点处理）
-INT_KEYS = ("max_turns", "max_context_chars", "keep_recent_turns", "max_output_chars", "max_workers")
+INT_KEYS = ("max_turns", "max_context_chars", "keep_recent_turns", "max_output_chars",
+            "max_workers", "memory_budget_chars", "log_retention_days")
 #: 布尔字段
-BOOL_KEYS = ("stream", "parallel_tools")
+BOOL_KEYS = ("stream", "parallel_tools", "memory_enabled", "memory_auto_extract",
+             "log_enabled")
 #: 枚举字符串字段：允许的取值
 ENUM_KEYS: dict[str, tuple[str, ...]] = {
     "sandbox_read": ("strict", "whitelist", "open"),
+    "log_level": ("DEBUG", "INFO", "WARNING", "ERROR"),
 }
 #: 字符串列表字段（元素必须是非空字符串，自动去空白）
 LIST_KEYS = ("sandbox_read_whitelist",)
@@ -217,8 +230,9 @@ def reset() -> dict:
 
 
 def apply_to_runtime() -> None:
-    """把只影响进程全局的配置同步到运行时（工具输出上限、沙箱读取策略）。"""
-    from . import sandbox
+    """把只影响进程全局的配置同步到运行时（工具输出上限、沙箱读取策略、日志）。"""
+    from . import logging_setup, sandbox
 
     sandbox.set_max_output_chars(get("max_output_chars"))
     sandbox.set_read_policy(str(get("sandbox_read")), list(get("sandbox_read_whitelist") or []))
+    logging_setup.reconfigure()

@@ -10,6 +10,7 @@ import type {
   Attachment,
   GeneralSettings,
   HistoryMessage,
+  MemoryData,
   Mode,
   ModelsInfo,
   SessionItem,
@@ -291,6 +292,39 @@ export async function updateSettings(
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
+}
+
+// ---------------------------------------------------------------- 记忆
+
+/** 读取当前工作区的三层记忆（用户画像 / 项目记忆 / 主题摘要） */
+export async function fetchMemory(workspaceId: string): Promise<MemoryData> {
+  const res = await fetch(`/api/memory?workspace_id=${encodeURIComponent(workspaceId)}`);
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/** 保存手工编辑的记忆内容（user=用户画像，project=当前工作区项目记忆） */
+export async function saveMemory(
+  scope: "user" | "project",
+  content: string,
+  workspaceId: string
+): Promise<void> {
+  const res = await fetch("/api/memory", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope, content, workspace_id: workspaceId }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+/** 删除一条主题摘要 */
+export async function deleteMemoryTopic(session: string, workspaceId: string): Promise<void> {
+  const res = await fetch("/api/memory/topic", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session, workspace_id: workspaceId }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
 }
 
 /**

@@ -10,9 +10,11 @@ from __future__ import annotations
 import os
 
 from core import (
+    MEMORY_DIRNAME,
     clip,
     decode_bytes,
     hexdump,
+    is_memory_path,
     looks_binary,
     read_bytes,
     read_path,
@@ -87,6 +89,9 @@ def list_dir(path: str = ".") -> str:
     rows = []
     for name in sorted(os.listdir(ap)):
         full = os.path.join(ap, name)
+        # .memory 系统保护区对工具完全不可见（read_path 也会拦，列举这里提前过滤）
+        if name == MEMORY_DIRNAME and is_memory_path(full):
+            continue
         if os.path.isdir(full):
             rows.append(f"  [dir ] {name}/")
         else:
@@ -109,6 +114,9 @@ def glob_files(pattern: str, path: str = ".") -> str:
     hits = []
     for h in _glob.glob(os.path.join(ap, pattern), recursive=True):
         if not os.path.isfile(h):
+            continue
+        # .memory 保护区直接跳过（下面的 read_path 也会兜底拒绝）
+        if is_memory_path(h):
             continue
         # 再校验一次：pattern 里的 .. 或符号链接都不能把结果带出允许范围
         try:
@@ -151,6 +159,8 @@ def grep(pattern: str, path: str = ".", glob: str = "*") -> str:
     scanned = 0
     for fp in _glob.glob(os.path.join(ap, "**", glob), recursive=True):
         if not os.path.isfile(fp):
+            continue
+        if is_memory_path(fp):
             continue
         # 防 pattern 内 .. / 符号链接把读取带出允许范围
         try:
