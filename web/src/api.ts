@@ -18,6 +18,7 @@ import type {
   SSEEvent,
   TestResult,
   ToolInfo,
+  TrajectoryData,
   WorkspaceDirData,
   WorkspaceFileData,
   WorkspaceItem,
@@ -48,6 +49,22 @@ export async function fetchHistory(
   return res.json();
 }
 
+/** 只读回放会话事件流（P0 事实层）；老会话无事件文件时 events 为空数组 */
+export async function fetchTrajectory(
+  session: string,
+  fromSeq = 0,
+  limit = 500
+): Promise<TrajectoryData> {
+  const qs = new URLSearchParams({
+    session,
+    from_seq: String(fromSeq),
+    limit: String(limit),
+  });
+  const res = await fetch(`/api/trajectory?${qs}`);
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 export async function postConfirm(
   id: string,
   approve: boolean,
@@ -57,6 +74,20 @@ export async function postConfirm(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id, approve, session }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+/** 回答 Agent 的内联提问（ask_request）：answer 为空串表示未作答 */
+export async function postAnswer(
+  id: string,
+  answer: string,
+  session: string
+): Promise<void> {
+  const res = await fetch("/api/answer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, answer, session }),
   });
   if (!res.ok) throw new Error(await readError(res));
 }

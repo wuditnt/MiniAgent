@@ -13,6 +13,7 @@ import {
   DownOutlined,
   EditOutlined,
   FolderOpenOutlined,
+  HistoryOutlined,
   PaperClipOutlined,
   PictureOutlined,
   PlusOutlined,
@@ -22,18 +23,22 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { Bubble, Sender } from "@ant-design/x";
-import { Collapse, Dropdown, message, Tag, Tooltip } from "antd";
+import { Button, Checkbox, Collapse, Dropdown, Input, message, Radio, Tag, Tooltip } from "antd";
 import type {
   ApprovalMode,
+  AskRecord,
   Attachment,
   ChatItem,
+  ConfirmInfo,
   Mode,
+  PendingAsk,
   WorkspaceItem,
 } from "../types";
 import { uploadFile } from "../api";
 import Markdown from "./Markdown";
 import ToolChain from "./ToolChain";
 import WelcomePane from "./WelcomePane";
+import ConfirmPanel from "./ConfirmPanel";
 
 /** token 数缩写：59300 → 59.3K（与参考图一致） */
 function fmtTokens(n: number): string {
@@ -116,10 +121,13 @@ function MessageToolbar({
   item,
   onRegenerate,
   onDelete,
+  onTrajectory,
 }: {
   item: ChatItem;
   onRegenerate?: (msgId: string) => void;
   onDelete?: (msgId: string) => void;
+  /** 打开本会话的运行轨迹抽屉（P0 事实层） */
+  onTrajectory?: () => void;
 }) {
   const btnRef = useRef<HTMLSpanElement>(null);
   const hasContent = !!item.content.trim();
@@ -127,7 +135,7 @@ function MessageToolbar({
   const showUsage = !!usage && usage.total_tokens > 0;
   const showSec = item.sec != null;
 
-  if (!hasContent && !showUsage && !showSec && !onRegenerate) return null;
+  if (!hasContent && !showUsage && !showSec && !onRegenerate && !onTrajectory) return null;
 
   const mark = (ok: boolean) => {
     const el = btnRef.current;
@@ -179,6 +187,13 @@ function MessageToolbar({
           </span>
         </Dropdown>
       )}
+      {onTrajectory && (
+        <Tooltip title="查看运行轨迹">
+          <span className="msg-tool" onClick={onTrajectory}>
+            <HistoryOutlined />
+          </span>
+        </Tooltip>
+      )}
       {onRegenerate && (
         <Tooltip title="重新生成">
           <span className="msg-tool" onClick={() => onRegenerate(item.id)}>
@@ -213,16 +228,131 @@ function MessageToolbar({
   );
 }
 
+/** 内联提问卡片里「其他」选项的内部取值（不会与真实候选冲突） */
+const OTHER = "\u0000other";
+
+/**
+ * 内联提问卡片：ask_user 工具让 Agent 在助手气泡里直接摆出问题与候选。
+ * 两种形态：
+ *  · pending：可交互 —— 单选（multi=false）/ 多选（multi=true）+ 可选「其他」自由输入，点提交即回传；
+ *  · record：只读留存 —— 已回答显示所选，超时/停止显示「未回答」。
+ */
+function AskCard({
+  pending,
+  record,
+  onAnswer,
+}: {
+  pending?: PendingAsk | null;
+  record?: AskRecord | null;
+  onAnswer?: (answer: string) => void;
+}) {
+  const [choice, setChoice] = useState("");
+  const [choices, setChoices] = useState<string[]>([]);
+  const [custom, setCustom] = useState("");
+  const src = pending || record;
+  if (!src) return null;
+
+  // ---- 只读留存（本轮已结束，卡片折回气泡）
+  if (!pending) {
+    const answered = !!src.answer;
+    return (
+      <div className={`ask-card ask-card-settled${answered ? "" : " ask-card-expired"}`}>
+        <span className="ask-settled-label">{answered ? "已选择" : "未回答"}</span>
+        <span className="ask-settled-value">
+          {answered ? src.answer : "（超时或任务已停止，Agent 按未回答继续）"}
+        </span>
+      </div>
+    );
+  }
+
+  const options = src.options || [];
+  const freeOk = src.allowFreeText;
+  const multi = !!src.multi;
+  const useCustom = options.length === 0 || choice === OTHER;
+  const answer = (
+    multi
+      ? [...choices, ...(custom.trim() ? [custom.trim()] : [])].join("、")
+      : (useCustom ? custom : choice)
+  ).trim();
+
+  const submit = () => {
+    if (answer) onAnswer?.(answer);
+  };
+
+  return (
+    <div className="ask-card">
+      <div className="ask-question">{src.question}</div>
+      {options.length > 0 &&
+        (multi ? (
+          <Checkbox.Group
+            className="ask-options"
+            value={choices}
+            onChange={(vals) => setChoices(vals as string[])}
+          >
+            {options.map((o) => (
+              <Checkbox key={o} value={o}>
+                {o}
+              </Checkbox>
+            ))}
+            {freeOk && <Checkbox value={OTHER}>其他</Checkbox>}
+          </Checkbox.Group>
+        ) : (
+          <Radio.Group
+            className="ask-options"
+            value={choice}
+            onChange={(e) => setChoice(e.target.value)}
+          >
+            {options.map((o) => (
+              <Radio key={o} value={o}>
+                {o}
+              </Radio>
+            ))}
+            {freeOk && <Radio value={OTHER}>其他</Radio>}
+          </Radio.Group>
+        ))}
+      {freeOk && (
+        <Input
+          className="ask-input"
+          size="small"
+          value={custom}
+          placeholder={options.length ? "或直接输入你的答案" : "输入你的答案"}
+          onChange={(e) => setCustom(e.target.value)}
+          onFocus={() => {
+            if (!multi && options.length) setChoice(OTHER);
+          }}
+          onPressEnter={submit}
+          disabled={!multi && options.length > 0 && choice !== OTHER}
+        />
+      )}
+      <Button
+        className="ask-submit"
+        type="primary"
+        size="small"
+        disabled={!answer}
+        onClick={submit}
+      >
+        提交
+      </Button>
+    </div>
+  );
+}
+
 function AssistantBody({
   item,
   onRegenerate,
   onDelete,
+  onTrajectory,
   workspaceId,
+  pendingAsk,
+  onAnswerAsk,
 }: {
   item: ChatItem;
   onRegenerate?: (msgId: string) => void;
   onDelete?: (msgId: string) => void;
+  onTrajectory?: () => void;
   workspaceId: string;
+  pendingAsk?: PendingAsk | null;
+  onAnswerAsk?: (answer: string) => void;
 }) {
   return (
     <div className="assistant-body">
@@ -264,6 +394,11 @@ function AssistantBody({
         />
       ) : null}
       {item.content ? <Markdown text={item.content} workspaceId={workspaceId} /> : null}
+      {item.ask ? (
+        <AskCard record={item.ask} />
+      ) : item.status === "streaming" && pendingAsk ? (
+        <AskCard pending={pendingAsk} onAnswer={onAnswerAsk} />
+      ) : null}
       {item.status === "error" ? (
         <div className="status-error">出错了：{item.error || "未知错误"}</div>
       ) : null}
@@ -272,7 +407,14 @@ function AssistantBody({
           已停止{item.reason ? `：${item.reason}` : ""}
         </Tag>
       ) : null}
-      {item.status !== "streaming" ? <MessageToolbar item={item} onRegenerate={onRegenerate} onDelete={onDelete} /> : null}
+      {item.status !== "streaming" ? (
+        <MessageToolbar
+          item={item}
+          onRegenerate={onRegenerate}
+          onDelete={onDelete}
+          onTrajectory={onTrajectory}
+        />
+      ) : null}
     </div>
   );
 }
@@ -303,6 +445,16 @@ interface Props {
   onEditResend?: (msgId: string) => void;
   /** 删除消息：截掉该条及之后的内容 */
   onDelete?: (msgId: string) => void;
+  /** 打开本会话的运行轨迹抽屉（P0 事实层） */
+  onTrajectory?: () => void;
+  /** 内联提问：正在等待作答的 ask_user 卡片（渲染在当前流式气泡内） */
+  pendingAsk?: PendingAsk | null;
+  onAnswerAsk?: (answer: string) => void;
+  /** 权限审批：正在等待作答的确认请求（覆盖在输入框位置上） */
+  confirm?: ConfirmInfo | null;
+  onAnswerConfirm?: (approve: boolean) => void;
+  /** 审批等待上限（秒），来自 /api/state 的 confirm_timeout */
+  confirmTimeout?: number;
 }
 
 /**
@@ -470,8 +622,14 @@ export default function Chat({
   onRegenerate,
   onEditResend,
   onDelete,
+  onTrajectory,
   contextUsage,
   contextLimit,
+  pendingAsk,
+  onAnswerAsk,
+  confirm,
+  onAnswerConfirm,
+  confirmTimeout,
 }: Props) {
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -550,7 +708,15 @@ export default function Chat({
         loading: waiting,
         content: (
           <div id={`msg-${it.id}`}>
-            <AssistantBody item={it} onRegenerate={busy ? undefined : onRegenerate} onDelete={busy ? undefined : onDelete} workspaceId={workspaceId} />
+            <AssistantBody
+              item={it}
+              onRegenerate={busy ? undefined : onRegenerate}
+              onDelete={busy ? undefined : onDelete}
+              onTrajectory={onTrajectory}
+              workspaceId={workspaceId}
+              pendingAsk={pendingAsk}
+              onAnswerAsk={onAnswerAsk}
+            />
           </div>
         ),
       };
@@ -605,6 +771,7 @@ export default function Chat({
       </div>
       <div className="composer">
         <div className="composer-inner">
+          <div className="composer-body">
           <div className="composer-top">
             <WorkspaceChip
               workspaces={workspaces}
@@ -634,94 +801,100 @@ export default function Chat({
             ))}
             {uploading && <span className="pending-att uploading">上传中…</span>}
           </div>
-          <Sender
-            value={input}
-            onChange={setInput}
-            onSubmit={(v: string) => {
-              onSend(v, pending.length ? pending : undefined);
-              setInput("");
-              setPending([]);
-            }}
-            loading={busy}
-            onCancel={onStop}
-            allowSpeech
-            actions={false}
-            placeholder={
-              mode === "chat"
-                ? "有问题尽管问（chat 模式，打开右上角开关可联网）"
-                : "描述任务，Agent 会调用本地工具完成（agent 模式）"
-            }
-            footer={({ components }) => {
-              const { SendButton, LoadingButton, SpeechButton } = components;
-              return (
-                <div className="composer-toolbar">
-                  <div className="composer-toolbar-left">
-                    {/* 「+」上传菜单：图片 / 文件。
-                        菜单项用原生 label htmlFor 直连隐藏 input ——
-                        手机浏览器（iOS/安卓）对 antd 菜单里的 JS input.click()
-                        可能不视为用户手势导致选图面板不弹出，label 是原生激活无此问题 */}
-                    <Dropdown
-                      trigger={["click"]}
-                      placement="topLeft"
-                      menu={{
-                        items: [
-                          {
-                            key: "image",
-                            label: (
-                              <label className="plus-menu-label" htmlFor="att-input-image">
-                                <PictureOutlined /> 上传图片
-                              </label>
-                            ),
-                          },
-                          {
-                            key: "file",
-                            label: (
-                              <label className="plus-menu-label" htmlFor="att-input-file">
-                                <PaperClipOutlined /> 上传文件
-                              </label>
-                            ),
-                          },
-                        ],
-                      }}
-                    >
-                      <span className="tb-icon-btn" title="上传附件">
-                        <PlusOutlined />
-                      </span>
-                    </Dropdown>
-                    {/* 模式选择：快速对话 / 智能体（从顶栏迁移至此） */}
-                    <Dropdown
-                      trigger={["click"]}
-                      placement="topLeft"
-                      menu={{
-                        selectedKeys: [mode],
-                        items: [
-                          { key: "chat", icon: <ThunderboltOutlined />, label: "快速对话" },
-                          { key: "agent", icon: <RobotOutlined />, label: "智能体" },
-                        ],
-                        onClick: ({ key }) => onMode(key as Mode),
-                      }}
-                    >
-                      <span className="tb-mode">
-                        {mode === "chat" ? <ThunderboltOutlined /> : <RobotOutlined />}
-                        <span>{mode === "chat" ? "快速对话" : "智能体"}</span>
-                        <DownOutlined className="tb-mode-caret" />
-                      </span>
-                    </Dropdown>
-                    {/* 确认模式：仅智能体模式有意义（chat 模式无危险本地工具） */}
-                    {mode === "agent" && (
-                      <ApprovalChip value={approval} onChange={onApproval} />
-                    )}
+          {/* 输入框定位容器：审批面板绝对定位覆盖在 Sender 上，塌缩态恰好盖满，
+              展开「查看详细」时锚定底部向上撑开 */}
+          <div className={`composer-slot${confirm ? " blocked" : ""}`}>
+            <Sender
+              value={input}
+              onChange={setInput}
+              onSubmit={(v: string) => {
+                onSend(v, pending.length ? pending : undefined);
+                setInput("");
+                setPending([]);
+              }}
+              loading={busy}
+              onCancel={onStop}
+              allowSpeech
+              actions={false}
+              placeholder={
+                mode === "chat"
+                  ? "有问题尽管问（chat 模式，打开右上角开关可联网）"
+                  : "描述任务，Agent 会调用本地工具完成（agent 模式）"
+              }
+              footer={({ components }) => {
+                const { SendButton, LoadingButton, SpeechButton } = components;
+                return (
+                  <div className="composer-toolbar">
+                    <div className="composer-toolbar-left">
+                      {/* 「+」上传菜单：图片 / 文件。
+                          菜单项用原生 label htmlFor 直连隐藏 input ——
+                          手机浏览器（iOS/安卓）对 antd 菜单里的 JS input.click()
+                          可能不视为用户手势导致选图面板不弹出，label 是原生激活无此问题 */}
+                      <Dropdown
+                        trigger={["click"]}
+                        placement="topLeft"
+                        menu={{
+                          items: [
+                            {
+                              key: "image",
+                              label: (
+                                <label className="plus-menu-label" htmlFor="att-input-image">
+                                  <PictureOutlined /> 上传图片
+                                </label>
+                              ),
+                            },
+                            {
+                              key: "file",
+                              label: (
+                                <label className="plus-menu-label" htmlFor="att-input-file">
+                                  <PaperClipOutlined /> 上传文件
+                                </label>
+                              ),
+                            },
+                          ],
+                        }}
+                      >
+                        <span className="tb-icon-btn" title="上传附件">
+                          <PlusOutlined />
+                        </span>
+                      </Dropdown>
+                      {/* 模式选择：快速对话 / 智能体（从顶栏迁移至此） */}
+                      <Dropdown
+                        trigger={["click"]}
+                        placement="topLeft"
+                        menu={{
+                          selectedKeys: [mode],
+                          items: [
+                            { key: "chat", icon: <ThunderboltOutlined />, label: "快速对话" },
+                            { key: "agent", icon: <RobotOutlined />, label: "智能体" },
+                          ],
+                          onClick: ({ key }) => onMode(key as Mode),
+                        }}
+                      >
+                        <span className="tb-mode">
+                          {mode === "chat" ? <ThunderboltOutlined /> : <RobotOutlined />}
+                          <span>{mode === "chat" ? "快速对话" : "智能体"}</span>
+                          <DownOutlined className="tb-mode-caret" />
+                        </span>
+                      </Dropdown>
+                      {/* 确认模式：仅智能体模式有意义（chat 模式无危险本地工具） */}
+                      {mode === "agent" && (
+                        <ApprovalChip value={approval} onChange={onApproval} />
+                      )}
+                    </div>
+                    <div className="composer-toolbar-right">
+                      {/* 语音输入（浏览器 SpeechRecognition，不支持时自动变禁用态） */}
+                      <SpeechButton />
+                      {/* 发送按钮保持默认主色圆形样式，在一排文字图标中最醒目 */}
+                      {busy ? <LoadingButton /> : <SendButton />}
+                    </div>
                   </div>
-                  <div className="composer-toolbar-right">
-                    {/* 语音输入（浏览器 SpeechRecognition，不支持时自动变禁用态） */}
-                    <SpeechButton />
-                    {/* 发送按钮保持默认主色圆形样式，在一排文字图标中最醒目 */}
-                    {busy ? <LoadingButton /> : <SendButton />}
-                  </div>
-                </div>
-              );
-            }}
-          />
+                );
+              }}
+            />
+          </div>
+          <ConfirmPanel info={confirm ?? null} timeout={confirmTimeout} onAnswer={(a) => onAnswerConfirm?.(a)} />
+          </div>
           {/* 「+」菜单用的文件选择框：视觉隐藏而非 display:none，
               保证手机浏览器通过 label 激活时能正常弹出选图面板 */}
           <input id="att-input-image" className="visually-hidden-file" type="file" accept="image/*" onChange={onPickFile} />

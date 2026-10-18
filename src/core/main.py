@@ -25,7 +25,8 @@ mini-agent 入口。
 
 Web UI 开关（配合 --web）：
     --port N            监听端口（默认 8000）
-    --host ADDR         监听地址（默认 127.0.0.1，仅本机可访问）
+    --host ADDR         监听地址（默认 0.0.0.0，本机 + 局域网均可访问）
+                        传 127.0.0.1 可收窄为仅本机；启动时会打印局域网访问地址
 
 结构：main() 只做编排，真正的活儿在下面的分段函数里：
     _bootstrap        所有路径共用的前半场（环境变量 → UI → 插件 → 技能）
@@ -131,7 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-q", "--quiet", action="store_true", help="不显示工具调用轨迹")
     ap.add_argument("--web", action="store_true", help="启动 Web UI（浏览器聊天界面）")
     ap.add_argument("--port", type=int, default=8000, help="Web UI 监听端口（默认 8000）")
-    ap.add_argument("--host", default="127.0.0.1", help="Web UI 监听地址（默认 127.0.0.1）")
+    ap.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Web UI 监听地址（默认 0.0.0.0，局域网可访问；传 127.0.0.1 收窄为仅本机）",
+    )
     return ap
 
 

@@ -11,7 +11,7 @@ export type ApprovalMode = "ask" | "auto" | "full";
 /** 沙箱外读取策略：strict 全拦 / whitelist 仅白名单 / open 全部只读放开 */
 export type SandboxReadMode = "strict" | "whitelist" | "open";
 
-/** 危险操作确认请求（confirm_request 事件 → ConfirmModal） */
+/** 危险操作确认请求（confirm_request 事件 → ConfirmPanel） */
 export interface ConfirmInfo {
   id: string;
   tool: string;
@@ -43,10 +43,45 @@ export type SSEEvent =
   | { type: "tool_start"; id: string; name: string; args: Record<string, unknown> }
   | { type: "tool_end"; id: string; ok: boolean; sec: number; result: string }
   | { type: "confirm_request"; id: string; tool: string; args: Record<string, unknown> }
+  | { type: "ask_request"; id: string; question: string; options: string[]; allow_free_text: boolean; multi: boolean }
   | { type: "notice"; text: string }
   | { type: "cancelled"; reason: string; usage?: Usage }
   | { type: "done"; answer: string; sec: number; usage?: Usage }
-  | { type: "error"; message: string; usage?: Usage };
+  | { type: "error"; message: string; usage?: Usage }
+  /** 事件流的实时镜像（P0 可选能力）：event 为一条完整轨迹事件信封 */
+  | { type: "trace"; event: TraceEvent };
+
+/** 轨迹事件的来源（决定 Trajectory 视图的着色） */
+export type TraceSource =
+  | "system"
+  | "user"
+  | "memory"
+  | "model"
+  | "tool"
+  | "approval"
+  | "loop";
+
+/** 一条轨迹事件（core/events.py 的 JSONL 信封，与后端一一对应） */
+export interface TraceEvent {
+  v: number;
+  seq: number;
+  ts: number;
+  /** run_start / user_message / llm_request / tool_call / run_end … */
+  type: string;
+  source: TraceSource;
+  /** run_start / turn / context / run_end */
+  phase: string;
+  turn: number | null;
+  run_id: string;
+  payload: Record<string, unknown>;
+}
+
+/** GET /api/trajectory 返回 */
+export interface TrajectoryData {
+  session: string;
+  events: TraceEvent[];
+  last_seq: number;
+}
 
 /** 一次工具调用（ThoughtChain 节点）：start 时 ok 未定，end 时补齐 */
 export interface ToolCall {
@@ -56,6 +91,24 @@ export interface ToolCall {
   ok?: boolean;
   sec?: number;
   result?: string;
+}
+
+/** 内联提问卡片的留存记录（回答后 / 失效后折叠展示） */
+export interface AskRecord {
+  question: string;
+  options: string[];
+  allowFreeText: boolean;
+  /** true = 多选（收集信息）；false/缺省 = 单选（决策） */
+  multi: boolean;
+  /** 用户答案；空 = 未回答 */
+  answer?: string;
+  /** true = 超时 / 停止任务导致的失效 */
+  expired?: boolean;
+}
+
+/** 正在等待用户作答的提问（ask_request 事件驱动，回答后清空） */
+export interface PendingAsk extends AskRecord {
+  id: string;
 }
 
 /** 聊天消息（含实时流式中的 assistant 消息） */
@@ -73,6 +126,8 @@ export interface ChatItem {
   reason?: string;
   /** 用户消息的附件（图片 / 文件），供前端展示 */
   attachments?: Attachment[];
+  /** assistant 消息里折叠留存的提问卡片（answered / expired） */
+  ask?: AskRecord;
 }
 
 /** GET /api/state 返回 */
@@ -227,6 +282,8 @@ export interface GeneralSettings {
   log_level: "DEBUG" | "INFO" | "WARNING" | "ERROR";
   /** 日志按天滚动，保留最近 N 天 */
   log_retention_days: number;
+  /** 是否把运行时事实写入 <会话>.events.jsonl（运行轨迹抽屉的数据来源） */
+  events_enabled: boolean;
 }
 
 /** GET /api/memory 返回的三层记忆 */

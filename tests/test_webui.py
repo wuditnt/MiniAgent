@@ -12,6 +12,7 @@ Web UI 端到端验证：真实 WebServer + mock OpenAI 兼容服务，断言 SS
   ⑧ 并发保护：同会话第二个 /api/chat → 409
   ⑨ /api/state 与静态引导页
   ⑭ keep-alive：未读的请求体不影响同一条连接上的后续请求
+  ⑮ 事件流：/api/trajectory 只读回放（llm_request/run_end）+ 老会话空数组 + SSE 实时镜像
 
 运行：python test_webui.py
 """
@@ -190,14 +191,20 @@ def scenario_chat_and_history() -> None:
     global SCRIPT
     SCRIPT = []
     events = collect({"message": "你好", "mode": "chat", "web": False, "session": "t-chat"})
-    types = [e["type"] for e in events]
-    assert "turn" in types and events[0]["type"] == "turn", f"首事件应为 turn：{types}"
-    assert events[0]["mode"] == "chat"
+    # trace 帧是事件流的实时镜像（P0 新增，可选）；剥离它们后才是原 SSE 契约。
+    # 首事件仍是 turn —— 界面渲染指令不受事件流影响（D7/D8）。
+    frames = [e for e in events if e["type"] != "trace"]
+    types = [e["type"] for e in frames]
+    assert "turn" in types and frames[0]["type"] == "turn", f"首事件应为 turn：{types}"
+    assert frames[0]["mode"] == "chat"
+    # 实时镜像（可选能力）确实挂上了：首帧 trace 就是本轮的 run_start
+    trace = [e for e in events if e["type"] == "trace"]
+    assert trace and trace[0]["event"]["type"] == "run_start", f"应有实时轨迹帧：{trace[:1]}"
     assert types.count("delta") >= 1, "应有流式 delta"
-    assert all(e["kind"] == "content" for e in events if e["type"] == "delta")
+    assert all(e["kind"] == "content" for e in frames if e["type"] == "delta")
     assert "tool_start" not in types and "tool_end" not in types, "chat 模式不应有工具事件"
     assert types[-1] == "done", f"终态应为 done：{types}"
-    done = events[-1]
+    done = frames[-1]
     assert done["answer"] == FINAL_TEXT and done["sec"] >= 0
     # 每轮回答要带回「本轮用量增量」，供前端工具栏展示
     usage = done.get("usage")
@@ -232,6 +239,32 @@ def scenario_agent_tools() -> None:
     assert types[-1] == "done"
     assert events[-1]["usage"]["tool_calls"] == 1, f"用量里应记 1 次工具调用：{events[-1]}"
     print(f"  [4] agent 模式工具轨迹通过（{start['name']} 配对 id={start['id']}）")
+
+
+def scenario_trajectory() -> None:
+    """⑮ 事件流回放：/api/trajectory 只读，链路完整；老会话返回空数组不报错。"""
+    status, body = api("GET", "/api/trajectory?session=t-chat")
+    assert status == 200, body
+    evs = body["events"]
+    types = [e["type"] for e in evs]
+    for want in ("run_start", "system_prompt", "user_message", "llm_request",
+                 "llm_response", "run_end"):
+        assert want in types, f"轨迹缺事件 {want}：{types}"
+    assert body["last_seq"] == evs[-1]["seq"] == len(evs), f"seq 应从 1 连续：{body['last_seq']}"
+    assert all(e.get("run_id") for e in evs), "每条事件都应带 run_id"
+    # llm_request 只存摘要、不存正文（体积不变式）
+    req = next(e for e in evs if e["type"] == "llm_request")
+    assert req["payload"]["messages"] and "content" not in req["payload"], req["payload"]
+
+    # agent 会话：工具调用与结果也要留痕
+    _, ag = api("GET", "/api/trajectory?session=t-agent")
+    atypes = [e["type"] for e in ag["events"]]
+    assert "tool_call" in atypes and "tool_result" in atypes, atypes
+
+    # P0 之前的老会话（无事件文件）→ 空数组，不报 404
+    status, empty = api("GET", "/api/trajectory?session=no-such-session")
+    assert status == 200 and empty["events"] == [] and empty["last_seq"] == 0, empty
+    print(f"  [15] /api/trajectory 通过（{len(evs)} 条事件，链路完整；老会话空数组）")
 
 
 def _approve(sid: str, ev: dict) -> None:
@@ -541,7 +574,7 @@ def scenario_settings() -> None:
     assert status == 200, body
     vals, defs = body["values"], body["defaults"]
     assert vals == defs, f"没改过时应等于内置默认：{vals} vs {defs}"
-    assert vals["max_turns"] == 25 and vals["stream"] is True and vals["max_workers"] == 4
+    assert vals["max_turns"] == 10 and vals["stream"] is True and vals["max_workers"] == 4
 
     # 越界、类型错误、未知键都必须被拦下
     for bad in ({"max_turns": 0}, {"max_turns": 999}, {"temperature": "hot"},
@@ -615,6 +648,11 @@ def main() -> int:
     import core.webui as _webui
 
     _webui._SESSIONS_DIR = os.path.join(tmpdir, "sessions")
+    # 事件流是独立模块（core/events.py 自己算路径），也必须指到临时目录，
+    # 否则测试会把 *.events.jsonl 写进真实 web_data/sessions。
+    import core.events as _events
+
+    _events._SESSIONS_DIR = os.path.join(tmpdir, "sessions")
     _mc._MODELS_FILE = os.path.join(tmpdir, "models.json")
     _wc._WORKSPACES_FILE = os.path.join(tmpdir, "workspaces.json")
     _st._SETTINGS_FILE = os.path.join(tmpdir, "settings.json")
@@ -648,6 +686,7 @@ def main() -> int:
         ("会话工具表矩阵", scenario_registry_matrix),
         ("chat 模式 + history", scenario_chat_and_history),
         ("agent 模式工具轨迹", scenario_agent_tools),
+        ("事件流轨迹回放", scenario_trajectory),
         ("停止任务", scenario_stop),
         ("危险确认-拒绝", lambda: scenario_confirm(deny=True)),
         ("危险确认-允许", lambda: scenario_confirm(deny=False)),

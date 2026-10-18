@@ -21,6 +21,7 @@ mini-agent/
 │   ├── schema.py                 从类型注解 + docstring 自动推导 JSON Schema
 │   ├── sandbox.py                工作区沙箱（读写双通道 / 三档读取 / 越界写检测）/ 截断
 │   ├── approval.py               三档确认模式（ask/auto/full）+ request_approval 核心工具
+│   ├── ask.py                    内联提问：ask_user 核心工具 + 询问通道（UI 卡片回传答案）
 │   ├── python_prelude.py         run_python 注入的写护栏（区外写/删/改一律拦截）
 │   ├── memory.py                 记忆系统：三层存储 / 保护区判定 / 注入渲染 / remember
 │   ├── cancel.py                 取消令牌 / 杀进程树 / 原因留痕
@@ -128,7 +129,7 @@ cd web; npm run dev                  # 终端 2：Vite :5173，/api 自动代理
 
 要点：
 
-- 默认只监听 `127.0.0.1`（`--host` 可改），数据不出本机；新增 `--web` / `--port`（默认 8000） / `--host` 开关
+- 默认监听 `0.0.0.0`（本机 + 局域网均可访问，手机/同网段设备直连；传 `--host 127.0.0.1` 可收窄为仅本机）；新增 `--web` / `--port`（默认 8000） / `--host`（默认 `0.0.0.0`）开关
 - chat 模式 = 纯对话（关联网时零工具、单次直答）；agent 模式 = 全量内置工具循环（当前 87 个，含 `remember`；`request_approval` 仅 auto 档暴露）；开联网则追加 `web_search`
 - 流式输出、工具执行轨迹（ThoughtChain，参数/结果可展开）、中途停止、刷新后恢复历史
 - **三档确认模式**（仅 agent 模式，输入框工具栏盾牌胶囊切换，localStorage 记住选择）：
@@ -136,6 +137,7 @@ cd web; npm run dev                  # 终端 2：Vite :5173，/api 自动代理
   - **自主判断（auto）**：普通危险操作不再打扰，系统提示词注入责任准则，模型认为有风险时主动调 `request_approval(reason)` 向你申请（弹窗展示申请理由，批准才继续）；**危险的 MCP 工具在任何档位都强制弹窗**，这是硬特例
   - **完全控制（full）**：沙箱内操作一律不弹（MCP 工具仍弹）
   - 控制台 `/approve` 在 ask / full 两档间切换；命令行 `--approve` 默认进入 ask
+- **内联提问卡片**：Agent 缺关键信息或需要你做抉择时会调用 `ask_user`，问题**直接渲染在助手回复气泡里**（不必自己在输入框打字）—— 给出候选时是可点选的单选 + 「其他」自定义输入，无候选时退化为纯文本输入；点击/提交后即时回传，卡片折叠为「已选择：XXX」，Agent 在**同一轮**继续执行。超时 120s 未答或中途停止按「未回答」处理（卡片转灰「已失效」），Agent 基于已有信息继续或说明所用假设。`ask / auto / full` 三档均可用；刷新页面不保留已失效卡片（答案折叠态在会话内保存）
 - **附件上传**：输入区左侧加号菜单可上传图片 / 文件（多选）。图片走视觉模型（`view_image` 通道），文件内容注入消息；助手回答中引用 `.attachments/` 路径的图片会直接渲染显示
 - **每轮消息下方工具栏**（常显）：复制按钮悬停展开「复制为 Markdown / 复制为纯文本」菜单；助手消息支持**重新生成**（回溯到对应提问重答）；用户消息支持**编辑重发**（原文回填输入框）与**删除此条及之后消息**；另有本轮 token 用量（悬停看输入/输出/模型调用/工具调用明细）与耗时。历史回放的消息没有用量与耗时，对应项自动隐藏
 - **顶栏操作**：用量统计面板（消息数 / token 汇总 / 平均每轮 / 总耗时 / LLM 与工具调用次数 + 逐条明细）、清空当前会话、导出会话为 Markdown 文件下载
@@ -152,6 +154,7 @@ cd web; npm run dev                  # 终端 2：Vite :5173，/api 自动代理
   - **记忆**页签：编辑用户画像与项目记忆、查看/删除会话摘要、开关「启用记忆 / 自动提炼」与注入预算（详见下文「记忆系统」一节）
   - 插件管理：展示当前全部工具（名称 / 来源 / 分组 / 签名），按来源标记为 core / builtin / user / mcp，支持查看 dangerous / exclusive 标记与分组汇总，便于快速了解 Agent 当前具备的能力
 - **右侧工作台抽屉**：顶栏最右侧图标展开/收起。初始为「开始」页，点击「工作区文件」进入目录列表；点文件新建标签页，支持代码/文本（行号+高亮）、Markdown（预览/源码）、HTML / MHTML（iframe 预览/源码，默认预览，脚本沙箱隔离）、图片预览；关闭全部标签后抽屉自动收起，再次打开回到开始页（只读，不修改文件）
+- **运行轨迹抽屉**：助手消息脚注区 / 侧栏会话项的时钟图标打开，按 `run_id → turn` 回放会话事件流（来源着色、可展开、单轮逐条回放、按类型过滤）。与会话 JSON 双写的事实层，详见下文「可追溯运行（事件流）」一节
 - **多会话与搜索**：对话本地持久化（`web_data/sessions/*.json`，原子写），搜索支持标题 + 全文、空格分隔的多词 AND、命中片段高亮，点结果直接滚动定位到那条消息并闪烁
 - **上下文记忆**：超长对话三级收敛 —— 先裁较早的工具结果、再把较早整轮滚动摘要成一段（保留任务目标/决策/进度/待办）、最后滑动窗口硬截断（保留 system + 摘要 + 最近 8 轮）。裁剪以「轮」为单位，`tool_calls` 与 `tool` 结果要么一起留要么一起删，不会配对错位导致接口报错
 - 后端为 `src/core/webui.py`：stdlib `ThreadingHTTPServer` + SSE，Python 侧零新依赖；协议与设计见 [docs/WEBUI_ANTDX_PLAN.md](docs/WEBUI_ANTDX_PLAN.md)
@@ -260,6 +263,24 @@ HTML / MHTML 预览说明：
 - `.html` / `.htm` 在 sandbox iframe 中渲染，默认预览，可切源码；相对 CSS / 图片 / JS 通过 `/api/workspace/asset` 加载。
 - `.mht` / `.mhtml` 由后端解析（Python 标准库 `email`），提取主 HTML 与内嵌资源，资源以 `data:` URL 注入预览。
 - iframe 使用 `sandbox="allow-scripts"`：脚本可运行，但没有同源权限，无法访问父页面 DOM / localStorage / cookie。
+
+---
+
+## 可追溯运行（事件流）
+
+每一次 `run()` 的「事实」都会按发生顺序追加到 `web_data/sessions/<会话id>.events.jsonl`
+（append-only，一行一个 JSON 信封），Web UI 的「运行轨迹」抽屉直接回放这份事实。
+
+- **入口**：助手消息脚注区的时钟图标（hover 提示「查看运行轨迹」）；侧栏会话项 hover 的同一图标（会先切到该会话）。抽屉与右侧工作台共用一套外壳/宽度记忆，二者互斥。
+- **信封**：`{v, seq, ts, type, source, phase, turn, run_id, payload}`；`type` 共 12 种 —— `run_start` / `system_prompt` / `user_message` / `context_inject` / `llm_request` / `llm_response` / `tool_call` / `tool_result` / `approval` / `cancel` / `error` / `run_end`。`source` 为 `system | user | memory | model | tool | approval | loop`，决定轨迹行的着色。
+- **视图**：按 `run_id → turn` 两级分组的时间线；每行显示序号 / 时间 / `type` 徽标 / 一行摘要，hover 出现「详情」按钮 → 展开为语法高亮的原始内容（换行不转义）。顶部过滤器 `全部 / 模型 / 工具 / 上下文 / 授权` + 「只看本轮」；每个轮次分组头有「回放」按钮，按时间顺序逐条揭示该轮事件（纯前端展示，不重发请求）。
+- **关键不变式（I1）**：`llm_request` 只存逐条消息的 `sha256` 摘要（不存正文），正文各自只存一次在 `system_prompt` / `user_message` / `llm_response` / `tool_result` 等来源事件里 —— 事件流体积不膨胀，且仅凭事件流即可完整、可校验地重建每次请求的消息列表（图片以 `#img:<sha256>` 占位）。
+- **与会话 JSON 的关系**：`.json` 仍是恢复历史、搜索、展示的主口径，事件流是事实层与兜底（双写）。删除会话时两个文件一起删。
+- **零侵入**：Agent 未挂 `event_writer`（CLI / REPL / 未启用）时埋点是纯 no-op，行为与耗时和接入前逐条一致；写入失败只吞掉，绝不影响任务。
+- **实时镜像**：运行中 SSE 会附带 `trace` 帧把事件即时推进抽屉，但**不阻塞**；收到 `done / error / cancelled` 后前端再拉一次全量做磁盘兜底。
+- **开关**：设置 → 通用配置 → 「运行轨迹 → 记录会话事件流」（`events_enabled`，默认开）。关闭后不再产生新文件；旧会话（早于本能力）打开轨迹显示「无事件记录」而不报错。
+
+对应后端接口：`GET /api/trajectory?session=<sid>&from_seq=<int>&limit=<int>`（只读；默认 500、上限 5000；无事件文件返回空数组）。
 
 ---
 
@@ -638,6 +659,8 @@ scripts\run_tests.bat --real           # 额外跑真实 API 用例（消耗 tok
 | `tests/test_memory.py` | 记忆系统 11 项：存储 / 保护区 / 工具不可见 / prelude / shell / 注入 |
 | `tests/test_logging.py` | 文件日志 6 项：按日目录 / 错误聚合 / 幂等重配 / 关闭 / 配置 / 清理 |
 | `tests/test_workbench.py` | 工作台文件接口 9 项：目录 / 安全 / 编码 / 图片 / HTML / MHTML |
+| `tests/test_events.py` | 事件流 8 项：只追加 / 请求可重建 / 裁剪留痕 / 开关 / 兜底 |
+| `tests/test_ask.py` | 内联提问 12 项：返回协议 / 选项规范化 / 工具契约 / 等待桥 |
 
 实测（`.venv` 内，Windows）：
 
@@ -719,6 +742,7 @@ mini-agent/
 │   │                          shell 越界写检测、可取消的 run_process
 │   ├── approval.py           三档确认模式（ask/auto/full）+ request_approval 工具
 │   ├── memory.py             记忆系统：三层存储 / 保护区判定 / 注入渲染 / remember 工具
+│   ├── events.py             会话事件流（可追溯运行）：append-only JSONL、EventWriter、按事件重放消息
 │   ├── webui.py              Web UI 服务：stdlib ThreadingHTTPServer + SSE、工作台/会话/设置接口
 │   ├── workspace_config.py   工作区配置：注册表与路径解析（resolve_path）
 │   ├── model_config.py       模型配置：多服务商配置读写与连接测试（web_data/models.json）
@@ -855,14 +879,17 @@ UI 也不被迫为并发加锁（`ui.py` 里仍备了一把可重入锁，作为
 
 当前是**可扩展的地基**，不是生产系统。要上线还需要：
 
-- **持久化记忆**：跨会话的长期记忆与检索
-- **权限策略引擎**：按工具/参数做细粒度规则，而不只是 yes/no
+- **细粒度权限策略**：三档确认（ask / auto / full）与 `dangerous` / `exclusive` 标记已落地
+  （见「三档确认」与设计决定第 5 条），但粒度仍是「按工具二值判断」；还缺按工具 / 参数 /
+  路径的规则引擎（例如「`read_file` 只允许某目录」）
 - **可观测性**：文件日志已按类别落盘（见「运行日志」）；还缺调用链与成本归因
-- **MCP 高级能力**：resources / prompts / sampling / 进度通知
+- **记忆的语义检索**：跨会话持久化、关键词命中注入、自动提炼都已实现（见「记忆系统」）；
+  还缺向量 / 语义检索 —— 条目多到关键词覆盖不住时，召回会退化
+- **MCP 高级能力**：resources / prompts / sampling / 进度通知（当前客户端只实现
+  `tools/list` 与 `tools/call`）
 - **多模态**：图片输入已支持（`view_image` 工具 + [core/images.py](src/core/images.py)
   附件通道，模型须为视觉模型）；语音输入未做
-- **上下文压缩**：现在只做"超限裁剪"，还没有摘要式压缩
 - **取消的深化**：纯 Python 阻塞调用的线程强杀（Python 无法安全杀线程，只能靠工具
-  作者自觉检查令牌）；服务端发的 `notifications/cancelled`（取消**它**发起的采样请求，
-  目前客户端还不处理 server→client 请求）。MCP 的 `notifications/cancelled`（客户端→
-  服务端）已实现，见「取消通知：别让对端白跑」。
+  作者自觉检查令牌）；服务端发起的 server→client 请求（`sampling/createMessage`、
+  `roots/list` 等）目前客户端不处理 —— 入站带 id 的请求只会落进公共队列而无人应答。
+  MCP 的 `notifications/cancelled`（客户端→服务端）已实现，见「取消通知：别让对端白跑」。

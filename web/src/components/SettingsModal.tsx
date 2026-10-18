@@ -446,6 +446,33 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
                     </div>
                   </div>
                 )}
+                <div className="gs-group-title">运行轨迹</div>
+                {draft && (
+                  <div className="gs-section">
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        padding: "8px 0",
+                      }}
+                    >
+                      <div>
+                        <div className="sandbox-opt-name">记录会话事件流</div>
+                        <div className="sandbox-opt-desc">
+                          把每轮运行的 system prompt / 模型请求摘要 / 工具调用 / 授权决定等按序追加到
+                          web_data/sessions/&lt;会话&gt;.events.jsonl，供「运行轨迹」抽屉回放；
+                          关闭后不再产生新事件，对话本身不受影响
+                        </div>
+                      </div>
+                      <Switch
+                        checked={draft.events_enabled}
+                        onChange={(v) => patch("events_enabled", v)}
+                      />
+                    </div>
+                  </div>
+                )}
                 {dirty && (
                   <Alert
                     type="info"

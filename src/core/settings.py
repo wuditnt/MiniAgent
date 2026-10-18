@@ -22,7 +22,7 @@ _SETTINGS_FILE = os.path.join(ROOT, "web_data", "settings.json")
 
 #: 内置默认值
 DEFAULTS: dict = {
-    "max_turns": 25,               # 单次任务最多跑几轮（1 轮 = 一次模型调用 + 工具执行）
+    "max_turns": 10,               # 单次任务最多跑几轮（1 轮 = 一次模型调用 + 工具执行）
     "max_context_chars": 120_000,  # 上下文超过这个字符数就触发三级收敛
     "keep_recent_turns": 8,        # 滑动窗口至少保留最近几轮原文
     "max_output_chars": 8_000,     # 单个工具结果的字符上限
@@ -44,6 +44,10 @@ DEFAULTS: dict = {
     "log_enabled": True,           # 是否写本地文件日志（logs/ 下分类文件）
     "log_level": "INFO",           # DEBUG 才能看到 HTTP 访问日志
     "log_retention_days": 7,       # 按天滚动，保留最近 N 天
+    # ---- 会话事件流（可追溯运行）----
+    "events_enabled": True,        # 是否把运行时事实写入 <sid>.events.jsonl
+    "events_value_limit": 65_536,  # 单个字符串值超过它就写成显式截断标记
+    "events_keep_runs": 0,         # 预留：每会话保留最近 N 次 run 的完整事件（0=不裁剪）
 }
 
 #: 数值型取值区间；未列出的项不做区间限制
@@ -56,14 +60,17 @@ RANGES: dict[str, tuple] = {
     "max_workers": (1, 16),
     "memory_budget_chars": (200, 8_000),
     "log_retention_days": (1, 90),
+    "events_value_limit": (4_096, 1_048_576),
+    "events_keep_runs": (0, 1_000),
 }
 
 #: 整数字段（其余数值字段按浮点处理）
 INT_KEYS = ("max_turns", "max_context_chars", "keep_recent_turns", "max_output_chars",
-            "max_workers", "memory_budget_chars", "log_retention_days")
+            "max_workers", "memory_budget_chars", "log_retention_days",
+            "events_value_limit", "events_keep_runs")
 #: 布尔字段
 BOOL_KEYS = ("stream", "parallel_tools", "memory_enabled", "memory_auto_extract",
-             "log_enabled")
+             "log_enabled", "events_enabled")
 #: 枚举字符串字段：允许的取值
 ENUM_KEYS: dict[str, tuple[str, ...]] = {
     "sandbox_read": ("strict", "whitelist", "open"),

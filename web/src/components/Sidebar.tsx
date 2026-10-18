@@ -14,6 +14,7 @@ import {
   EditOutlined,
   EllipsisOutlined,
   FolderOpenOutlined,
+  HistoryOutlined,
   MenuOutlined,
   MessageOutlined,
   PlusOutlined,
@@ -41,6 +42,8 @@ interface Props {
   onDeleteSession: (sid: string) => void;
   /** 修改某个会话的标题（在列表项上就地编辑） */
   onRenameSession: (sid: string, title: string) => void;
+  /** 回放某个会话的运行轨迹（P0 事实层）：切到该会话并打开轨迹抽屉 */
+  onReplaySession: (sid: string) => void;
   onCreateWorkspace: () => void;
   onRenameWorkspace: (w: WorkspaceItem) => void;
   onDeleteWorkspace: (w: WorkspaceItem) => void;
@@ -113,6 +116,7 @@ export default function Sidebar({
   onCreateSession,
   onDeleteSession,
   onRenameSession,
+  onReplaySession,
   onCreateWorkspace,
   onRenameWorkspace,
   onDeleteWorkspace,
@@ -336,6 +340,17 @@ export default function Sidebar({
                               ) : null}
                             </div>
                             <span className="session-item-time">{formatTime(s.updated_at)}</span>
+                            {editId !== s.id && (
+                              <Tooltip title="回放运行轨迹">
+                                <HistoryOutlined
+                                  className="session-item-edit"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    onReplaySession(s.id);
+                                  }}
+                                />
+                              </Tooltip>
+                            )}
                             {editId !== s.id && (
                               <Tooltip title="重命名">
                                 <EditOutlined

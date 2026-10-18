@@ -27,6 +27,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from core._paths import ROOT
+from core import events
 from core import logging_setup
 from core import model_config
 from core import settings
@@ -39,6 +40,7 @@ from core import workspace_config
 CONFIRM_TIMEOUT = 120          # 危险确认等待上限（秒），超时视为拒绝
 PUMP_IDLE = 15                 # SSE 空闲心跳间隔（秒）
 HISTORY_RESULT_LIMIT = 4000    # tool_end 事件里结果文本的传输上限
+CONFIRM_ARG_LIMIT = 20000      # 危险确认弹窗参数上限：需完整展示脚本/代码，故放宽
 MAX_BODY = 32 * 1024 * 1024    # 请求体上限 32MB（base64 附件膨胀约 1/3，实际文件上限约 24MB）
 MAX_UPLOAD_BYTES = 24 * 1024 * 1024   # 单个附件解码后上限
 MAX_ATTACHMENT_TEXT = 8000     # 文本附件注入消息的内容节选上限（字符）
@@ -162,6 +164,8 @@ class _Session:
         self.run_lock = threading.Lock()
         self.confirm_lock = threading.Lock()
         self.pending_confirm: tuple[str, threading.Event, dict] | None = None
+        # ask_user 内联提问卡片的待答项：(cid, event, {"answer": str})
+        self.pending_ask: tuple[str, threading.Event, dict] | None = None
         # 持久化字段
         self.title = "新对话"
         self.title_custom = False            # 标题是否被手动改过（改过则不再按首条消息自动生成）
@@ -280,6 +284,28 @@ class _Session:
                 pending[2]["approve"] = False
                 pending[1].set()
 
+    def answer_ask(self, cid: str, answer: str) -> bool:
+        """浏览器对 ask_request 的应答。返回是否真的匹配到了待答项。"""
+        with self.confirm_lock:
+            pending = self.pending_ask
+            if not pending or pending[0] != cid:
+                return False
+            pending[2]["answer"] = answer
+            pending[1].set()
+        return True
+
+    def deny_pending_ask(self) -> None:
+        """以「未作答」解除正在等待的提问（停止任务 / 浏览器断连时调用）。
+
+        与 deny_pending_confirm 同理：ask_user 挂在工作线程的 Event.wait 上，
+        取消令牌叫不醒它；不主动放行的话 worker 会一直卡到 120s 超时。
+        """
+        with self.confirm_lock:
+            pending = self.pending_ask
+            if pending:
+                pending[2]["answer"] = ""
+                pending[1].set()
+
 
 class WebUI:
     """Agent 的 UI 实现：9 个回调全部翻译成事件，推入当前会话队列。
@@ -357,7 +383,7 @@ class WebUI:
         with session.confirm_lock:
             session.pending_confirm = (cid, event, holder)
         self._push({"type": "confirm_request", "id": cid, "tool": tool.name,
-                    "args": _brief_args(args)})
+                    "args": _brief_args(args, CONFIRM_ARG_LIMIT)})
         got = event.wait(CONFIRM_TIMEOUT)
         with session.confirm_lock:
             session.pending_confirm = None
@@ -382,6 +408,28 @@ class WebUI:
             session.pending_confirm = None
         return got and holder["approve"]
 
+    def ask_user(self, question: str, options: list, allow_free_text: bool = True,
+                 multi: bool = False) -> str:
+        """ask_user 内联提问桥：推 ask_request 事件 → Event.wait 挂起 → /api/answer 置位。
+
+        与 ask_confirm 共用 confirm_lock 与 CONFIRM_TIMEOUT，但载荷是文本答案。
+        前端把它渲染在助手气泡内部，用户点选/输入后即时回传。
+        multi=True 时前端渲染多选控件，多选结果仍以「、」拼接的单个字符串回传。
+        """
+        session = self.session
+        cid = uuid.uuid4().hex[:12]
+        event = threading.Event()
+        holder = {"answer": ""}
+        with session.confirm_lock:
+            session.pending_ask = (cid, event, holder)
+        self._push({"type": "ask_request", "id": cid, "question": question,
+                    "options": list(options or []), "allow_free_text": bool(allow_free_text),
+                    "multi": bool(multi)})
+        got = event.wait(CONFIRM_TIMEOUT)
+        with session.confirm_lock:
+            session.pending_ask = None
+        return holder["answer"] if got else ""
+
     def cancelled(self, reason: str = "") -> bool:
         self._push({"type": "cancelled", "reason": reason or "任务被取消"})
         return True
@@ -390,7 +438,7 @@ class WebUI:
         pass    # 网页没有「行」的概念，无需收尾
 
 
-def _brief_args(args: dict) -> dict:
+def _brief_args(args: dict, limit: int = 1200) -> dict:
     """参数过墙：每值截断，防止超大参数把事件流撑爆。
 
     注意：不用 core.ui.brief —— 它会把 \\n 换成 ⏎ 给控制台单行展示用，
@@ -398,7 +446,7 @@ def _brief_args(args: dict) -> dict:
     """
     def _clip(v: object) -> object:
         if isinstance(v, str):
-            return v if len(v) <= 1200 else v[:1199] + "…"
+            return v if len(v) <= limit else v[: limit - 1] + "…"
         return v  # dict/list 原样透传，让前端按 JSON 结构自行展示
     return {k: _clip(v) for k, v in (args or {}).items()}
 
@@ -513,6 +561,15 @@ def _posix_rel(path: str, root: str) -> str:
 
 def _session_file(sid: str) -> str:
     return os.path.join(_SESSIONS_DIR, f"{sid}.json")
+
+
+def _session_events_file(sid: str) -> str:
+    """会话事件流文件（P0 事实层）。
+
+    路径的唯一真相在 `core.events.events_path`（写、读、删三处必须永远一致，
+    否则删除会清掉一个不存在的文件）。这里只做一层语义化的别名。
+    """
+    return events.events_path(sid)
 
 
 def _save_session_file(sid: str, data: dict) -> None:
@@ -918,6 +975,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_state()
         elif route == "/api/history":
             self._handle_history(parse_qs(parsed.query))
+        elif route == "/api/trajectory":
+            self._handle_trajectory(parse_qs(parsed.query))
         elif route == "/api/sessions":
             self._handle_sessions_list(parse_qs(parsed.query))
         elif route == "/api/workspaces":
@@ -951,6 +1010,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_upload()
         elif route == "/api/confirm":
             self._handle_confirm()
+        elif route == "/api/answer":
+            self._handle_answer()
         elif route == "/api/stop":
             self._handle_stop()
         elif route == "/api/sessions":
@@ -1071,6 +1132,25 @@ class _RequestHandler(BaseHTTPRequestHandler):
         ]
         self._json({"session": sid, "messages": messages})
 
+    def _handle_trajectory(self, params: dict) -> None:
+        """只读：回放会话事件流（P0 事实层），供前端 Trajectory 视图使用。
+
+        无事件文件（P0 之前的老会话）→ 返回空数组，不报 404。
+        limit 默认 500、上限 5000；from_seq 只取 seq 大于它的增量。
+        """
+        sid = str((params.get("session") or ["default"])[0])[:64]
+
+        def _int(name: str, default: int) -> int:
+            try:
+                return int((params.get(name) or [default])[0])
+            except (TypeError, ValueError):
+                return default
+
+        from_seq = max(0, _int("from_seq", 0))
+        limit = max(1, min(_int("limit", 500), 5000))
+        items = events.load_events(sid, from_seq=from_seq, limit=limit)
+        self._json({"session": sid, "events": items, "last_seq": events.last_seq(sid)})
+
     def _handle_sessions_list(self, params: dict) -> None:
         """列出会话。q 支持多词 AND（标题或正文命中全部词）；workspace 按归属过滤。
 
@@ -1131,6 +1211,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
         with self.web._lock:
             self.web.sessions.pop(sid, None)
         ok = _delete_session_file(sid)
+        # 事件流文件一并删除（失败不阻断 —— 与主题摘要处理一致）
+        try:
+            os.remove(_session_events_file(sid))
+        except OSError:
+            pass
         # 摘要清理失败不阻断会话删除（记忆是衍生物）
         try:
             from core import memory
@@ -1895,6 +1980,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     alive = False
                     agent.interrupt("浏览器断开了连接")
                     session.deny_pending_confirm()
+                    session.deny_pending_ask()
                     break
                 if event.get("type") in ("done", "error", "cancelled"):
                     break
@@ -1925,6 +2011,17 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
         t0 = time.time()
         before = dict(agent.usage)
+        # 事件流：与会话 JSON「双写」（JSON 仍是 resume/搜索/展示的主口径）。
+        # 它是事实层，写失败只吞掉、绝不影响任务；mirror 把事件即时塞进 SSE
+        # 队列做实时轨迹（不阻塞，前端始终以 done 后拉取的全量为准）。
+        writer = events.EventWriter(
+            session.id,
+            enabled=bool(settings.get("events_enabled")),
+            value_limit=int(settings.get("events_value_limit") or events.DEFAULT_VALUE_LIMIT),
+            mirror=lambda ev: q.put({"type": "trace", "event": ev}),
+        )
+        agent.event_writer = writer
+        writer.set_run(f"r-{uuid.uuid4().hex[:6]}")
         _log.info(
             "chat.start session=%s workspace=%s mode=%s approval=%s chars=%d attachments=%d",
             session.id, session.workspace_id, mode, approval, len(message),
@@ -1961,6 +2058,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
                    "sec": sec,
                    "usage": usage})
         except Cancelled as e:
+            # cancel / run_end{status:"cancelled"} 已由 agent.run() 的取消路径发出，
+            # 这里不重复记，避免事件流里出现两条取消书签。
             _log.info("chat.cancelled session=%s reason=%s", session.id, e)
             # ui.cancelled 已发过 cancelled 事件（终态，泵会停）；没发过才补发
             if not getattr(agent, "last_cancel_notice_shown", False):
@@ -1968,8 +2067,14 @@ class _RequestHandler(BaseHTTPRequestHandler):
                        "usage": _usage_delta(before, agent.usage)})
         except Exception as e:  # noqa: BLE001 —— 任何异常都转成 error 事件
             _log.exception("chat.error session=%s", session.id)
+            # Agent 不吞一般异常（按原样上抛），所以 error 事件只能在这里补记
+            writer.emit(events.ERROR, source=events.SRC_LOOP, phase=events.PH_RUN_END,
+                        kind=type(e).__name__, message=f"{type(e).__name__}: {e}")
             q.put({"type": "error", "message": f"{type(e).__name__}: {e}",
                    "usage": _usage_delta(before, agent.usage)})
+        finally:
+            agent.event_writer = None
+            writer.close()
 
     def _handle_confirm(self) -> None:
         body = self._read_body()
@@ -1985,6 +2090,22 @@ class _RequestHandler(BaseHTTPRequestHandler):
         matched = session.answer_confirm(cid, bool(body.get("approve")))
         self._json({"ok": matched})
 
+    def _handle_answer(self) -> None:
+        """ask_user 内联提问的应答：{id, answer, session}。"""
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON（{id, answer}）")
+            return
+        sid = str(body.get("session") or "default")[:64]
+        session = self.web.session(sid)
+        cid = str(body.get("id") or "")
+        if not cid:
+            self._fail(400, "id 不能为空")
+            return
+        answer = str(body.get("answer") or "")[:2000]
+        matched = session.answer_ask(cid, answer)
+        self._json({"ok": matched})
+
     def _handle_stop(self) -> None:
         body = self._read_body() or {}
         sid = str(body.get("session") or "default")[:64]
@@ -1995,6 +2116,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             return
         agent.interrupt("用户在网页上停止了任务")
         session.deny_pending_confirm()   # 若卡在确认弹窗上，拒绝以解除阻塞
+        session.deny_pending_ask()       # 若卡在内联提问卡片上，置空以解除阻塞
         self._json({"ok": True})
 
     # ---------------------------------------------------------- 静态托管

@@ -6,7 +6,7 @@ cd /d "%~dp0"
 REM ============================================================
 REM mini-agent production launcher (Windows CMD)
 REM
-REM   startup.bat            serve web/dist on http://127.0.0.1:8000
+REM   startup.bat            serve web/dist on http://0.0.0.0:8000  (all interfaces / LAN)
 REM   startup.bat --build    force rebuild the frontend first
 REM
 REM Always uses the project virtualenv interpreter (needed so that
@@ -41,8 +41,8 @@ call npm run build || (popd & exit /b 1)
 popd
 
 :run
-echo ==^> starting backend on http://127.0.0.1:8000
-start "mini-agent :8000" cmd /k ".venv\Scripts\python.exe src\core\main.py --web"
+echo ==^> starting backend on http://0.0.0.0:8000
+start "mini-agent :8000" cmd /k ".venv\Scripts\python.exe src\core\main.py --web --host 0.0.0.0"
 
 echo ==^> opening browser ...
 REM console-independent delay (timeout fails when stdin is redirected)

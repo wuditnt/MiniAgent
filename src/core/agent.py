@@ -44,7 +44,7 @@ except ImportError:  # pragma: no cover
     OpenAI = None  # type: ignore[assignment]
 
 import tools  # noqa: F401  —— 导入即加载插件；同时保留 agent.tools 的旧用法
-from core import approval, logging_setup, memory
+from core import approval, ask, events, logging_setup, memory
 from core.cancel import CancellationToken, Cancelled, current_token, set_current_token
 from core.images import take_images
 from core.registry import REGISTRY, Tool, ToolRegistry
@@ -75,6 +75,9 @@ DEFAULT_SYSTEM_PROMPT = """你是一个能操作本地环境的智能体。
 3. 结论必须有证据：给出结论时附上可复核的数字（大小、哈希、计数、行号）。
 4. 大输出自己收敛：不要在回复里粘贴超长原始数据，只保留关键片段。
 5. 不确定就问，不要臆测用户意图；涉及删除/覆盖等破坏性操作前先说明。
+6. Python 依赖：生成的代码用到第三方库时，在开头用 `# pip install xxx` 注释列出依赖；需要安装时用 run_shell 执行 `python -m pip install xxx`（装进后端虚拟环境，避免用裸 `pip install` 落到系统环境），装完再运行。
+7. 尽早收尾：任务完成后直接给出最终结果，不要无意义地多轮试探；简单任务尽量 2-3 轮内结束，复杂任务也控制在必要轮次内。
+8. 需要澄清就问：缺少关键信息或需要用户抉择时，调用 ask_user 提问（能给出候选就放进 options），不要在正文里泛泛地反问；能从上下文推断或可用默认值处理的，不要打断用户。
 
 如果现有工具不足以完成任务，明确说明缺什么能力，而不是硬凑。
 回答用简体中文。"""
@@ -149,6 +152,12 @@ def _flatten_history(messages: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _usage_delta(before: dict, after: dict) -> dict:
+    """本轮用量 = after - before（只给事件流用，负数按 0 处理）。"""
+    keys = ("llm_calls", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens")
+    return {k: max(0, int(after.get(k, 0)) - int(before.get(k, 0))) for k in keys}
+
+
 class Agent:
     def __init__(
         self,
@@ -172,7 +181,7 @@ class Agent:
         self.model = model or _resolve_model()
         self.system_prompt = system_prompt
         # 显式参数 > 通用配置（Web UI 可改）> 内置默认
-        self.max_turns = int(_pick(max_turns, "max_turns", 25))
+        self.max_turns = int(_pick(max_turns, "max_turns", 10))
         self.temperature = float(_pick(temperature, "temperature", 0.0))
         self.verbose = verbose
         self.max_context_chars = int(_pick(max_context_chars, "max_context_chars", 120_000))
@@ -212,6 +221,47 @@ class Agent:
         }
 
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+
+        # ---- 会话事件流（可追溯运行，P0）----
+        # 由会话层（webui._run_worker / 其他宿主）挂上 EventWriter；为 None 时
+        # _emit 是纯 no-op，CLI / repl / 既有测试的行为与耗时完全不变（决策 D7）。
+        self.event_writer: events.EventWriter | None = None
+        self._system_sha: str | None = None   # 已 emit 的 system prompt 哈希（变了才重发）
+        self._turn = 0                        # 当前轮次：给 _prepare 等非轮参场景用
+
+    # ------------------------------------------------------------ 事件流薄封装
+
+    def _emit(self, type: str, *, source: str, phase: str = "", turn=None, **payload):
+        """写一条事件；未挂 writer 时直接返回（零副作用）。记录失败一律吞掉。"""
+        w = self.event_writer
+        if w is None:
+            return None
+        try:
+            return w.emit(type, source=source, phase=phase, turn=turn, **payload)
+        except Exception:  # noqa: BLE001 —— 记录绝不能影响任务本身
+            return None
+
+    def _emit_run_end(self, status: str, t0: float, usage_before: dict, answer: str = "") -> None:
+        """run 书签收尾：状态 + 耗时 + 本次 run 的用量增量。"""
+        self._emit(
+            events.RUN_END, source=events.SRC_LOOP, phase=events.PH_RUN_END,
+            status=status, sec=round(time.time() - t0, 3),
+            usage_delta=_usage_delta(usage_before, self.usage),
+            answer_chars=len(answer or ""),
+        )
+
+    def _emit_tool_results(self, prepared: list, results: list, secs: list, turn: int) -> None:
+        """一轮工具执行的统一出口：为每个调用记一条 tool_result（覆盖三条执行路径）。"""
+        for i, (tc, tool, _args, _preset) in enumerate(prepared):
+            text = results[i] or ""
+            name = tool.name if tool is not None else (tc.get("function") or {}).get("name") or ""
+            self._emit(
+                events.TOOL_RESULT, source=events.SRC_TOOL, phase=events.PH_TURN, turn=turn,
+                id=tc.get("id"), name=name,
+                ok=not text.lstrip().startswith(("[error]", "[denied]")),
+                sec=round(secs[i], 3) if i < len(secs) else None,
+                chars=len(text), content=text,
+            )
 
     # ------------------------------------------------------------ LLM 客户端
 
@@ -314,14 +364,22 @@ class Agent:
     def _trim_old_tool_results(self) -> None:
         """第一级：把较老的工具输出换成占位符，保住对话主线的文字。"""
         protected = 6
+        trimmed: list[str] = []
         for i, m in enumerate(self.messages):
             if i >= len(self.messages) - protected:
                 break
             if m.get("role") == "tool" and not m.get("_trimmed"):
-                m["content"] = "…[较早的工具结果已省略以节省上下文]…"
+                m["content"] = events.TRIMMED_PLACEHOLDER
                 m["_trimmed"] = True
+                if m.get("tool_call_id"):
+                    trimmed.append(m["tool_call_id"])
                 if self._context_chars() <= self.max_context_chars:
-                    return
+                    break
+        if trimmed:
+            self._emit(
+                events.CONTEXT_INJECT, source=events.SRC_LOOP, phase=events.PH_CONTEXT,
+                kind=events.KIND_TRIM_TOOL_RESULTS, count=len(trimmed), ids=trimmed,
+            )
 
     def _roll_summary(self) -> None:
         """第二级：把较早的整轮历史摘要成一段，替换掉原文。"""
@@ -338,9 +396,15 @@ class Agent:
         if not summary:
             return      # 摘要失败（网络/模型异常）→ 交给第三级硬截断，绝不阻塞主流程
 
-        msg = {"role": "system", "content": "[历史摘要] " + summary, "_summary": True}
+        msg = {"role": "system", "content": events.SUMMARY_PREFIX + summary, "_summary": True}
         # 旧摘要已被合并进新摘要，这里整体重建
         self.messages = self.messages[:1] + [msg] + self.messages[boundary:]
+        self._emit(
+            events.CONTEXT_INJECT, source=events.SRC_LOOP, phase=events.PH_CONTEXT,
+            kind=events.KIND_SUMMARY, content=summary, prev_chars=len(prev),
+            replaced_messages=max(0, boundary - prefix_end),
+            boundary=boundary, prefix_end=prefix_end,
+        )
 
     def _hard_window(self) -> None:
         """第三级：滑动窗口硬截断，保留 system + 摘要 + 最近 N 轮。"""
@@ -350,7 +414,13 @@ class Agent:
         prefix_end = self._prefix_end()
         if boundary <= prefix_end:
             return
+        dropped = boundary - prefix_end
         self.messages = self.messages[:prefix_end] + self.messages[boundary:]
+        self._emit(
+            events.CONTEXT_INJECT, source=events.SRC_LOOP, phase=events.PH_CONTEXT,
+            kind=events.KIND_HARD_WINDOW, dropped_messages=dropped,
+            boundary=boundary, prefix_end=prefix_end,
+        )
 
     def _summarize(self, text: str, prev: str) -> str | None:
         """调当前模型把历史压成摘要；任何失败都返回 None（不阻断任务）。"""
@@ -431,10 +501,25 @@ class Agent:
         # 只在「已有客户端」时注册会让首轮任务的取消钩子悄悄失效；
         # _abort_client 自己会处理 client is None 的情况。
         token.on_cancel(self._abort_client)
+        # run 书签：把这次运行与上一次切开（Trajectory 按它分组、算耗时与用量增量）
+        self._turn = 0
+        self._emit(
+            events.RUN_START, source=events.SRC_LOOP, phase=events.PH_RUN_START,
+            model=self.model, approval=self.approval_mode,
+            message_chars=len(user_input or ""),
+            attachment_count=len(attachments or []),
+            attachments=[
+                {"name": a.get("name"), "path": a.get("path"),
+                 "mime": a.get("mime"), "size": int(a.get("size") or 0)}
+                for a in (attachments or [])
+            ],
+            tags={},
+        )
         # 本轮确认模式：同步 system prompt（auto 追加责任准则 + 记忆块），
-        # 并把 request_approval 的询问桥接到 UI（结束后立刻摘除）
+        # 并把 request_approval / ask_user 的询问桥接到 UI（结束后立刻摘除）
         self._sync_system_prompt(user_input)
         approval.set_asker(self._ask_approval)
+        ask.set_asker(self._ask_user)
         try:
             answer = self._run_loop(user_input, attachments)
             # 回复已定稿：记忆提炼放后台线程，绝不让它拖慢 done 事件
@@ -449,6 +534,7 @@ class Agent:
                 self.usage["completion_tokens"] - _usage_before["completion_tokens"],
                 len(answer or ""),
             )
+            self._emit_run_end("done", _run_t0, _usage_before, answer)
             return answer
         except Cancelled as e:
             _llm_log.info("run.cancelled session=%s reason=%s", self.session_id or "-", e)
@@ -457,6 +543,11 @@ class Agent:
                 # 「某个插件自己抛了 Cancelled」这种情况，别让清理被跳过。
                 token.cancel(str(e) or "任务被取消")
             self._patch_cancelled_replies()
+            self._emit(
+                events.CANCEL, source=events.SRC_LOOP, phase=events.PH_RUN_END,
+                reason=str(e) or "任务被取消",
+            )
+            self._emit_run_end("cancelled", _run_t0, _usage_before)
             self.last_cancel_notice_shown = bool(
                 self._ui_call("cancelled", token.reason)
             )
@@ -465,16 +556,32 @@ class Agent:
             reason = "用户按下 Ctrl+C"
             token.cancel(reason)
             self._patch_cancelled_replies()
+            self._emit(
+                events.CANCEL, source=events.SRC_LOOP, phase=events.PH_RUN_END, reason=reason,
+            )
+            self._emit_run_end("cancelled", _run_t0, _usage_before)
             self.last_cancel_notice_shown = bool(self._ui_call("cancelled", reason))
             raise Cancelled(f"任务已被用户取消（{reason}）") from None
         finally:
             approval.set_asker(None)
+            ask.set_asker(None)
             self.cancel_token = None
             set_current_token(prev)
 
     def _ask_approval(self, reason: str) -> bool:
         """request_approval 工具 → UI 的授权询问桥（缺方法时 _ui_call 返回 None=拒绝）。"""
         return bool(self._ui_call("ask_approval", reason))
+
+    def _ask_user(self, question: str, options: list, allow_free_text: bool,
+                  multi: bool = False) -> str:
+        """ask_user 工具 → UI 的问答桥（缺方法时 _ui_call 返回 None，按未回答处理）。
+
+        multi 以关键字传入：旧签名 UI 不含该参数时 _ui_call 触发 TypeError 回退，
+        自动降级为单选，不因核心升级而报错。
+        """
+        return str(
+            self._ui_call("ask_user", question, options, allow_free_text, multi=multi) or ""
+        )
 
     def _memory_enabled(self) -> bool:
         try:
@@ -548,12 +655,26 @@ class Agent:
         三者都每轮覆盖：确认模式可逐轮切换、记忆文件可能在外部被编辑，
         改完下一轮立即生效，不做增量拼接（避免重复追加）。
         """
-        content = self.system_prompt
-        if self.approval_mode == approval.AUTO:
-            content += "\n\n" + approval.AUTO_RESPONSIBILITY_PROMPT
-        content += self._memory_block(user_input)
+        base = self.system_prompt
+        auto = approval.AUTO_RESPONSIBILITY_PROMPT if self.approval_mode == approval.AUTO else ""
+        mem = self._memory_block(user_input)
+        content = base + (("\n\n" + auto) if auto else "") + mem
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0]["content"] = content
+        # 事件流：只有内容真的变了才写一条 system_prompt（记忆块常变，base 不变）
+        sha = events.sha256_text(content)
+        if self.event_writer is not None and sha != self._system_sha:
+            self._system_sha = sha
+            self._emit(
+                events.SYSTEM_PROMPT, source=events.SRC_SYSTEM, phase=events.PH_RUN_START,
+                content=content, chars=len(content), sha256=sha,
+                parts={"base_chars": len(base), "auto_chars": len(auto), "memory_chars": len(mem)},
+            )
+            if mem:
+                self._emit(
+                    events.CONTEXT_INJECT, source=events.SRC_MEMORY, phase=events.PH_CONTEXT,
+                    kind=events.KIND_MEMORY, chars=len(mem),
+                )
 
     # -------------------------------------------------------- 记忆自动提炼
 
@@ -726,13 +847,21 @@ class Agent:
         answered = {m.get("tool_call_id") for m in self.messages if m.get("role") == "tool"}
         for tc in last["tool_calls"]:
             if tc["id"] not in answered:
+                name = (tc.get("function") or {}).get("name") or ""
                 self.messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": tc["id"],
-                        "name": tc["function"]["name"],
+                        "name": name,
                         "content": CANCELLED_TEXT,
                     }
+                )
+                # 补齐的回复同样要进事件流：否则下一次 run 的 llm_request 重放
+                # 会与真实 messages 不一致（I1 会被破坏）。
+                self._emit(
+                    events.TOOL_RESULT, source=events.SRC_TOOL, phase=events.PH_TURN,
+                    turn=self._turn or None, id=tc["id"], name=name, ok=False,
+                    sec=None, chars=len(CANCELLED_TEXT), content=CANCELLED_TEXT,
                 )
 
     @staticmethod
@@ -776,6 +905,14 @@ class Agent:
     def _run_loop(self, user_input: str, attachments: list[dict] | None = None) -> str:
         take_images()   # 丢弃上一次任务可能残留的附件（如取消时没取走的）
         self.messages.append(self._build_user_message(user_input, attachments or []))
+        um = self.messages[-1]
+        self._emit(
+            events.USER_MESSAGE, source=events.SRC_USER, phase=events.PH_RUN_START,
+            content=events.canonical_content(um.get("content")),
+            chars=len(events.content_text(um.get("content"))),
+            sha256=events.sha256_text(events.content_text(um.get("content"))),
+            attachments=um.get("_attachments") or [],
+        )
         client = self._get_client()
         schemas = self.registry.schemas()
         self.last_answer_streamed = False
@@ -786,6 +923,7 @@ class Agent:
                 tok.check()
             self._trim_context()
             self._ui_call("turn_start", turn)
+            self._turn = turn
 
             t0 = time.time()
             payload = {
@@ -798,6 +936,16 @@ class Agent:
                 "tool_choice": "auto",
                 "temperature": self.temperature,
             }
+            digests = [events.message_digest(m) for m in payload["messages"]]
+            self._emit(
+                events.LLM_REQUEST, source=events.SRC_MODEL, phase=events.PH_TURN, turn=turn,
+                model=self.model, temperature=self.temperature,
+                tools=[(s.get("function") or {}).get("name") for s in schemas],
+                message_count=len(payload["messages"]),
+                chars=sum(d["chars"] for d in digests),
+                system_sha256=self._system_sha or "",
+                messages=digests,
+            )
             # 取消钩子关掉客户端时，卡住的请求会报各种异常（ReadError/
             # RuntimeError…）—— 由 _request_or_cancel 统一转成 Cancelled。
             resp = self._request_or_cancel(client, payload, tok)
@@ -846,6 +994,20 @@ class Agent:
                 getattr(usage, "total_tokens", 0) or 0,
             )
 
+            # 事实记录：这一轮模型的回复正文（含 tool_calls 的完整参数）
+            self._emit(
+                events.LLM_RESPONSE, source=events.SRC_MODEL, phase=events.PH_TURN, turn=turn,
+                sec=round(latency, 3), streamed=bool(shown),
+                usage={
+                    "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+                    "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+                    "total_tokens": getattr(usage, "total_tokens", 0) or 0,
+                },
+                content=content or "", content_chars=len(content or ""),
+                content_sha256=events.sha256_text(content or ""),
+                tool_calls=tool_calls,
+            )
+
             # 消费完再查一次：取消可能恰好落在「最后一个分片之后」——
             # 此时流正常结束，不做这个检查的话，取消会被静默吞掉。
             if tok is not None and tok.cancelled():
@@ -882,6 +1044,17 @@ class Agent:
             images = take_images()
             if images:
                 self.messages.append({"role": "user", "content": images})
+                self._emit(
+                    events.CONTEXT_INJECT, source=events.SRC_LOOP, phase=events.PH_CONTEXT,
+                    kind=events.KIND_ATTACHMENT_IMAGES,
+                    count=sum(1 for p in images if isinstance(p, dict) and p.get("type") == "image_url"),
+                    mime_types=sorted({
+                        str(((p.get("image_url") or {}).get("url")) or "").split(";")[0].replace("data:", "")
+                        for p in images
+                        if isinstance(p, dict) and p.get("type") == "image_url"
+                    }),
+                    parts=events.canonical_content(images),
+                )
 
         _llm_log.warning("max_turns.reached limit=%d session=%s", self.max_turns, self.session_id or "-")
         return f"[达到最大轮次 {self.max_turns}，已停止。]"
@@ -1071,6 +1244,7 @@ class Agent:
         prepared = [self._prepare(tool) for tool in tool_calls]
 
         results: list[str | None] = [None] * len(prepared)
+        secs: list[float] = [0.0] * len(prepared)
         todo: list[tuple[int, Tool, dict]] = []
         for i, (_tc, tool, args, preset) in enumerate(prepared):
             if preset is None:
@@ -1082,6 +1256,7 @@ class Agent:
 
         if not todo:
             _tool_log.info("batch.done turn=%d count=0 sec=%.2f", turn, time.time() - batch_t0)
+            self._emit_tool_results(prepared, results, secs, turn)
             return [(tc, results[i] or "") for i, (tc, _t, _a, _p) in enumerate(prepared)]
 
         serial = (
@@ -1097,7 +1272,9 @@ class Agent:
         try:
             if serial:
                 for i, tool, args in todo:
+                    t_one = time.time()
                     results[i] = self._invoke(turn, tool, args)
+                    secs[i] = time.time() - t_one
             else:
                 self._ui_call("tools_start", turn, [(t, a) for _i, t, a in todo])
                 workers = max(1, min(self.max_workers, len(todo)))
@@ -1118,6 +1295,7 @@ class Agent:
                         except Exception as e:  # noqa: BLE001 —— _call_tool 不该抛，纯兜底
                             result, seconds = f"[error] {type(e).__name__}: {e}", 0.0
                         results[i] = result
+                        secs[i] = seconds
                         longest = max(longest, seconds)
                         # 打印放在主线程：轨迹行不会互相插队，控制台也不用为并发加锁
                         self._ui_call("tool_end", turn, tool, result, seconds)
@@ -1137,6 +1315,7 @@ class Agent:
             raise
 
         _tool_log.info("batch.done turn=%d count=%d sec=%.2f", turn, len(todo), time.time() - batch_t0)
+        self._emit_tool_results(prepared, results, secs, turn)
         return [(tc, results[i] or "") for i, (tc, _t, _a, _p) in enumerate(prepared)]
 
     def _prepare(self, tc: dict) -> tuple[dict, Tool | None, dict, str | None]:
@@ -1152,11 +1331,36 @@ class Agent:
 
         tool = self.registry.get(name)
         if tool is None:
+            self._emit(
+                events.TOOL_CALL, source=events.SRC_TOOL, phase=events.PH_TURN,
+                turn=self._turn or None, id=tc.get("id"), name=name, args=args,
+                args_chars=len(raw_args), dangerous=False, exclusive=False, confirm="skip",
+            )
             available = ", ".join(self.registry.names()[:20])
             return tc, None, args, f"[error] 未知工具：{name}。当前可用工具：{available}"
 
-        if self._needs_confirm(tool):
-            if not self._ui_call("ask_confirm", tool, args):
+        needs = self._needs_confirm(tool)
+        # 硬特例：MCP 危险工具在 auto / full 档仍强制弹窗（底线②，语义一行不动）
+        confirm = "skip"
+        if needs:
+            confirm = "mcp_hard" if (
+                self.approval_mode in (approval.AUTO, approval.FULL) and tool.source == "mcp"
+            ) else "ask"
+        self._emit(
+            events.TOOL_CALL, source=events.SRC_TOOL, phase=events.PH_TURN,
+            turn=self._turn or None, id=tc.get("id"), name=name, args=args,
+            args_chars=len(raw_args), dangerous=bool(tool.dangerous),
+            exclusive=bool(tool.exclusive), confirm=confirm,
+        )
+        if needs:
+            allowed = bool(self._ui_call("ask_confirm", tool, args))
+            self._emit(
+                events.APPROVAL, source=events.SRC_APPROVAL, phase=events.PH_TURN,
+                turn=self._turn or None, id=tc.get("id"), tool=name,
+                decision="allow" if allowed else "deny",
+                mode=self.approval_mode, via="ui",
+            )
+            if not allowed:
                 return tc, tool, args, (
                     "[denied] 用户拒绝执行该操作。请改用不需要确认的方式，"
                     "或向用户说明为什么必须执行它。"

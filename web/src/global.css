@@ -148,10 +148,19 @@ body,
   padding-inline-end: 0;
 }
 
+/* 会话区基准字号：对齐 DeepSeek 网页版的阅读观感（正文 16px / 行高 1.75） */
 .chat-inner {
   max-width: 860px;
   margin: 0 auto;
   padding: 24px 16px 8px;
+  font-size: 16px;
+}
+
+/* antd Bubble 默认吃 token 字号（14px），这里显式覆盖，
+   让用户气泡与助手气泡的正文都跟随会话区基准字号 */
+.chat-inner .ant-bubble .ant-bubble-content {
+  font-size: 16px;
+  line-height: 1.75;
 }
 
 .welcome-pane {
@@ -181,6 +190,12 @@ body,
   padding: 12px 16px 14px;
 }
 
+/* 输入框正文跟随会话区基准字号（antd TextArea 默认 14px） */
+.composer-inner .ant-sender-input {
+  font-size: 16px;
+  line-height: 1.7;
+}
+
 .hint {
   text-align: center;
   color: #bbb;
@@ -188,20 +203,38 @@ body,
   padding-top: 8px;
 }
 
-/* ---- Markdown 渲染 ---- */
+/* ---- Markdown 渲染（正文跟随 16px 基准，代码 14px） ---- */
 .md {
   overflow-wrap: break-word;
 }
 
 .md p {
-  margin: 0.4em 0;
+  margin: 0.5em 0;
 }
 
 .md h1,
 .md h2,
 .md h3,
 .md h4 {
-  margin: 0.7em 0 0.3em;
+  margin: 0.8em 0 0.4em;
+  line-height: 1.4;
+}
+
+/* 标题按基准字号的倍数收敛：浏览器默认 h1 的 2em 在 16px 下发虚 */
+.md h1 {
+  font-size: 1.5em;
+}
+
+.md h2 {
+  font-size: 1.3em;
+}
+
+.md h3 {
+  font-size: 1.15em;
+}
+
+.md h4 {
+  font-size: 1em;
 }
 
 .md pre {
@@ -209,7 +242,8 @@ body,
   padding: 10px 12px;
   border-radius: 6px;
   overflow: auto;
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1.6;
 }
 
 /* 代码块：语法高亮外壳（替代旧的裸 <pre>） */
@@ -220,14 +254,15 @@ body,
   border-radius: 8px;
   overflow: auto;
   margin: 0.6em 0;
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1.6;
 }
 
 .md-pre-lang {
   position: absolute;
   top: 6px;
   right: 10px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: #999;
   text-transform: lowercase;
@@ -237,7 +272,7 @@ body,
 
 .md code {
   font-family: Consolas, Menlo, "Courier New", monospace;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .md :not(pre) > code {
@@ -259,7 +294,7 @@ body,
 .md th,
 .md td {
   border: 1px solid #e0e0e0;
-  padding: 4px 10px;
+  padding: 6px 12px;
 }
 
 .md blockquote {
@@ -272,7 +307,7 @@ body,
 .md ul,
 .md ol {
   padding-left: 1.4em;
-  margin: 0.4em 0;
+  margin: 0.5em 0;
 }
 
 /* ---- ECharts 图表 ---- */
@@ -313,12 +348,12 @@ body,
 .reasoning .ant-collapse-header {
   padding: 4px 0 !important;
   color: #999;
-  font-size: 12px;
+  font-size: 12.5px;
 }
 
 .reasoning-text {
   color: #8c8c8c;
-  font-size: 12.5px;
+  font-size: 13px;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -350,14 +385,14 @@ body,
 }
 
 .tools-header-title {
-  font-size: 12px;
+  font-size: 12.5px;
   color: #666;
   font-weight: 500;
   flex: none;
 }
 
 .tools-header-names {
-  font-size: 12px;
+  font-size: 12.5px;
   color: #999;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -366,7 +401,7 @@ body,
 }
 
 .tools-header-count {
-  font-size: 12px;
+  font-size: 12.5px;
   color: #bbb;
   flex: none;
 }
@@ -377,7 +412,7 @@ body,
 
 .tool-detail pre {
   margin: 0;
-  font-size: 12px;
+  font-size: 13px;
   white-space: pre-wrap;
   word-break: break-all;
   max-height: 220px;
@@ -395,7 +430,7 @@ body,
 /* ---- 杂项状态 ---- */
 .status-error {
   color: #ff4d4f;
-  font-size: 13px;
+  font-size: 14px;
   margin-top: 6px;
 }
 
@@ -537,17 +572,131 @@ body,
 .notice {
   color: #999;
   font-style: italic;
-  font-size: 13px;
+  font-size: 14px;
 }
 
-/* ---- 确认弹窗：参数展示 ---- */
+/* ---- 权限审批面板：覆盖在输入框位置上（非模态） ---- */
+.composer-body {
+  position: relative;
+}
+
+.composer-slot {
+  position: relative;
+}
+
+/* 审批期间把输入框藏起来 —— 保留占位高度，面板才能精确盖满 */
+.composer-slot.blocked .ant-sender {
+  visibility: hidden;
+}
+
+.confirm-panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  min-height: 100%;
+  max-height: 60vh;
+  overflow: hidden;
+  background: #fffbf2;
+  border: 1px solid #ffd591;
+  border-radius: 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+}
+
+/* 展开「查看详细」：内容变多，锚定底部继续向上撑开 */
+.confirm-panel.expanded {
+  max-height: 60vh;
+}
+
+.confirm-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #d46b08;
+}
+
+.confirm-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #fa8c16;
+}
+
+.confirm-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #ffe1b3;
+}
+
+.confirm-countdown {
+  font-size: 12px;
+  color: #bfbfbf;
+}
+
+.confirm-desc {
+  flex: 1;
+  font-size: 16px;
+  line-height: 1.7;
+  color: rgba(0, 0, 0, 0.85);
+  overflow-y: auto;
+}
+
+.confirm-detail {
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.confirm-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.confirm-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 左下角「查看详细」：低调文字按钮 */
+.confirm-detail-btn.ant-btn {
+  padding-inline: 0;
+  color: #8c8c8c;
+}
+
+.confirm-detail-btn.ant-btn:hover {
+  color: #1677ff;
+}
+
+/* 主按钮改黑色（对齐图 2 的「允许一次」样式） */
+.confirm-ok-btn.ant-btn-primary {
+  background: #1f1f1f;
+  border-color: #1f1f1f;
+  box-shadow: none;
+}
+
+.confirm-ok-btn.ant-btn-primary:not(:disabled):hover {
+  background: #000;
+  border-color: #000;
+}
+
+/* ---- 审批面板：参数展示 ---- */
 .confirm-args-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin-top: 8px;
-  max-height: 400px;
-  overflow: auto;
 }
 
 .confirm-arg-name {
@@ -1344,19 +1493,6 @@ body,
   font-size: 11px;
   color: #a0a0a0;
   line-height: 1.5;
-}
-
-/* ---- auto 档 request_approval 弹窗的申请理由 ---- */
-.confirm-reason {
-  background: #f6f8fa;
-  border: 1px solid #ececec;
-  border-radius: 8px;
-  padding: 10px 12px;
-  font-size: 13px;
-  line-height: 1.7;
-  color: #333;
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 
 /* ---- 通用配置：沙箱读取范围 ---- */
@@ -2407,4 +2543,349 @@ body,
   .workbench.open.fullscreen {
     left: 0;
   }
+}
+
+/* ---- 运行轨迹抽屉（P0 事实层）：复用 .workbench 外壳 ---- */
+.tj-tabs-hint {
+  flex: none;
+  font-size: 11px;
+  color: #bbb;
+  margin-right: 4px;
+}
+
+.tj-toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.tj-only {
+  font-size: 12px;
+  color: #8c8c8c;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid #eee;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  white-space: nowrap;
+}
+
+.tj-only:hover {
+  color: #1677ff;
+  border-color: #91caff;
+}
+
+.tj-only.on {
+  color: #1677ff;
+  border-color: #91caff;
+  background: #f0f5ff;
+}
+
+.tj-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 24px;
+}
+
+.tj-empty-hint {
+  font-size: 12px;
+  color: #bbb;
+  text-align: center;
+  max-width: 280px;
+  line-height: 1.7;
+}
+
+.tj-timeline {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 0 24px;
+}
+
+.tj-run {
+  margin-bottom: 10px;
+}
+
+.tj-run-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: #fafafa;
+  border-top: 1px solid #f0f0f0;
+  border-bottom: 1px solid #f0f0f0;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.tj-run-id {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  color: #333;
+  font-weight: 600;
+}
+
+.tj-run-meta {
+  font-size: 11px;
+  color: #999;
+}
+
+.tj-turn {
+  margin: 2px 0 6px;
+}
+
+.tj-turn-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px;
+}
+
+.tj-turn-label {
+  font-size: 12px;
+  color: #666;
+  font-weight: 500;
+}
+
+.tj-turn-count {
+  margin-left: 6px;
+  font-size: 11px;
+  color: #bbb;
+  font-weight: 400;
+}
+
+.tj-replay {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: #8c8c8c;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.tj-replay:hover {
+  color: #1677ff;
+  background: #f0f5ff;
+}
+
+.tj-row {
+  border-left: 3px solid #d9d9d9;
+  margin: 0 8px 2px 12px;
+  border-radius: 0 6px 6px 0;
+  background: #fff;
+  transition: background 0.15s;
+}
+
+.tj-row:hover {
+  background: #fafafa;
+}
+
+.tj-row.latest {
+  background: #f0f5ff;
+}
+
+.tj-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.tj-seq {
+  flex: none;
+  width: 30px;
+  text-align: right;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: #bbb;
+}
+
+.tj-time {
+  flex: none;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: #bbb;
+}
+
+.tj-badge {
+  flex: none;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #f5f5f5;
+  color: #595959;
+  white-space: nowrap;
+}
+
+.tj-summary {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: #444;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.tj-expand {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  color: #bbb;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+
+.tj-row:hover .tj-expand,
+.tj-expand.on {
+  opacity: 1;
+}
+
+.tj-expand:hover,
+.tj-expand.on {
+  color: #1677ff;
+  background: #f0f5ff;
+}
+
+.tj-detail {
+  padding: 4px 10px 10px 46px;
+}
+
+/* 来源着色：左边缘色条 + 徽标底色（同一色阶的明度差异，避免撞色） */
+.tj-src-system {
+  border-left-color: #bfbfbf;
+}
+.tj-src-system .tj-badge {
+  background: #f5f5f5;
+  color: #595959;
+}
+
+.tj-src-user {
+  border-left-color: #91caff;
+}
+.tj-src-user .tj-badge {
+  background: #e6f4ff;
+  color: #0958d9;
+}
+
+.tj-src-memory {
+  border-left-color: #d3adf7;
+}
+.tj-src-memory .tj-badge {
+  background: #f9f0ff;
+  color: #531dab;
+}
+
+.tj-src-model {
+  border-left-color: #95de64;
+}
+.tj-src-model .tj-badge {
+  background: #f6ffed;
+  color: #237804;
+}
+
+.tj-src-tool {
+  border-left-color: #ffd591;
+}
+.tj-src-tool .tj-badge {
+  background: #fff7e6;
+  color: #ad4e00;
+}
+
+.tj-src-approval {
+  border-left-color: #ffa39e;
+}
+.tj-src-approval .tj-badge {
+  background: #fff1f0;
+  color: #a8071a;
+}
+
+/* ---- 内联提问卡片（ask_user）：直接嵌在助手气泡正文之后 ---- */
+.ask-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: #f0f7ff;
+  border-left: 3px solid #1677ff;
+  border-radius: 0 8px 8px 0;
+}
+
+.ask-question {
+  font-size: 14px;
+  line-height: 1.6;
+  color: rgba(0, 0, 0, 0.88);
+  word-break: break-word;
+}
+
+.ask-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 14px;
+}
+
+.ask-options .ant-radio-wrapper {
+  margin-right: 0;
+}
+
+.ask-options .ant-checkbox-wrapper {
+  margin-inline-start: 0;
+}
+
+.ask-input {
+  max-width: 360px;
+}
+
+.ask-submit {
+  align-self: flex-end;
+}
+
+/* 已作答 / 已失效的只读留存：降噪为一行说明 */
+.ask-card-settled {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  background: #fafafa;
+  border-left-color: #d9d9d9;
+  padding: 6px 12px;
+}
+
+.ask-card-settled .ask-settled-label {
+  flex: none;
+  font-size: 12.5px;
+  color: #8c8c8c;
+}
+
+.ask-card-settled .ask-settled-value {
+  font-size: 13px;
+  color: rgba(0, 0, 0, 0.75);
+  word-break: break-word;
+}
+
+.ask-card-expired .ask-settled-label,
+.ask-card-expired .ask-settled-value {
+  color: #bfbfbf;
 }

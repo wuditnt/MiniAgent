@@ -8,7 +8,10 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    // 监听所有网卡，手机/局域网设备可直接访问 http://<本机局域网IP>:5173
+    host: "0.0.0.0",
     proxy: {
+      // 代理目标始终是本机后端：移动端只连 5173，/api 由 dev server 转发到 8000
       "/api": { target, changeOrigin: false },
     },
   },

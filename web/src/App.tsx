@@ -1,6 +1,6 @@
 /**
  * 应用编排：模式/联网开关、消息流、SSE 消费、危险确认都在这里。
- * Chat / ModeBar / WelcomePane / ConfirmModal / ToolChain 是纯展示组件。
+ * Chat / ModeBar / WelcomePane / ConfirmPanel / ToolChain 是纯展示组件。
  */
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { DownOutlined, DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, SettingOutlined } from "@ant-design/icons";
@@ -18,6 +18,7 @@ import {
   fetchState,
   fetchWorkspaces,
   pickFolder,
+  postAnswer,
   postConfirm,
   postStop,
   truncateSession,
@@ -31,18 +32,20 @@ import type {
   ConfirmInfo,
   Mode,
   ModelProvider,
+  PendingAsk,
   SessionItem,
   SSEEvent,
+  TraceEvent,
   WorkspaceItem,
 } from "./types";
 import Chat from "./components/Chat";
 import ModeBar from "./components/ModeBar";
-import ConfirmModal from "./components/ConfirmModal";
 import Sidebar from "./components/Sidebar";
 import WorkspaceModal from "./components/WorkspaceModal";
 import SettingsModal from "./components/SettingsModal";
 import type { SettingsTab } from "./components/SettingsModal";
 import Workbench from "./components/Workbench";
+import Trajectory from "./components/Trajectory";
 
 const SESSION_KEY = "miniagent.session";
 const MODE_KEY = "miniagent.mode";
@@ -77,6 +80,11 @@ export default function App() {
   const [items, setItems] = useState<ChatItem[]>([]);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<ConfirmInfo | null>(null);
+  // 内联提问卡片：正在等用户作答的 ask_user 提问（回答/失效后折叠进助手气泡）
+  const [ask, setAsk] = useState<PendingAsk | null>(null);
+  const askRef = useRef<PendingAsk | null>(null);
+  /** 当前正在流式的助手消息 id：问答卡片要折回它所在的这条气泡 */
+  const curAsstRef = useRef<string | null>(null);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceItem[]>([]);
   // 顶栏模型单选菜单的数据源（/api/models）
@@ -109,6 +117,13 @@ export default function App() {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [wbFullscreen, setWbFullscreen] = useState(false);
+  // 运行轨迹抽屉（P0 事实层）：与工作台抽屉互斥，同一位置只开一个
+  const [trajectoryOpen, setTrajectoryOpen] = useState(false);
+  const [tjSession, setTjSession] = useState("");
+  // 当前 run 的实时镜像事件（trace 帧），打开抽屉时并入时间线
+  const [traces, setTraces] = useState<TraceEvent[]>([]);
+  // 每次运行结束自增，通知 Trajectory 做一次磁盘全量兜底拉取
+  const [tjReload, setTjReload] = useState(0);
   const [statsOpen, setStatsOpen] = useState(false);
   // 搜索命中后要定位闪烁的消息 id
   const [focus, setFocus] = useState<{ id: string; nonce: number } | null>(null);
@@ -240,6 +255,46 @@ export default function App() {
     ),
   });
 
+  /** 把待答卡片折叠进它所在的助手气泡；无答案（超时/停止）标记为失效 */
+  const foldAsk = (asstId: string, answer?: string) => {
+    const cur = askRef.current;
+    if (!cur) return;
+    askRef.current = null;
+    setAsk(null);
+    patchAssistant(asstId, (it) => ({
+      ...it,
+      ask: {
+        question: cur.question,
+        options: cur.options,
+        allowFreeText: cur.allowFreeText,
+        multi: cur.multi,
+        answer,
+        expired: !answer,
+      },
+    }));
+  };
+
+  /** 用户在内联卡片上作答：回传服务端并折叠卡片 */
+  const handleAnswerAsk = (answer: string) => {
+    const cur = askRef.current;
+    if (!cur) return;
+    postAnswer(cur.id, answer, session).catch(() => {});
+    const asstId = curAsstRef.current;
+    if (asstId) {
+      foldAsk(asstId, answer);
+    } else {
+      askRef.current = null;
+      setAsk(null);
+    }
+  };
+
+  /** 权限审批的应答：回填给后端后立刻清掉本地待答状态（面板随之收起） */
+  const handleAnswerConfirm = (approve: boolean) => {
+    if (!confirm) return;
+    postConfirm(confirm.id, approve, session).catch(() => {});
+    setConfirm(null);
+  };
+
   /** 发送一条消息：乐观插入两条气泡，然后消费 SSE 事件流增量更新 */
   const send = (
     text: string,
@@ -250,6 +305,7 @@ export default function App() {
     if (!msg && !(attachments && attachments.length)) return;
     if (busy) return;
     const asstId = `a-${Date.now()}`;
+    curAsstRef.current = asstId;
     const userItem: ChatItem = {
       id: `u-${Date.now()}`,
       role: "user",
@@ -271,6 +327,7 @@ export default function App() {
       setItems((prev) => [...prev, userItem, asstItem]);
     }
     setBusy(true);
+    setTraces([]); // 新一轮 run：清掉上一轮的实时镜像
     const ac = new AbortController();
     abortRef.current = ac;
 
@@ -302,6 +359,17 @@ export default function App() {
           case "confirm_request":
             setConfirm({ id: ev.id, tool: ev.tool, args: ev.args });
             break;
+          case "ask_request":
+            // 内联提问：卡片渲染在当前流式的助手气泡里，等用户点选/输入
+            askRef.current = {
+              id: ev.id,
+              question: ev.question,
+              options: ev.options,
+              allowFreeText: ev.allow_free_text,
+              multi: ev.multi,
+            };
+            setAsk(askRef.current);
+            break;
           case "notice":
             setItems((prev) => [
               ...prev,
@@ -322,11 +390,13 @@ export default function App() {
               sec: ev.sec,
               usage: ev.usage,
             }));
+            foldAsk(asstId); // 若有未答的卡片，随本轮结束标记失效
             break;
           case "error":
             patchAssistant(asstId, (it) =>
               finalizeTools({ ...it, status: "error", error: ev.message, usage: ev.usage })
             );
+            foldAsk(asstId);
             setConfirm(null);
             break;
           case "cancelled":
@@ -334,7 +404,12 @@ export default function App() {
             patchAssistant(asstId, (it) =>
               finalizeTools({ ...it, status: "cancelled", reason: ev.reason, usage: ev.usage })
             );
+            foldAsk(asstId);
             setConfirm(null);
+            break;
+          case "trace":
+            // 事件流的实时镜像（可选）：累积给轨迹抽屉并排展示，落盘全量仍以兜底拉取为准
+            setTraces((prev) => (prev.length >= 4000 ? prev : [...prev, ev.event]));
             break;
           default:
             break; // turn / llm_done：前端无需单独处理
@@ -346,10 +421,12 @@ export default function App() {
         if (ac.signal.aborted) return; // 页面卸载导致的 abort，无需展示
         const msg = err instanceof Error ? err.message : String(err);
         patchAssistant(asstId, (it) => ({ ...it, status: "error", error: msg }));
+        foldAsk(asstId);
       })
       .finally(() => {
         setBusy(false);
         refreshAll(); // 对话结束后刷新列表（标题/时间/计数可能变了）
+        setTjReload((n) => n + 1); // 运行结束：让轨迹抽屉拉一次磁盘全量兜底
       });
   };
 
@@ -431,6 +508,26 @@ export default function App() {
     pendingHit.current = hasHit ? (hitIndex as number) : null;
     setSession(sid);
   };
+
+  /** 打开某会话的运行轨迹抽屉（与工作台互斥，同一位置只开一个） */
+  const openTrajectory = (sid: string) => {
+    setWorkbenchOpen(false);
+    setWbFullscreen(false);
+    setTjSession(sid);
+    setTrajectoryOpen(true);
+  };
+
+  /** 侧栏会话项「回放」：先切到该会话，再打开它的轨迹 */
+  const handleReplaySession = (sid: string) => {
+    if (sid !== session) handleSelectSession(sid);
+    openTrajectory(sid);
+  };
+
+  // 轨迹抽屉开着时切换会话 → 轨迹跟随当前会话
+  useEffect(() => {
+    if (trajectoryOpen && session && session !== tjSession) setTjSession(session);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, trajectoryOpen]);
 
   /** 删除对话：删当前则自动切到列表里的下一个 */
   const handleDeleteSession = (sid: string) => {
@@ -605,6 +702,7 @@ export default function App() {
           onDeleteWorkspace={handleDeleteWorkspace}
           onSearch={(q) => refreshSessions(q)}
           onRenameSession={handleRenameSession}
+          onReplaySession={handleReplaySession}
           onOpenSettings={() => {
             setSettingsTab("general");
             setSettingsOpen(true);
@@ -719,6 +817,7 @@ export default function App() {
                     setWbFullscreen(false);
                   } else {
                     setWorkbenchOpen(true);
+                    setTrajectoryOpen(false); // 与轨迹抽屉互斥
                   }
                 }}
               >
@@ -745,17 +844,14 @@ export default function App() {
           onRegenerate={busy ? undefined : handleRegenerate}
           onEditResend={busy ? undefined : handleEditResend}
           onDelete={busy ? undefined : handleDeleteMessage}
+          onTrajectory={() => openTrajectory(session)}
           contextUsage={contextUsage}
           contextLimit={contextLimit}
-        />
-
-        <ConfirmModal
-          info={confirm}
-          onAnswer={(approve) => {
-            if (!confirm) return;
-            postConfirm(confirm.id, approve, session).catch(() => {});
-            setConfirm(null);
-          }}
+          pendingAsk={ask}
+          onAnswerAsk={handleAnswerAsk}
+          confirm={confirm}
+          onAnswerConfirm={handleAnswerConfirm}
+          confirmTimeout={state?.confirm_timeout ?? 120}
         />
 
         <WorkspaceModal
@@ -861,6 +957,14 @@ export default function App() {
           setWbFullscreen(false);
         }}
         onFullscreenChange={setWbFullscreen}
+      />
+
+      <Trajectory
+        open={trajectoryOpen}
+        session={tjSession || session}
+        liveEvents={tjSession === session ? traces : []}
+        reloadNonce={tjReload}
+        onClose={() => setTrajectoryOpen(false)}
       />
     </div>
   );

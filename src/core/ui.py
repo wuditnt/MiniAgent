@@ -27,6 +27,7 @@ UI 需要实现的方法（全部可选，缺失时自动降级）：
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 from typing import Any
@@ -72,6 +73,46 @@ def _ansi(code: str) -> str:
         return code if sys.stdout.isatty() else ""
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _ask_hint(allow_free_text: bool, multi: bool) -> str:
+    """终端提示语：随单选/多选与是否允许自由文本变化。"""
+    base = "输入序号（多个用逗号分隔）" if multi else "输入序号"
+    return base + "或文字" if allow_free_text else base
+
+
+def _resolve_answer(ans: str, opts: list[str], allow_free_text: bool,
+                    multi: bool = False) -> str:
+    """把终端输入解析成答复。
+
+    单选：纯数字且命中候选 → 该候选文本；否则按自由文本处理。
+    多选：按逗号/顿号/空格拆开，逐项映射为候选文本，保序去重后用「、」拼回。
+    """
+    ans = (ans or "").strip()
+    if not ans:
+        return ""
+    if not multi:
+        if ans.isdigit() and opts:
+            idx = int(ans)
+            return opts[idx - 1] if 1 <= idx <= len(opts) else ""
+        return ans if allow_free_text else ""
+
+    picked: list[str] = []
+    for part in re.split(r"[,，、\s]+", ans):
+        part = part.strip()
+        if not part:
+            continue
+        if part.isdigit() and opts:
+            idx = int(part)
+            if 1 <= idx <= len(opts):
+                picked.append(opts[idx - 1])
+        elif allow_free_text:
+            picked.append(part)
+    out: list[str] = []
+    for x in picked:
+        if x not in out:
+            out.append(x)
+    return "、".join(out)
 
 
 class PlainUI:
@@ -188,6 +229,22 @@ class PlainUI:
         except (EOFError, KeyboardInterrupt):
             return False
 
+    def ask_user(self, question: str, options: list, allow_free_text: bool = True,
+                 multi: bool = False) -> str:
+        """模型主动提问（ask_user）：打印问题与候选，回车跳过。"""
+        opts = [str(o) for o in (options or [])]
+        with self._lock:
+            sys.stderr.write(f"\n❓ {question}\n")
+            for i, o in enumerate(opts, 1):
+                sys.stderr.write(f"   {i}) {o}\n")
+            sys.stderr.write(f"{_ask_hint(allow_free_text, multi)}（回车跳过）：")
+            sys.stderr.flush()
+        try:
+            ans = input().strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+        return _resolve_answer(ans, opts, allow_free_text, multi)
+
 
 class RichUI(PlainUI):
     """彩色实现。rich 缺失时自动退回 PlainUI。"""
@@ -302,6 +359,25 @@ class RichUI(PlainUI):
             except (EOFError, KeyboardInterrupt):
                 return False
         return ans.strip().lower() in ("y", "yes")
+
+    def ask_user(self, question: str, options: list, allow_free_text: bool = True,
+                 multi: bool = False) -> str:
+        """模型主动提问（ask_user）的终端询问。"""
+        if not self.console:
+            return super().ask_user(question, options, allow_free_text, multi)
+        opts = [str(o) for o in (options or [])]
+        with self._lock:
+            self.console.print(
+                f"\n[bold cyan]❓ 模型提问[/bold cyan] {self._escape(question)}"
+            )
+            for i, o in enumerate(opts, 1):
+                self.console.print(f"  [cyan]{i}[/cyan]) {self._escape(o)}")
+            hint = _ask_hint(allow_free_text, multi)
+            try:
+                ans = self.console.input(f"[cyan]{hint}（回车跳过）：[/cyan]").strip()
+            except (EOFError, KeyboardInterrupt):
+                return ""
+        return _resolve_answer(ans, opts, allow_free_text, multi)
 
     @staticmethod
     def _escape(text: str) -> str:
