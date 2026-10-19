@@ -25,11 +25,29 @@ from core import (
 
 PLUGIN_INFO = {"name": "文件系统", "version": "1.0", "author": "mini-agent"}
 
+# 二进制文件的「下一步该用哪个工具」——按扩展名路由到办公文档专用工具。
+# 目的是让模型一步到位，不必先读一遍十六进制流才发现该换工具。
+_OFFICE_READ_TOOLS = {
+    ".docx": "read_docx",
+    ".xlsx": "read_xlsx",
+    ".xlsm": "read_xlsx",
+    ".pdf": "read_pdf（表格型 PDF 用 read_pdf_tables）",
+}
+
+
+def _binary_hint(ap: str) -> str:
+    """二进制文件读不进来时，给模型一句明确的下一步指引。"""
+    hint = _OFFICE_READ_TOOLS.get(os.path.splitext(ap)[1].lower())
+    if hint:
+        return f"这是办公文档，请直接改用 {hint} 工具，不要读二进制流。"
+    return "如需解析内容，请改用 run_python 传对应库（如 pypdf / openpyxl）处理。"
+
 
 @tool(
     "read_file",
-    "读取文本文件内容，返回带行号的文本。若文件是二进制（如 PDF/图片/加密文件），"
-    "不会硬解，而是返回十六进制预览并提示改用 run_python 解析。",
+    "读取文本文件内容，返回带行号的文本。二进制文件（PDF/Office/图片/加密文件等）"
+    "不会硬解，只返回十六进制预览并提示改用对应的专用工具。"
+    "注意：docx / xlsx / pdf 请直接用 read_docx / read_xlsx / read_pdf，不要先调本工具。",
     params={
         "path": {"type": "string", "description": "文件路径（相对工作区或绝对路径）"},
         "offset": {"type": "integer", "description": "起始行号，从 1 开始", "default": 1},
@@ -44,11 +62,11 @@ def read_file(path: str, offset: int = 1, limit: int = 300) -> str:
 
     data = read_bytes(ap)
 
-    # 关键降级逻辑：二进制不硬解，给 hex 预览 + 建议
+    # 关键降级逻辑：二进制不硬解，给 hex 预览 + 明确的下一步指引
     if looks_binary(data):
         return (
             f"[binary] {ap}（{len(data)} 字节）不是文本文件，已返回十六进制预览。\n"
-            f"如需解析内容，请改用 run_python 传对应库（如 pypdf / openpyxl）处理。\n\n"
+            f"{_binary_hint(ap)}\n\n"
             f"{hexdump(data)}"
         )
 

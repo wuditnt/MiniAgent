@@ -15,10 +15,10 @@ pillow>=10.0
 psutil>=5.9
 pyperclip>=1.8
 
-# 可选：办公文档插件（plugins/office_tools.py 与 data_tools 的 write_csv）。
+# 可选：办公文档（plugins/office_tools.py、data_tools 的 write_csv）。
 # 装了才能读写 docx / xlsx、解析 pdf；不装也能跑（相应工具会提示缺哪个库）。
 #   python-docx        —— read_docx / write_docx
-#   openpyxl           —— read_xlsx / write_xlsx
+#   openpyxl           —— read_xlsx / write_xlsx（openpyxl 兜底引擎）
 #   pypdf              —— read_pdf
 #   pdfplumber         —— read_pdf_tables
 #   charset-normalizer —— data_tools.detect_encoding 更准的编码判定
@@ -27,6 +27,30 @@ openpyxl>=3.1
 pypdf>=4.0
 pdfplumber>=0.11
 charset-normalizer>=3.0
+
+# 可选：办公文档增强（第二批，约 10MB）。
+#   python-calamine —— read_xlsx 的默认引擎：更快，且能读旧版 .xls / .xlsb / .ods
+#   reportlab       —— write_pdf 生成 PDF（内置中文字体 STSong-Light）
+#   mammoth         —— docx_to_markdown：docx→HTML 的语义解析
+#   markdownify     —— docx_to_markdown 第二段：HTML→Markdown（保住表格结构）
+python-calamine>=0.2
+reportlab>=4.0
+mammoth>=1.8
+markdownify>=0.13
+
+# 可选：大数据表格分析（第二批，约 20MB）。
+#   polars      —— plugins/dataframe_tools.py：df_summary / df_sql / df_to_parquet
+#   fastexcel   —— polars 读 Excel（.xlsx/.xls/.ods）时用的引擎
+polars>=1.0
+fastexcel>=0.9
+
+# 可选：扫描件 OCR（第三批，约 170MB；不需要就别装，ocr_image / ocr_pdf 会提示缺库）。
+#   pypdfium2            —— 把 PDF 页面渲染成位图（pdfplumber 已间接带上）
+#   rapidocr-onnxruntime —— ONNX 版 PP-OCR，模型随包内置，无需系统安装
+#   onnxruntime <1.21    —— 实测更新的 1.31 在部分 Windows 环境 import 即崩溃
+pypdfium2>=4.0
+rapidocr-onnxruntime>=1.3
+onnxruntime>=1.20,<1.21
 
 # 开发/测试：跑回归测试（scripts\run_tests.bat，或 python -m pytest）
 pytest>=8.0

@@ -31,6 +31,46 @@ docs = [
     "charset-normalizer>=3.0",
 ]
 
+# 办公文档增强：calamine 加速 Excel（含旧版 .xls）、reportlab 生成 PDF、mammoth+markdownify docx→Markdown。
+docs-fast = [
+    "python-calamine>=0.2",
+    "reportlab>=4.0",
+    "mammoth>=1.8",
+    "markdownify>=0.13",
+]
+
+# 大数据表格分析：polars 的概览 / SQL / 转 Parquet（读 Excel 需 fastexcel）。
+dataframe = [
+    "polars>=1.0",
+    "fastexcel>=0.9",
+]
+
+# 扫描件 OCR：pypdfium2 渲染 + rapidocr 识别（体积约 170MB）。
+# onnxruntime 锁在 1.21 以下——实测 1.31 在部分 Windows 环境 import 即崩溃。
+ocr = [
+    "pypdfium2>=4.0",
+    "rapidocr-onnxruntime>=1.3",
+    "onnxruntime>=1.20,<1.21",
+]
+
+# 上面四组文档相关能力一次装齐：pip install -e ".[docs-all]"
+docs-all = [
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "pypdf>=4.0",
+    "pdfplumber>=0.11",
+    "charset-normalizer>=3.0",
+    "python-calamine>=0.2",
+    "reportlab>=4.0",
+    "mammoth>=1.8",
+    "markdownify>=0.13",
+    "polars>=1.0",
+    "fastexcel>=0.9",
+    "pypdfium2>=4.0",
+    "rapidocr-onnxruntime>=1.3",
+    "onnxruntime>=1.20,<1.21",
+]
+
 [project.scripts]
 mini-agent = "core.main:main"
 

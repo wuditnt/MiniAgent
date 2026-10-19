@@ -1,4 +1,4 @@
-# pip install python-docx openpyxl pypdf pdfplumber
+# pip install python-docx openpyxl pypdf pdfplumber python-calamine reportlab mammoth markdownify
 """
 办公文档工具组：Word(.docx) / Excel(.xlsx) / PDF。
 
@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from core import (
     clip,
@@ -28,9 +29,10 @@ from core import (
 
 PLUGIN_INFO = {
     "name": "办公文档",
-    "version": "1.0",
+    "version": "1.1",
     "author": "mini-agent",
-    "desc": "读写 Word/Excel、读取 PDF（依赖 python-docx / openpyxl / pypdf / pdfplumber）",
+    "desc": "读写 Word/Excel/PDF、docx→Markdown 高保真（mammoth→HTML→markdownify）"
+            "（依赖 python-docx / openpyxl / pypdf / pdfplumber / python-calamine / reportlab / mammoth / markdownify）",
 }
 
 # 单次返回的默认字符上限
@@ -95,6 +97,13 @@ def _md_table(rows: list[list[str]]) -> str:
 def _is_sep_row(cells: list[str]) -> bool:
     """Markdown 表格的 |---|---| 分隔行。"""
     return all(c and set(c) <= set("-: ") for c in cells)
+
+
+def _pdf_inline(text: str) -> str:
+    """行内 Markdown → reportlab 迷你 HTML：先转义，再解析 **加粗** 与 `代码`。"""
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    return re.sub(r"`(.+?)`", r'<font face="Courier">\1</font>', text)
 
 
 # ------------------------------------------------------------------ Word
@@ -217,30 +226,148 @@ def write_docx(path: str, content: str) -> str:
     return f"[ok] 已写入 {ap}（{os.path.getsize(ap)} 字节）"
 
 
-# ----------------------------------------------------------------- Excel
+def _count_docx_meta(ap: str) -> tuple[int, int]:
+    """数一下 docx 里有几个表格、几张图片（用来在转换结果后附一句提示）。"""
+    try:
+        import docx
+    except ImportError:
+        return 0, 0
+    try:
+        d = docx.Document(ap)
+        return len(d.tables), len(d.inline_shapes)
+    except Exception:  # noqa: BLE001
+        return 0, 0
+
+
+def _docx_html(ap: str, mammoth) -> str:
+    """mammoth 解析 docx → HTML（保留标题/列表/加粗斜体/链接/表格等结构）。"""
+    with open(ap, "rb") as f:
+        return mammoth.convert_to_html(f).value or ""
 
 
 @tool(
-    "read_xlsx",
-    "读取 Excel(.xlsx) 工作表，以 Markdown 表格返回。不给 sheet 时列出全部表名并展示第一张。"
-    "依赖第三方库 openpyxl。",
+    "docx_to_markdown",
+    "把 Word(.docx) 转成 Markdown（高保真）：用 mammoth 把文档解析成 HTML 结构，"
+    "再由 markdownify 转成 Markdown —— 标题层级、嵌套列表、加粗/斜体、链接、表格都能尽量保留。"
+    "图片不内嵌（Markdown 不写二进制），会略去并提示数量；需要逐段查看正文可用 read_docx。"
+    "依赖第三方库 mammoth（表格保真还需 markdownify）。",
     params={
-        "path": {"type": "string", "description": "xlsx 文件路径"},
-        "sheet": {"type": "string", "description": "工作表名，留空取第一张", "default": ""},
-        "max_rows": {"type": "integer", "description": "最多显示行数", "default": 50},
-        "max_cols": {"type": "integer", "description": "最多显示列数", "default": 30},
+        "path": {"type": "string", "description": "docx 文件路径"},
+        "max_chars": {"type": "integer", "description": "返回最大字符数", "default": 8000},
     },
     required=["path"],
 )
-def read_xlsx(path: str, sheet: str = "", max_rows: int = 50, max_cols: int = 30) -> str:
+def docx_to_markdown(path: str, max_chars: int = DEFAULT_MAX_CHARS) -> str:
     try:
-        import openpyxl
+        import mammoth
     except ImportError:
-        return _need("openpyxl")
+        return _need("mammoth")
 
     ap = read_path(path)
     if not os.path.isfile(ap):
         return f"[error] 文件不存在：{ap}"
+
+    try:
+        html = _docx_html(ap, mammoth)
+    except Exception as e:  # noqa: BLE001
+        return f"[error] 转换 .docx 失败（{type(e).__name__}: {e}）"
+
+    # mammoth 的 HTML 保留全部结构，最关键的表格也是；
+    # 再经 markdownify 转 Markdown，就能一次拿到「表格结构 + 行内格式」。
+    # markdownify 缺失时退回 mammoth 自带的 Markdown writer（表格会退化为零散段落）。
+    try:
+        from markdownify import markdownify
+    except ImportError:
+        try:
+            with open(ap, "rb") as f:
+                md = (mammoth.convert_to_markdown(f).value or "").strip()
+        except Exception as e:  # noqa: BLE001
+            return f"[error] 转换 .docx 失败（{type(e).__name__}: {e}）"
+        return clip(
+            f"[{ap}] 转换完成\n{md}\n"
+            "（未安装 markdownify，表格结构可能丢失；"
+            "安装 python -m pip install markdownify 可保留表格）",
+            max_chars,
+        )
+
+    # heading_style="ATX" 让标题输出 `# H1` 而非 Setext 的 `H1\n===`，与本项目其它工具一致；
+    # table_infer_header=True 把表格首行提升为表头（mammoth 对普通 Word 表格输出全 <td>，
+    #   不推断的话首行会变成空白表头 `|  |  |`）；
+    # strip=["img"] 丢弃图片 —— mammoth 默认会把图片转成 base64 data URI，会撑爆输出。
+    md = markdownify(
+        html, strip=["img"], heading_style="ATX", table_infer_header=True
+    ).strip()
+
+    notes = ""
+    tables, images = _count_docx_meta(ap)
+    if tables:
+        notes += f"\n（本文档含 {tables} 个表格，已转为 Markdown 表格）"
+    if images:
+        notes += f"\n（本文档含 {images} 张图片，Markdown 不内嵌二进制，已略去）"
+
+    return clip(f"[{ap}] 转换完成\n{md}{notes}", max_chars)
+
+
+# ----------------------------------------------------------------- Excel
+
+
+# 只有 calamine 能读的旧格式 / 非 OOXML 格式，openpyxl 读不了
+_CALAMINE_ONLY_EXTS = (".xls", ".xlsb", ".ods")
+
+
+def _xlsx_cell(v) -> str:
+    """单元格值转字符串。calamine 把数字统一给成 float，整数值去掉多余的 .0。"""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _xlsx_head(ap: str, names: list[str], target: str, nrows: int, ncols: int,
+               shown_rows: int, shown_cols: int, asked: str) -> str:
+    head = f"[{ap}] 工作表 {names} / 当前: {target} / {nrows} 行 × {ncols} 列"
+    if asked and asked != target:
+        head += f"（未找到表 {asked!r}，已回退到 {target}）"
+    if nrows > shown_rows or ncols > shown_cols:
+        head += f"\n…（仅显示前 {shown_rows} 行 × {shown_cols} 列）"
+    return head
+
+
+def _read_xlsx_calamine(ap: str, sheet: str, max_rows: int, max_cols: int) -> str:
+    """python-calamine（Rust）：读取快，支持 xlsx / xlsm / xls / xlsb / ods。"""
+    from python_calamine import CalamineWorkbook
+
+    try:
+        wb = CalamineWorkbook.from_path(ap)
+    except Exception as e:  # noqa: BLE001
+        return f"[error] 解析 {os.path.splitext(ap)[1]} 失败（{type(e).__name__}: {e}）"
+
+    names = list(wb.sheet_names)
+    if not names:
+        return f"[error] {ap} 没有任何工作表"
+    target = sheet if sheet in names else names[0]
+
+    ws = wb.get_sheet_by_name(target)
+    nrows, ncols = int(ws.height or 0), int(ws.width or 0)
+    shown_rows = min(nrows, max(1, max_rows))
+    shown_cols = min(ncols, max(1, max_cols))
+
+    data: list[list[str]] = []
+    if shown_rows > 0:
+        rows = ws.to_python(nrows=shown_rows)
+        data = [[_xlsx_cell(c) for c in r[:shown_cols]] for r in rows]
+
+    head = _xlsx_head(ap, names, target, nrows, ncols, shown_rows, shown_cols, sheet)
+    return f"{head}\n{_md_table(data) if data else '（空表）'}"
+
+
+def _read_xlsx_openpyxl(ap: str, sheet: str, max_rows: int, max_cols: int) -> str:
+    """openpyxl 兜底（纯 Python，不支持 .xls/.xlsb/.ods）。"""
+    try:
+        import openpyxl
+    except ImportError:
+        return _need("openpyxl")
 
     try:
         wb = openpyxl.load_workbook(ap, read_only=True, data_only=True)
@@ -264,14 +391,47 @@ def read_xlsx(path: str, sheet: str = "", max_rows: int = 50, max_cols: int = 30
     ]
     wb.close()
 
-    head = f"[{ap}] 工作表 {names} / 当前: {target} / {nrows} 行 × {ncols} 列"
-    if sheet and sheet != target:
-        head += f"（未找到表 {sheet!r}，已回退到 {target}）"
-    if nrows > shown_rows or ncols > shown_cols:
-        head += f"\n…（仅显示前 {shown_rows} 行 × {shown_cols} 列）"
+    head = _xlsx_head(ap, names, target, nrows, ncols, shown_rows, shown_cols, sheet)
+    return f"{head}\n{_md_table(data) if data else '（空表）'}"
 
-    table = _md_table(data) if data else "（空表）"
-    return f"{head}\n{table}"
+
+@tool(
+    "read_xlsx",
+    "读取 Excel 工作表并以 Markdown 表格返回，支持 .xlsx/.xlsm/.xls/.xlsb/.ods。"
+    "engine=auto 时优先用 python-calamine（更快，且能读旧版 .xls），缺库自动回退 openpyxl。"
+    "不给 sheet 时列出全部表名并展示第一张。",
+    params={
+        "path": {"type": "string", "description": "Excel 文件路径"},
+        "sheet": {"type": "string", "description": "工作表名，留空取第一张", "default": ""},
+        "max_rows": {"type": "integer", "description": "最多显示行数", "default": 50},
+        "max_cols": {"type": "integer", "description": "最多显示列数", "default": 30},
+        "engine": {"type": "string", "enum": ["auto", "calamine", "openpyxl"],
+                   "description": "读取引擎", "default": "auto"},
+    },
+    required=["path"],
+)
+def read_xlsx(path: str, sheet: str = "", max_rows: int = 50, max_cols: int = 30,
+              engine: str = "auto") -> str:
+    ap = read_path(path)
+    if not os.path.isfile(ap):
+        return f"[error] 文件不存在：{ap}"
+
+    engine = (engine or "auto").strip().lower()
+    ext = os.path.splitext(ap)[1].lower()
+
+    if engine == "openpyxl":
+        if ext in _CALAMINE_ONLY_EXTS:
+            return f"[error] openpyxl 不支持 {ext}，请改用 engine=calamine"
+        return _read_xlsx_openpyxl(ap, sheet, max_rows, max_cols)
+
+    try:
+        import python_calamine  # noqa: F401
+    except ImportError:
+        if engine == "calamine" or ext in _CALAMINE_ONLY_EXTS:
+            return _need("python-calamine", "python-calamine")
+        return _read_xlsx_openpyxl(ap, sheet, max_rows, max_cols)
+
+    return _read_xlsx_calamine(ap, sheet, max_rows, max_cols)
 
 
 @tool(
@@ -352,7 +512,7 @@ def read_pdf(path: str, pages: str = "", max_pages: int = 5, max_chars: int = DE
     body = "\n\n".join(chunks)
     head = f"[{ap}] 共 {total} 页，提取第 {idxs[0] + 1}-{idxs[-1] + 1} 页"
     if not body.strip():
-        return f"{head}\n（未提取到任何文字，可能是扫描件，需 OCR）"
+        return f"{head}\n（未提取到任何文字，可能是扫描件，请用 ocr_pdf 做 OCR）"
     return clip(f"{head}\n{body}", max_chars)
 
 
@@ -399,5 +559,110 @@ def read_pdf_tables(path: str, pages: str = "", max_tables: int = 5, max_rows: i
 
     head = f"[{ap}] 共 {total} 页，提取到 {len(out) // 2} 个表格"
     if not out:
-        return f"{head}\n（未识别到表格；可先用 read_pdf 看文字，扫描件需 OCR）"
+        return f"{head}\n（未识别到表格；可先用 read_pdf 看文字，扫描件请用 ocr_pdf）"
     return clip(head + "\n" + "\n".join(out))
+
+
+# ---------------------------------------------------------------- PDF 生成
+
+
+@tool(
+    "write_pdf",
+    "把 Markdown 文本生成 PDF：支持 # 标题、- 列表、| 表格，其余按普通段落，"
+    "**加粗** 与 `代码` 会做行内样式。内置中文字体（STSong-Light），中文可直接输出。"
+    "依赖第三方库 reportlab。",
+    params={
+        "path": {"type": "string", "description": "要写入的 pdf 路径"},
+        "content": {"type": "string", "description": "Markdown 正文"},
+        "title": {"type": "string", "description": "页首标题，留空则不输出标题", "default": ""},
+    },
+    required=["path", "content"],
+)
+def write_pdf(path: str, content: str, title: str = "") -> str:
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except ImportError:
+        return _need("reportlab")
+
+    ap = safe_path(path)
+    os.makedirs(os.path.dirname(ap) or workspace(), exist_ok=True)
+
+    # 中文字体：reportlab 内置的 STSong-Light（Adobe CID，无需外部字体文件）。
+    # 它没有独立的粗体/斜体，用 registerFontFamily 让 <b>/<i> 回落到同一字体，避免报错。
+    font = "STSong-Light"
+    try:
+        pdfmetrics.registerFont(UnicodeCIDFont(font))
+        pdfmetrics.registerFontFamily(font, normal=font, bold=font, italic=font, boldItalic=font)
+    except Exception:  # noqa: BLE001
+        font = "Helvetica"
+
+    base = ParagraphStyle("base", fontName=font, fontSize=10.5, leading=16)
+    bullets = ParagraphStyle("li", parent=base, leftIndent=12)
+    heading = {
+        n: ParagraphStyle(f"h{n}", parent=base, fontSize=s, leading=s + 6, spaceBefore=8, spaceAfter=4)
+        for n, s in ((1, 18), (2, 15), (3, 13), (4, 12), (5, 11), (6, 11))
+    }
+
+    flow = []
+    if title:
+        flow += [Paragraph(_pdf_inline(title), heading[1]), Spacer(1, 4)]
+
+    lines = content.splitlines()
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if not stripped:
+            i += 1
+            continue
+
+        # 连续的 | 行视为一个表格块
+        if stripped.startswith("|"):
+            block: list[list[str]] = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                if not _is_sep_row(cells):
+                    block.append(cells)
+                i += 1
+            if block:
+                ncols = max(len(r) for r in block)
+                data = []
+                for r in block:
+                    row_cells = (r + [""] * ncols)[:ncols]
+                    data.append([Paragraph(_pdf_inline(c), base) for c in row_cells])
+                t = Table(data)
+                t.setStyle(TableStyle([
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ]))
+                flow += [t, Spacer(1, 6)]
+            continue
+
+        if stripped.startswith("#"):
+            level = len(stripped) - len(stripped.lstrip("#"))
+            flow.append(Paragraph(_pdf_inline(stripped[level:].strip()), heading[min(level, 6)]))
+        elif stripped.startswith(("- ", "* ")):
+            flow.append(Paragraph("• " + _pdf_inline(stripped[2:].strip()), bullets))
+        else:
+            flow.append(Paragraph(_pdf_inline(stripped), base))
+        i += 1
+
+    try:
+        SimpleDocTemplate(
+            ap,
+            pagesize=A4,
+            leftMargin=18 * mm, rightMargin=18 * mm, topMargin=18 * mm, bottomMargin=18 * mm,
+            title=title or os.path.basename(ap),
+        ).build(flow)
+    except Exception as e:  # noqa: BLE001
+        return f"[error] 生成 PDF 失败（{type(e).__name__}: {e}）"
+
+    return f"[ok] 已写入 {ap}（{os.path.getsize(ap)} 字节）"

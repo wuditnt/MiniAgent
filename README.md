@@ -34,7 +34,7 @@ mini-agent/
 │   ├── mhtml.py                  MHTML 解析：主 HTML + 内嵌资源（data: URL）
 │   └── images.py                 图片附件通道（view_image 的底层）
 │
-├── plugins/           自带插件（文件 / 代码 / 执行 / 网络 / 视觉 / 系统 / 数据 / 文档 等，共 22 个）
+├── plugins/           自带插件（文件 / 代码 / 执行 / 网络 / 视觉 / 系统 / 数据 / 文档 / 表格 / OCR 等，共 24 个）
 ├── plugins_user/      ← 你的插件放这里，丢个 .py 就多一个工具
 ├── skills/            自带技能（一个目录 + SKILL.md = 一段可复用工作流）
 ├── skills_user/       ← 你的技能放这里，丢个含 SKILL.md 的目录就多一个技能
@@ -94,6 +94,13 @@ python -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt           # macOS / Linux
 .venv\Scripts\python.exe -m pip install -e .                  # 可选：装出 mini-agent 命令
 
+# 只想装部分能力时用 extra 分组（定义见 pyproject.toml）：
+#   pip install -e ".[docs]"        # 办公文档基础：docx / xlsx / pdf / csv 增强
+#   pip install -e ".[docs-fast]"   # + calamine 加速 Excel（含 .xls）、reportlab 生成 PDF、mammoth+markdownify docx→Markdown
+#   pip install -e ".[dataframe]"   # + polars 大表格分析
+#   pip install -e ".[ocr]"         # + 扫描件 OCR（约 170MB，可选）
+#   pip install -e ".[docs-all]"    # 以上四组一次装齐
+
 python -m core --tools      # 先看看有哪些工具（不需要 Key）
 python -m core --selftest   # 工具层自检（不需要 Key）
 python -m core              # 进入控制台
@@ -130,7 +137,7 @@ cd web; npm run dev                  # 终端 2：Vite :5173，/api 自动代理
 要点：
 
 - 默认监听 `0.0.0.0`（本机 + 局域网均可访问，手机/同网段设备直连；传 `--host 127.0.0.1` 可收窄为仅本机）；新增 `--web` / `--port`（默认 8000） / `--host`（默认 `0.0.0.0`）开关
-- chat 模式 = 纯对话（关联网时零工具、单次直答）；agent 模式 = 全量内置工具循环（当前 87 个，含 `remember`；`request_approval` 仅 auto 档暴露）；开联网则追加 `web_search`
+- chat 模式 = 纯对话（关联网时零工具、单次直答）；agent 模式 = 全量内置工具循环（当前 94 个，含 `remember`；`request_approval` 仅 auto 档暴露）；开联网则追加 `web_search`
 - 流式输出、工具执行轨迹（ThoughtChain，参数/结果可展开）、中途停止、刷新后恢复历史
 - **三档确认模式**（仅 agent 模式，输入框工具栏盾牌胶囊切换，localStorage 记住选择）：
   - **按需询问（ask，默认）**：每个危险工具执行前都弹窗确认
@@ -753,7 +760,7 @@ mini-agent/
 │   ├── cancel.py             取消令牌：CancellationToken / Cancelled / 杀进程树
 │   ├── mcp.py                MCP stdio 客户端（并发安全 + 可取消 + 取消通知）+ 桥接
 │   └── images.py             图片附件通道（view_image 的底层）
-├── plugins/                  自带插件（22 个，按分组）
+├── plugins/                  自带插件（24 个，按分组）
 │   ├── fs_tools.py           文件系统：read_file / write_file / list_dir / glob_files / grep
 │   ├── file_ops.py           文件操作
 │   ├── code_tools.py         代码辅助：edit_file（唯一匹配块编辑）/ re_replace /
@@ -765,8 +772,14 @@ mini-agent/
 │   ├── vision_tools.py       视觉：view_image（图片输入：按魔数嗅探格式，附件进对话）
 │   ├── image_meta_tools.py   图片元信息
 │   ├── data_tools.py         结构化数据：read_csv / write_csv / read_json / read_jsonl / file_info / detect_encoding
-│   ├── office_tools.py       办公文档：read_docx / write_docx / read_xlsx / write_xlsx / read_pdf / read_pdf_tables
-│   │                         （需 pip install python-docx openpyxl pypdf pdfplumber，缺库时工具会提示）
+│   ├── dataframe_tools.py    大表格分析（polars）：df_summary / df_sql / df_to_parquet
+│   ├── office_tools.py       办公文档：read_docx / write_docx / docx_to_markdown / read_xlsx / write_xlsx /
+│   │                         read_pdf / read_pdf_tables / write_pdf
+│   │                         （docx_to_markdown 用 mammoth→HTML→markdownify 高保真转换，保留表格；
+│   │                          read_xlsx 优先用 python-calamine 引擎，可读 .xls/.xlsb/.ods 且更快；
+│   │                          write_pdf 内置中文字体）
+│   ├── ocr_tools.py          扫描件 OCR（pypdfium2 + rapidocr-onnxruntime）：ocr_image / ocr_pdf
+│   │                         （首次调用需初始化引擎；read_pdf 提不出文字时用它）
 │   ├── database_tools.py     数据库
 │   ├── archive_tools.py      压缩归档
 │   ├── git_tools.py          Git
