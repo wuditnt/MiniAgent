@@ -25,6 +25,7 @@ from core import (
     looks_binary,
     read_bytes,
     read_path,
+    safe_path,
     tool,
     workspace,
 )
@@ -63,6 +64,10 @@ def read_csv(path: str, max_rows: int = 50, delimiter: str = "", encoding: str =
     else:
         text, enc = decode_bytes(data)
 
+    # 统一行尾并去掉可能残留的 BOM：否则 csv.Sniffer 会把 '\r' 误判成分隔符，
+    # 导致标准 CRLF 的 CSV（含我们自己 write_csv 写出的）被解析成单列。
+    text = text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+
     # 自动探测分隔符：用 csv.Sniffer，失败则回退到常见三种
     sample = text[:8192]
     delim = delimiter
@@ -94,6 +99,43 @@ def read_csv(path: str, max_rows: int = 50, delimiter: str = "", encoding: str =
     truncated = len(rows) - shown
     tail = f"\n…（还有 {truncated} 行未显示，共 {len(rows) - 1} 行数据）" if truncated > 0 else ""
     return f"[{ap}] 编码={enc} 分隔符={delim!r} 共 {len(rows) - 1} 行数据 / {ncols} 列\n" + "\n".join(out) + tail
+
+
+@tool(
+    "write_csv",
+    "把二维数组写成 CSV 文件（走 csv 标准转义，字段含逗号/换行/引号都能正确处理）。"
+    "默认 utf-8-sig，Excel 打开中文不乱码。",
+    params={
+        "path": {"type": "string", "description": "要写入的 csv 路径"},
+        "rows": {"type": "array", "items": {"type": "array"},
+                 "description": '二维数组，如 [["姓名","年龄"],["张三",18]]'},
+        "delimiter": {"type": "string", "description": "分隔符", "default": ","},
+        "encoding": {"type": "string", "description": "编码", "default": "utf-8-sig"},
+    },
+    required=["path", "rows"],
+)
+def write_csv(path: str, rows: list, delimiter: str = ",", encoding: str = "utf-8-sig") -> str:
+    ap = safe_path(path)
+    os.makedirs(os.path.dirname(ap) or workspace(), exist_ok=True)
+    if len(delimiter) != 1:
+        return "[error] delimiter 必须是单个字符"
+
+    ncols = 0
+    try:
+        # newline="" 是 csv 模块的硬要求，否则 Windows 上会多出空行
+        with open(ap, "w", encoding=encoding, newline="") as f:
+            writer = csv.writer(f, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
+            for r in rows or []:
+                vals = list(r) if isinstance(r, (list, tuple)) else [r]
+                ncols = max(ncols, len(vals))
+                writer.writerow(vals)
+    except (OSError, UnicodeEncodeError) as e:
+        return f"[error] 写入 CSV 失败（{type(e).__name__}: {e}）"
+
+    return (
+        f"[ok] 已写入 {ap}（{len(rows or [])} 行 × 最多 {ncols} 列，"
+        f"编码={encoding}，{os.path.getsize(ap)} 字节）"
+    )
 
 
 @tool(
@@ -204,6 +246,16 @@ def detect_encoding(path: str, max_bytes: int = 65536) -> str:
         return f"[{ap}] UTF-16 LE"
     if data.startswith(b"\xfe\xff"):
         return f"[{ap}] UTF-16 BE"
+
+    # 优先用 charset-normalizer（装了才用）：比下面手写的候选表可靠得多
+    try:
+        from charset_normalizer import from_bytes
+
+        best = from_bytes(data).best()
+        if best is not None and best.encoding:
+            return f"[{ap}] 最可能编码: {best.encoding}（charset-normalizer 判定）"
+    except ImportError:
+        pass
 
     candidates = []
     for enc in ("utf-8", "gb18030", "gbk", "big5", "latin-1", "cp1252"):

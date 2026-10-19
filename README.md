@@ -34,7 +34,7 @@ mini-agent/
 │   ├── mhtml.py                  MHTML 解析：主 HTML + 内嵌资源（data: URL）
 │   └── images.py                 图片附件通道（view_image 的底层）
 │
-├── plugins/           自带插件（文件 / 代码 / 执行 / 网络 / 视觉 / 系统 / 数据 等，共 21 个）
+├── plugins/           自带插件（文件 / 代码 / 执行 / 网络 / 视觉 / 系统 / 数据 / 文档 等，共 22 个）
 ├── plugins_user/      ← 你的插件放这里，丢个 .py 就多一个工具
 ├── skills/            自带技能（一个目录 + SKILL.md = 一段可复用工作流）
 ├── skills_user/       ← 你的技能放这里，丢个含 SKILL.md 的目录就多一个技能
@@ -753,7 +753,7 @@ mini-agent/
 │   ├── cancel.py             取消令牌：CancellationToken / Cancelled / 杀进程树
 │   ├── mcp.py                MCP stdio 客户端（并发安全 + 可取消 + 取消通知）+ 桥接
 │   └── images.py             图片附件通道（view_image 的底层）
-├── plugins/                  自带插件（21 个，按分组）
+├── plugins/                  自带插件（22 个，按分组）
 │   ├── fs_tools.py           文件系统：read_file / write_file / list_dir / glob_files / grep
 │   ├── file_ops.py           文件操作
 │   ├── code_tools.py         代码辅助：edit_file（唯一匹配块编辑）/ re_replace /
@@ -764,7 +764,9 @@ mini-agent/
 │   ├── web_search.py         联网搜索：web_search（Tavily / 博查 / Bing 兜底）
 │   ├── vision_tools.py       视觉：view_image（图片输入：按魔数嗅探格式，附件进对话）
 │   ├── image_meta_tools.py   图片元信息
-│   ├── data_tools.py         结构化数据
+│   ├── data_tools.py         结构化数据：read_csv / write_csv / read_json / read_jsonl / file_info / detect_encoding
+│   ├── office_tools.py       办公文档：read_docx / write_docx / read_xlsx / write_xlsx / read_pdf / read_pdf_tables
+│   │                         （需 pip install python-docx openpyxl pypdf pdfplumber，缺库时工具会提示）
 │   ├── database_tools.py     数据库
 │   ├── archive_tools.py      压缩归档
 │   ├── git_tools.py          Git

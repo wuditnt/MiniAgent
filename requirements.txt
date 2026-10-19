@@ -14,3 +14,19 @@ prompt_toolkit>=3.0
 pillow>=10.0
 psutil>=5.9
 pyperclip>=1.8
+
+# 可选：办公文档插件（plugins/office_tools.py 与 data_tools 的 write_csv）。
+# 装了才能读写 docx / xlsx、解析 pdf；不装也能跑（相应工具会提示缺哪个库）。
+#   python-docx        —— read_docx / write_docx
+#   openpyxl           —— read_xlsx / write_xlsx
+#   pypdf              —— read_pdf
+#   pdfplumber         —— read_pdf_tables
+#   charset-normalizer —— data_tools.detect_encoding 更准的编码判定
+python-docx>=1.1
+openpyxl>=3.1
+pypdf>=4.0
+pdfplumber>=0.11
+charset-normalizer>=3.0
+
+# 开发/测试：跑回归测试（scripts\run_tests.bat，或 python -m pytest）
+pytest>=8.0
