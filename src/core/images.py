@@ -25,6 +25,10 @@ import threading
 _LOCK = threading.Lock()
 _PENDING: list[dict] = []   # [{url, note}, ...]
 
+# 附件说明的固定开头。它既是给模型看的提示，也是「这条 user 消息不是用户
+# 说的」的识别标志 —— 历史会话文件里没留下 _injected 私有标记，只能靠它兜底。
+ATTACH_NOTE = "（本轮工具附加了以下图片，请结合上文分析）"
+
 
 def attach_image(url: str, note: str = "") -> None:
     """登记一张待发送图片（data URL）。任何工具都可以调用，不抛异常。"""
@@ -47,6 +51,6 @@ def take_images() -> list[dict]:
     notes = [p["note"] for p in pending if p.get("note")]
     parts: list[dict] = []
     if notes:
-        parts.append({"type": "text", "text": "（本轮工具附加了以下图片，请结合上文分析）\n" + "\n".join(notes)})
+        parts.append({"type": "text", "text": ATTACH_NOTE + "\n" + "\n".join(notes)})
     parts.extend({"type": "image_url", "image_url": {"url": p["url"]}} for p in pending)
     return parts

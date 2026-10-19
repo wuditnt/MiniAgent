@@ -16,7 +16,6 @@ import {
   FolderOpenOutlined,
   HistoryOutlined,
   MenuOutlined,
-  MessageOutlined,
   PlusOutlined,
   RobotOutlined,
   SearchOutlined,
@@ -39,6 +38,8 @@ interface Props {
   onSelect: (sid: string, hitIndex?: number) => void;
   /** 新建对话（用哪个工作区由 App 决定，即输入框上方那个胶囊的选择） */
   onCreateSession: () => void;
+  /** 新会话占位（草稿）：未落盘的当前新会话，在对应工作区组下占一行 */
+  draft?: { id: string; workspaceId: string } | null;
   onDeleteSession: (sid: string) => void;
   /** 修改某个会话的标题（在列表项上就地编辑） */
   onRenameSession: (sid: string, title: string) => void;
@@ -114,6 +115,7 @@ export default function Sidebar({
   onToggleCollapse,
   onSelect,
   onCreateSession,
+  draft = null,
   onDeleteSession,
   onRenameSession,
   onReplaySession,
@@ -260,17 +262,18 @@ export default function Sidebar({
           ) : (
             workspaces.map((w) => {
               const list = grouped.get(w.id) || [];
+              // 草稿占位：只在本组、且非搜索态下显示（草稿未落盘，搜不到内容）
+              const draftHere = draft && !terms.length && draft.workspaceId === w.id ? draft : null;
               // 搜索中强制展开所有分组，保证命中结果可见
               const wsCollapsed = collapsedWs.has(w.id) && !terms.length;
               return (
                 <div className="ws-group" key={w.id}>
                   <div className="ws-head" onClick={() => toggleWs(w.id)}>
-                    <span className={`ws-caret ${wsCollapsed ? "collapsed" : ""}`}>▾</span>
                     <FolderOpenOutlined className="ws-icon" />
                     <span className="ws-name" title={w.path}>
                       {w.name}
                     </span>
-                    <span className="ws-count">{list.length}</span>
+                    <span className="ws-count">{list.length + (draftHere ? 1 : 0)}</span>
                     <span className="ws-actions" onClick={(e) => e.stopPropagation()}>
                       {!remote && (
                         <>
@@ -303,7 +306,17 @@ export default function Sidebar({
 
                   {!wsCollapsed && (
                     <div className="ws-sessions">
-                      {list.length === 0 ? (
+                      {draftHere && (
+                        <div
+                          className={`session-item ${draftHere.id === currentId ? "active" : ""}`}
+                          onClick={() => onSelect(draftHere.id)}
+                        >
+                          <div className="session-item-body">
+                            <div className="session-item-title">新会话</div>
+                          </div>
+                        </div>
+                      )}
+                      {list.length === 0 && !draftHere ? (
                         <div className="ws-empty">暂无对话</div>
                       ) : (
                         list.map((s) => (
@@ -312,7 +325,6 @@ export default function Sidebar({
                             className={`session-item ${s.id === currentId ? "active" : ""}`}
                             onClick={() => onSelect(s.id, s.hit_index)}
                           >
-                            <MessageOutlined className="session-item-icon" />
                             <div className="session-item-body">
                               {editId === s.id ? (
                                 <input
@@ -339,46 +351,49 @@ export default function Sidebar({
                                 </div>
                               ) : null}
                             </div>
-                            <span className="session-item-time">{formatTime(s.updated_at)}</span>
-                            {editId !== s.id && (
-                              <Tooltip title="回放运行轨迹">
-                                <HistoryOutlined
-                                  className="session-item-edit"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    onReplaySession(s.id);
-                                  }}
-                                />
-                              </Tooltip>
-                            )}
-                            {editId !== s.id && (
-                              <Tooltip title="重命名">
-                                <EditOutlined
-                                  className="session-item-edit"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    startRename(s);
-                                  }}
-                                />
-                              </Tooltip>
-                            )}
-                            <Popconfirm
-                              title="删除这个对话？"
-                              okText="删除"
-                              cancelText="取消"
-                              onConfirm={(e) => {
-                                e?.stopPropagation();
-                                onDeleteSession(s.id);
-                              }}
-                              onPopupClick={(e) => e.stopPropagation()}
-                            >
-                              <Tooltip title="删除">
-                                <DeleteOutlined
-                                  className="session-item-delete"
-                                  onClick={(e) => e.stopPropagation()}
-                                />
-                              </Tooltip>
-                            </Popconfirm>
+                            {/* 右侧单槽位：默认显示相对时间，悬停时切换为快捷工具 */}
+                            <span className="session-item-tail">
+                              <span className="session-item-time">{formatTime(s.updated_at)}</span>
+                              {editId !== s.id && (
+                                <span className="session-item-actions">
+                                  <Tooltip title="回放运行轨迹">
+                                    <HistoryOutlined
+                                      className="session-item-edit"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        onReplaySession(s.id);
+                                      }}
+                                    />
+                                  </Tooltip>
+                                  <Tooltip title="重命名">
+                                    <EditOutlined
+                                      className="session-item-edit"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        startRename(s);
+                                      }}
+                                    />
+                                  </Tooltip>
+                                  <Popconfirm
+                                    title="删除这个对话？"
+                                    okText="删除"
+                                    cancelText="取消"
+                                    onConfirm={(e) => {
+                                      e?.stopPropagation();
+                                      onDeleteSession(s.id);
+                                    }}
+                                    onPopupClick={(e) => e.stopPropagation()}
+                                  >
+                                    <Tooltip title="删除">
+                                      <DeleteOutlined
+                                        className="session-item-delete"
+                                        onClick={(e) => e.stopPropagation()}
+                                      />
+                                    </Tooltip>
+                                  </Popconfirm>
+                                </span>
+                              )}
+                            </span>
                           </div>
                         ))
                       )}

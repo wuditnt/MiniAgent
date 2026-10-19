@@ -8,7 +8,6 @@ import {
   FileExcelOutlined,
   FileTextOutlined,
   FolderOpenOutlined,
-  GlobalOutlined,
   MessageOutlined,
   RobotOutlined,
   TranslationOutlined,
@@ -37,13 +36,6 @@ const CHAT_PROMPTS = [
     label: "自由问答",
     description: "直接在下方输入问题",
     prompt: "用三句话介绍你能做什么，以及和普通聊天机器人的区别。",
-  },
-  {
-    key: "search",
-    icon: <GlobalOutlined />,
-    label: "联网搜索演示",
-    description: "建议先打开右上角联网开关",
-    prompt: "搜索今天的科技新闻，挑三条给我摘要。",
   },
 ];
 
@@ -94,7 +86,7 @@ export default function WelcomePane({
         title="你好，我是 mini-agent"
         description={
           mode === "chat"
-            ? "对话模式：直接聊天，打开右上角开关可联网搜索最新信息"
+            ? "快速对话：直接回答，不做推理思考（可开启联网搜索）"
             : "智能体模式：我会调用本地工具（文件 / 代码 / 系统 / Git 等）帮你完成任务"
         }
       />

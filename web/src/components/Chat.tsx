@@ -20,7 +20,9 @@ import {
   RedoOutlined,
   RobotOutlined,
   SafetyCertificateOutlined,
+  SettingOutlined,
   ThunderboltOutlined,
+  UpOutlined,
 } from "@ant-design/icons";
 import { Bubble, Sender } from "@ant-design/x";
 import { Button, Checkbox, Collapse, Dropdown, Input, message, Radio, Tag, Tooltip } from "antd";
@@ -31,7 +33,9 @@ import type {
   ChatItem,
   ConfirmInfo,
   Mode,
+  ModelProvider,
   PendingAsk,
+  ReasoningLevel,
   WorkspaceItem,
 } from "../types";
 import { uploadFile } from "../api";
@@ -455,7 +459,27 @@ interface Props {
   onAnswerConfirm?: (approve: boolean) => void;
   /** 审批等待上限（秒），来自 /api/state 的 confirm_timeout */
   confirmTimeout?: number;
+  /** 模型选择器：列表 / 服务商展示名映射 / 当前激活 id / 当前模型名 */
+  models: ModelProvider[];
+  providerNames: Record<string, string>;
+  activeModelId?: string;
+  modelName?: string;
+  /** 本会话的推理等级（仅智能体模式生效） */
+  reasoning: ReasoningLevel;
+  /** 当前模型厂家支持的推理档位（空数组 = 该厂家不支持推理配置） */
+  reasoningLevels: ReasoningLevel[];
+  onActivateModel: (id: string) => void;
+  onSetReasoning: (level: ReasoningLevel) => void;
+  /** 打开「模型」设置页 */
+  onManageModels: () => void;
 }
+
+/** 推理等级的展示文案（三档：low / high / max） */
+const LEVEL_LABEL: Record<ReasoningLevel, string> = {
+  low: "Low",
+  high: "High",
+  max: "Max",
+};
 
 /**
  * 输入框上方左侧的工作区胶囊：告诉用户「这条对话的文件操作边界在哪」。
@@ -630,6 +654,15 @@ export default function Chat({
   confirm,
   onAnswerConfirm,
   confirmTimeout,
+  models,
+  providerNames,
+  activeModelId,
+  modelName,
+  reasoning,
+  reasoningLevels,
+  onActivateModel,
+  onSetReasoning,
+  onManageModels,
 }: Props) {
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -639,6 +672,33 @@ export default function Chat({
   // 已上传、待发送的附件（chips 展示在输入框上方）
   const [pending, setPending] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(false);
+
+  // 模型子菜单：按服务商分组，组名用服务商展示名；组内条目用模型显示名称
+  const modelGroups: { name: string; children: { key: string; label: React.ReactNode }[] }[] = [];
+  const groupIndex: Record<string, number> = {};
+  models.forEach((m) => {
+    const pname = providerNames[m.provider] || m.provider;
+    if (groupIndex[m.provider] === undefined) {
+      groupIndex[m.provider] = modelGroups.length;
+      modelGroups.push({ name: pname, children: [] });
+    }
+    modelGroups[groupIndex[m.provider]].children.push({
+      key: m.id,
+      label: <span className="mm-model">{m.name || m.model}</span>,
+    });
+  });
+
+  // 推理等级显示回退：会话里存的值可能不在当前模型厂家支持的档位里
+  // （比如换到只支持 low/high 的模型），此时显示上退到该厂家最高档；
+  // 实际请求参数由后端按厂家 spec 决定，不受这里影响。
+  const showReasoning: ReasoningLevel =
+    reasoningLevels.length === 0
+      ? "high"
+      : reasoningLevels.includes(reasoning)
+        ? reasoning
+        : reasoningLevels[reasoningLevels.length - 1];
+  // 推理等级仅在智能体模式下可配置（快速对话不思考，直接输出）
+  const canReasoning = mode === "agent" && reasoningLevels.length > 0;
 
   /** 选中文件后立即上传到工作区 .attachments/，结果暂存 pending 等发送 */
   const onPickFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -831,7 +891,7 @@ export default function Chat({
               actions={false}
               placeholder={
                 mode === "chat"
-                  ? "有问题尽管问（chat 模式，打开右上角开关可联网）"
+                  ? "有问题尽管问，我会直接回答（不做推理思考，可开启联网搜索）"
                   : "描述任务，Agent 会调用本地工具完成（agent 模式）"
               }
               footer={({ components }) => {
@@ -896,6 +956,79 @@ export default function Chat({
                       )}
                     </div>
                     <div className="composer-toolbar-right">
+                      {/* 模型选择器：两行菜单（模型 / 推理等级），自顶栏迁移至此 */}
+                      <Dropdown
+                        trigger={["click"]}
+                        placement="topRight"
+                        menu={{
+                          className: "model-menu",
+                          selectable: true,
+                          selectedKeys: [
+                            activeModelId ?? "",
+                            ...(canReasoning ? [`rc:${showReasoning}`] : []),
+                          ],
+                          items: [
+                            {
+                              key: "model",
+                              label: (
+                                <span className="mm-row">
+                                  <span className="mm-label">模型</span>
+                                  <span className="mm-value">
+                                    {modelName || "选择模型"}
+                                  </span>
+                                </span>
+                              ),
+                              children: [
+                                ...modelGroups.map((g) => ({
+                                  type: "group" as const,
+                                  label: g.name,
+                                  children: g.children,
+                                })),
+                                { type: "divider" as const },
+                                { key: "__manage__", label: "管理模型", icon: <SettingOutlined /> },
+                              ],
+                            },
+                            // 推理等级行只在智能体模式下出现，档位按当前模型厂家过滤；
+                            // 快速对话本身就不思考，没有再配置的意义
+                            ...(canReasoning
+                              ? [
+                                  {
+                                    key: "reasoning",
+                                    label: (
+                                      <span className="mm-row">
+                                        <span className="mm-label">推理等级</span>
+                                        <span className="mm-value">{LEVEL_LABEL[showReasoning]}</span>
+                                      </span>
+                                    ),
+                                    children: reasoningLevels.map((l) => ({
+                                      key: `rc:${l}`,
+                                      label: LEVEL_LABEL[l],
+                                    })),
+                                  },
+                                ]
+                              : []),
+                          ],
+                          onClick: ({ key }) => {
+                            if (key === "__manage__") {
+                              onManageModels();
+                              return;
+                            }
+                            if (key.startsWith("rc:")) {
+                              onSetReasoning(key.slice(3) as ReasoningLevel);
+                              return;
+                            }
+                            onActivateModel(key);
+                          },
+                        }}
+                      >
+                        <span className="model-chip">
+                          <span className="model-chip-name">{modelName || "选择模型"}</span>
+                          {canReasoning && (
+                            <span className="model-chip-level">{LEVEL_LABEL[showReasoning]}</span>
+                          )}
+                          <UpOutlined className="model-chip-caret" />
+                        </span>
+                      </Dropdown>
                       {/* 语音输入（浏览器 SpeechRecognition，不支持时自动变禁用态） */}
                       <SpeechButton />
                       {/* 发送按钮保持默认主色圆形样式，在一排文字图标中最醒目 */}

@@ -32,14 +32,16 @@ class _TC:
 
 
 class _Msg:
-    def __init__(self, content=None, tool_calls=None):
+    def __init__(self, content=None, tool_calls=None, usage=None):
         self.content = content
         self.tool_calls = tool_calls
+        self.usage = usage
 
 
 class _Resp:
     def __init__(self, msg):
         self.choices = [type("C", (), {"message": msg})]
+        self.usage = msg.usage      # 缺省 None：与「服务端没回 usage」时一致
 
 
 class _Scripted:
@@ -58,6 +60,16 @@ class _Scripted:
 class _StubClient:
     def __init__(self, msgs):
         self.chat = type("Chat", (), {"completions": _Scripted(msgs)})()
+
+
+class _UI:
+    """只实现需要的回调 —— UI 是可选能力，_ui_call 会静默跳过缺失的方法。"""
+
+    def __init__(self):
+        self.titles = []
+
+    def session_title(self, title):
+        self.titles.append(title)
 
 
 # ---------------------------------------------------------------- 测试
@@ -188,6 +200,88 @@ def test_context_window_keeps_tool_pairing():
     print("✓ 上下文：滑动窗口不会破坏 tool_calls/tool 配对")
 
 
+def test_max_turns_wrapup_appends_summary_into_one_bubble():
+    """轮数用尽：额外一次「不带工具」的收尾调用，把失败原因总结并入最终回答。
+
+    关键约束（用户诉求）：整轮任务在展示上只算一个回复气泡 —— 收尾文字必须并进
+    最后一条 assistant 回答，而不是另起一条 assistant 消息，否则会裂成两个气泡。
+    """
+    script = [
+        _Msg(tool_calls=[_TC(1, "list_dir", '{"path": "."}')]),      # 第 1 轮：调工具
+        _Msg(tool_calls=[_TC(2, "list_dir", '{"path": "."}')]),      # 第 2 轮：又调工具
+        _Msg(content="结论：已完成 A；未完成 B，原因为轮数不够。",       # 收尾轮：总结
+             usage=type("U", (), {"prompt_tokens": 3, "completion_tokens": 2,
+                                  "total_tokens": 5})()),
+    ]
+    a = agent_mod.Agent(verbose=False, max_turns=2, client=_StubClient(script))
+
+    out = a.run("做个复杂任务")
+
+    assert "已达最大轮次（2 轮），任务未完成" in out, out
+    assert "结论：已完成 A" in out, out
+    # 收尾并进了最后一条 assistant：assistant 消息数 = 2 轮工具 + 1 条合成回答
+    assert a.messages[-1]["role"] == "assistant"
+    assert a.messages[-1]["content"] == out
+    assert sum(1 for m in a.messages if m["role"] == "assistant") == 3, a.messages
+    # 收尾提示只服务于那一次调用，不能留在历史里（否则会被当成用户说过的话）
+    assert not any(m.get("_injected") == "max_turns_wrapup" for m in a.messages)
+    # 收尾那次调用不带 tools —— 否则还可能再产出 tool_calls 把主循环接回去
+    wrapup = a._client.chat.completions.calls[-1]
+    assert "tools" not in wrapup, wrapup.keys()
+    assert wrapup.get("stream") is False and wrapup.get("timeout") == 60, wrapup
+    assert a.usage["llm_calls"] == 3, a.usage
+    # 收尾那次调用的用量也计入本轮统计（README 承诺）
+    assert a.usage["total_tokens"] == 5, a.usage
+    print("✓ 触顶收尾：一次无工具调用生成总结，并入最终回答（单气泡）")
+
+
+def test_max_turns_wrapup_falls_back_when_call_fails():
+    """收尾调用本身失败时也要给用户交代：本地合成兜底文案，会话不中断。"""
+    script = [
+        _Msg(tool_calls=[_TC(1, "no_such_tool", "{}")]),   # 唯一的轮次：调了个不存在的工具
+    ]
+    a = agent_mod.Agent(verbose=False, max_turns=1, client=_StubClient(script))
+
+    out = a.run("做个复杂任务")   # 收尾脚本已耗尽 → create() 抛错 → 走兜底分支
+
+    assert "已达最大轮次（1 轮），任务未完成" in out, out
+    assert "收尾总结未能生成" in out, out
+    assert "最后一步是调用 `no_such_tool`" in out, out
+    assert "该步报错" in out, out
+    assert a.messages[-1]["role"] == "assistant"
+    assert not any(m.get("_injected") == "max_turns_wrapup" for m in a.messages)
+    print("✓ 触顶收尾：收尾失败时回退本地合成，会话不中断")
+
+
+def test_extract_hands_model_title_to_ui():
+    """记忆提炼那次调用的 JSON 里带 title，应通过 UI 回调交给会话去落地。
+
+    标题搭同一次提炼调用的顺风车，所以这里只断言「解析出来的 title 有没有被
+    送出去」；要不要用（用户改过名就丢弃）由 UI 侧决定。
+    """
+    import tempfile
+    from core import settings as settings_mod
+
+    script = [
+        _Msg(content='```json\n{"user": [], "project": [], "topic": "", '
+                     '"title": "修复上下文泄漏"}\n```'),
+    ]
+    ui = _UI()
+    a = agent_mod.Agent(verbose=False, client=_StubClient(script),
+                        ui=ui, session_id="t-title")
+    # 提炼门槛受全局配置影响：把配置文件指到空目录，取内置默认（两项均开）
+    old_file = settings_mod._SETTINGS_FILE
+    settings_mod._SETTINGS_FILE = os.path.join(tempfile.mkdtemp(), "settings.json")
+    try:
+        a._maybe_extract_memory(
+            "请帮我把上下文泄漏的问题查一下并修掉，它已经影响到多轮会话的展示效果了",
+            "已定位到 _display_items 的合并口径问题并修复，回归测试全部通过，稍后提交。")
+    finally:
+        settings_mod._SETTINGS_FILE = old_file
+    assert ui.titles == ["修复上下文泄漏"], ui.titles
+    print("✓ 提炼：JSON 里的 title 通过 UI 回调交出去（落不落地由会话决定）")
+
+
 def test_binary_file_is_not_force_decoded():
     import tools
     p = os.path.join(tools.WORKSPACE, "_bin_probe.bin")
@@ -225,6 +319,9 @@ if __name__ == "__main__":
     test_context_summary_rolls_and_keeps_recent()
     test_context_hard_window_when_summary_fails()
     test_context_window_keeps_tool_pairing()
+    test_max_turns_wrapup_appends_summary_into_one_bubble()
+    test_max_turns_wrapup_falls_back_when_call_fails()
+    test_extract_hands_model_title_to_ui()
     test_binary_file_is_not_force_decoded()
     test_sandbox_blocks_escape()
     test_dangerous_command_blocked()

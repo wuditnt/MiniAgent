@@ -11,11 +11,18 @@ import {
   ApiOutlined,
   AppstoreOutlined,
   BulbOutlined,
+  GlobalOutlined,
   ReloadOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
 import { fetchSettings, fetchTools, updateSettings } from "../api";
-import type { GeneralSettings, SandboxReadMode, SettingsInfo, ToolInfo } from "../types";
+import type {
+  GeneralSettings,
+  SandboxReadMode,
+  SearchProvider,
+  SettingsInfo,
+  ToolInfo,
+} from "../types";
 import MemoryPanel from "./MemoryPanel";
 import ModelSettingsPanel from "./ModelSettings";
 
@@ -31,7 +38,7 @@ interface Props {
   workspaceId: string;
 }
 
-export type SettingsTab = "model" | "general" | "memory" | "plugins";
+export type SettingsTab = "model" | "general" | "search" | "memory" | "plugins";
 
 /** 每个字段的界面元信息：标签、说明、区间、步进 */
 const FIELDS: {
@@ -107,8 +114,34 @@ const NAV: {
 }[] = [
   { key: "model", label: "模型配置", icon: <ApiOutlined />, group: "设置" },
   { key: "general", label: "通用配置", icon: <SettingOutlined />, group: "设置" },
+  { key: "search", label: "联网搜索", icon: <GlobalOutlined />, group: "设置" },
   { key: "memory", label: "记忆", icon: <BulbOutlined />, group: "数据与扩展" },
   { key: "plugins", label: "插件管理", icon: <AppstoreOutlined />, group: "数据与扩展" },
+];
+
+/** 联网搜索后端选项：与聊天模型解耦，任何厂商的模型都能用 */
+const SEARCH_BACKENDS: { value: SearchProvider; label: string; desc: string }[] = [
+  {
+    value: "deepseek",
+    label: "DeepSeek 官方搜索（推荐）",
+    desc:
+      "调用 DeepSeek Search API（api.deepseek.com/v1/tools/search），鉴权复用「模型配置」里 DeepSeek 的 API Key；用其他厂商的模型也能联网搜索",
+  },
+  {
+    value: "tavily",
+    label: "Tavily",
+    desc: "读取环境变量 TAVILY_API_KEY，面向 LLM 优化，返回质量稳定",
+  },
+  {
+    value: "bocha",
+    label: "博查",
+    desc: "读取环境变量 BOCHA_API_KEY，国内合规、中文结果较好",
+  },
+  {
+    value: "bing",
+    label: "Bing 网页抓取",
+    desc: "无需 Key，抓取 cn.bing.com 搜索结果页；页面结构变化时可能失效",
+  },
 ];
 
 export default function SettingsModal({ open, tab, onTab, onClose, onChanged, workspaceId }: Props) {
@@ -249,7 +282,7 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
       onCancel={onClose}
       destroyOnClose
       footer={
-        active === "general"
+        active === "general" || active === "search"
           ? [
               <Button key="reset" icon={<ReloadOutlined />} onClick={reset} loading={saving}>
                 恢复默认
@@ -292,6 +325,63 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
         </nav>
         <div className="settings-content">
           {active === "model" && <ModelSettingsPanel onChanged={onChanged} />}
+          {active === "search" && (
+            <Spin spinning={loading}>
+              {error && (
+                <Alert type="error" showIcon message={error} style={{ marginBottom: 12 }} />
+              )}
+              <div className="gs-group-title">联网搜索后端</div>
+              {draft && (
+                <div className="gs-section">
+                  <div className="gs-row" style={{ alignItems: "flex-start" }}>
+                    <div className="gs-label">
+                      <span className="gs-label-text">搜索服务</span>
+                      <span className="gs-help">
+                        与聊天模型解耦：任何厂商的模型都能使用这里选定的搜索能力
+                      </span>
+                    </div>
+                    <div className="gs-control">
+                      <Select
+                        value={draft.search_provider}
+                        style={{ width: 260 }}
+                        onChange={(v) => patch("search_provider", v)}
+                        options={SEARCH_BACKENDS.map((b) => ({
+                          value: b.value,
+                          label: b.label,
+                        }))}
+                      />
+                    </div>
+                  </div>
+                  <Alert
+                    type="info"
+                    showIcon
+                    message={
+                      SEARCH_BACKENDS.find((b) => b.value === draft.search_provider)?.desc || ""
+                    }
+                    style={{ marginTop: 10 }}
+                  />
+                </div>
+              )}
+              <div className="gs-group-title">使用方式</div>
+              <div className="gs-section">
+                <div className="gs-note" style={{ marginTop: 0 }}>
+                  输入框右上角的「联网搜索」开关控制本轮是否加载搜索工具。
+                  <br />
+                  快速对话模式不做推理思考，但开启开关后可以联网搜索后直接回答。
+                  <br />
+                  智能体模式下可与其他工具配合完成复杂任务。
+                </div>
+              </div>
+              {dirty && (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="改动尚未保存；保存后立即生效"
+                  style={{ marginTop: 12 }}
+                />
+              )}
+            </Spin>
+          )}
           {active === "memory" && <MemoryPanel workspaceId={workspaceId} />}
           {active === "plugins" && (
             <Spin spinning={toolsLoading}>

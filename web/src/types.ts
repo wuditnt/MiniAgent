@@ -11,6 +11,9 @@ export type ApprovalMode = "ask" | "auto" | "full";
 /** 沙箱外读取策略：strict 全拦 / whitelist 仅白名单 / open 全部只读放开 */
 export type SandboxReadMode = "strict" | "whitelist" | "open";
 
+/** 推理档位全集（low/high/max，三档都表示开启思考+强度）；各厂家实际支持的档位由模板声明 */
+export type ReasoningLevel = "low" | "high" | "max";
+
 /** 危险操作确认请求（confirm_request 事件 → ConfirmPanel） */
 export interface ConfirmInfo {
   id: string;
@@ -46,7 +49,7 @@ export type SSEEvent =
   | { type: "ask_request"; id: string; question: string; options: string[]; allow_free_text: boolean; multi: boolean }
   | { type: "notice"; text: string }
   | { type: "cancelled"; reason: string; usage?: Usage }
-  | { type: "done"; answer: string; sec: number; usage?: Usage }
+  | { type: "done"; answer: string; sec: number; title_pending?: boolean; usage?: Usage }
   | { type: "error"; message: string; usage?: Usage }
   /** 事件流的实时镜像（P0 可选能力）：event 为一条完整轨迹事件信封 */
   | { type: "trace"; event: TraceEvent };
@@ -167,6 +170,10 @@ export interface SessionItem {
   hit_index?: number;
   /** 搜索命中时：命中处上下文片段 */
   snippet?: string;
+  /** 本会话保存的模型配置 id（空 = 跟全局默认） */
+  model_id?: string;
+  /** 本会话保存的推理等级（空 = 跟全局默认） */
+  reasoning?: ReasoningLevel;
 }
 
 /** 工作区（GET /api/workspaces 返回） */
@@ -239,6 +246,13 @@ export interface ProviderTemplate {
   base_url: string;
   models: string[];
   no_key: boolean;
+  /** 该厂家支持的推理档位与参数风格；levels 为空 = 不支持思考控制 */
+  reasoning?: {
+    levels: ReasoningLevel[];
+    style: "effort" | "thinking" | "switch";
+    /** 界面档位 → 接口实际取值（缺省同名直传，如 OpenAI 无 max → 映射成 high） */
+    values?: Record<string, string>;
+  };
 }
 
 /** GET /api/models 返回 */
@@ -246,6 +260,8 @@ export interface ModelsInfo {
   providers: ModelProvider[];
   templates: Record<string, ProviderTemplate>;
   active: string;
+  /** 全局推理等级 */
+  reasoning: ReasoningLevel;
 }
 
 /** POST /api/models/{id}/test 返回 */
@@ -255,6 +271,9 @@ export interface TestResult {
   error?: string;
   note?: string;
 }
+
+/** 联网搜索后端：deepseek 用 DeepSeek 官方 Search API，其余走第三方/网页兜底 */
+export type SearchProvider = "deepseek" | "tavily" | "bocha" | "bing";
 
 /** 通用配置（GET /api/settings 返回的 values） */
 export interface GeneralSettings {
@@ -266,6 +285,8 @@ export interface GeneralSettings {
   stream: boolean;
   parallel_tools: boolean;
   max_workers: number;
+  /** 联网搜索后端（与聊天模型无关，任何厂商的模型都能用） */
+  search_provider: SearchProvider;
   /** 沙箱外读取策略；写操作在任何档位下都被硬禁 */
   sandbox_read: SandboxReadMode;
   /** 沙箱外只读白名单（绝对路径，sandbox_read=whitelist 时生效） */

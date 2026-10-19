@@ -2,7 +2,7 @@
 Web UI 端到端验证：真实 WebServer + mock OpenAI 兼容服务，断言 SSE 事件序列。
 
 覆盖（对应 docs/WEBUI_ANTDX_PLAN.md 验收标准的服务端部分）：
-  ① 会话工具表矩阵：chat=空表 / chat+web={web_search} / agent=全量（纯注册表检查，不发网络）
+  ① 会话工具表矩阵：chat 不联网=零工具 / chat 联网=仅 web_search / agent 全量（纯注册表检查，不发网络）
   ② chat 模式：turn/delta/llm_done/done 事件齐全，全程无 tool 事件
   ③ /api/history：对话后能恢复 user/assistant 消息
   ④ agent 模式：tool_start/tool_end 按 id 配对 + done
@@ -179,11 +179,109 @@ def scenario_registry_matrix() -> None:
     from core.registry import REGISTRY
     from core.webui import _session_registry
 
-    assert len(_session_registry("chat", False).all()) == 0, "chat 关联网应为空表"
-    chatweb = [t.name for t in _session_registry("chat", True).all()]
-    assert chatweb == ["web_search"], f"chat 开联网应只有 web_search，实际 {chatweb}"
-    assert len(_session_registry("agent", False).all()) == len(REGISTRY), "agent 模式应为全量表"
-    print("  [1] 会话工具表矩阵（chat/chat+web/agent）通过")
+    all_names = {t.name for t in REGISTRY.all()}
+    assert "web_search" in all_names, "插件未加载：web_search 应在 REGISTRY 里"
+
+    assert len(_session_registry("chat").all()) == 0, "chat 不联网应零工具"
+    chat_web = {t.name for t in _session_registry("chat", "ask", True).all()}
+    assert chat_web == {"web_search"}, f"chat 联网只应保留 web_search，实际 {chat_web}"
+    assert {t.name for t in _session_registry("agent").all()} == all_names - {"web_search"}, \
+        "agent 关联网应剔除 web_search"
+    assert len(_session_registry("agent", "ask", True).all()) == len(REGISTRY), "agent 联网应为全量表"
+    print("  [1] 会话工具表矩阵（chat±web / agent±web）通过")
+
+
+def scenario_display_grouping() -> None:
+    """一次回复只呈现一个气泡：ReAct 多段 assistant/tool + 内部注入消息必须合并。
+
+    `_display_items` 是历史回放 / 搜索 / keep 截断三处共用的口径，这里直接对
+    原始消息序列断言，覆盖两个用户可见的缺陷：
+      ① ReAct 中途递图片（借 user 角色注入）会把一次回复切成多个气泡；
+      ② 老会话文件里注入消息没留下 _injected 标记，只能靠固定文案前缀兜底识别。
+    """
+    from core.images import ATTACH_NOTE
+    from core.webui import _display_items, _is_injected
+
+    raw = [
+        {"role": "user", "content": "给我几个选项"},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "c1", "type": "function",
+                         "function": {"name": "t", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "结果 1"},
+        {"role": "assistant", "content": "这是第一张图"},
+        # 新会话：注入消息带 _injected 私有标记
+        {"role": "user", "_injected": "attachment_images",
+         "content": [{"type": "text", "text": ATTACH_NOTE + "\n像素图 1"},
+                     {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}]},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "c2", "type": "function",
+                         "function": {"name": "t", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c2", "content": "结果 2"},
+        # 老会话：没有标记，只剩固定文案
+        {"role": "user", "content": ATTACH_NOTE + "\n像素图 2"},
+        {"role": "assistant", "content": "这是第二张图",
+         "usage": {"total_tokens": 5}, "sec": 0.1},
+    ]
+
+    assert _is_injected(raw[7]), "老会话无标记的注入消息要靠文案前缀识别"
+    assert not _is_injected(raw[0]), "真实用户消息不能被误判为注入"
+
+    items = _display_items(raw)
+    assert [it["role"] for it in items] == ["user", "assistant"], items
+    assert items[0]["content"] == "给我几个选项"
+    # 两次图片迭代被合并进同一个气泡，两段正文都保留
+    assert items[1]["content"] == "这是第一张图\n\n这是第二张图", items[1]["content"]
+    assert items[1]["_end"] == 8, items[1]      # keep 截断映射回原始序列的依据
+    print(f"  [1b] 展示分组通过（{len(raw)} 条消息 → {len(items)} 个气泡）")
+
+
+def scenario_session_title() -> None:
+    """标题：本地规则兜底（剥口语前缀 / 附件用文件名 / 别切在 .csv 里）+ 模型标题落地与锁定。"""
+    from core.webui import WebUI, _derive_title, _tidy_title
+
+    # 规则兜底：反复剥前缀（「麻烦你帮我」→「看一下」），且不能把 sales.csv 切碎
+    assert _derive_title([{"role": "user", "content": "麻烦你帮我看一下 sales.csv 的月度趋势"}]) \
+        == "sales.csv 的月度趋势"
+    assert _derive_title([{"role": "user", "content": "帮我写一个 python 脚本"}]) == "写一个 python 脚本"
+    # 附件消息用文件名，而不是那串「[附件：…（路径 …）]」机器文案
+    assert _derive_title(
+        [{"role": "user", "content": "[附件：季度报表.xlsx（路径 a/季度报表.xlsx，大小 1.2KB）]"}]
+    ) == "季度报表.xlsx"
+    # 内部注入消息（图片说明）不能占标题，取它后面那条真实用户消息
+    from core.images import ATTACH_NOTE
+    assert _derive_title([
+        {"role": "user", "_injected": "attachment_images",
+         "content": [{"type": "text", "text": ATTACH_NOTE}]},
+        {"role": "user", "content": "帮我分析销售数据"},
+    ]) == "分析销售数据"
+
+    # 规整：去书名号、去「1.」序号、超长按停顿/空格切，不切在词中间
+    assert _tidy_title("《把 Word 转 Markdown》") == "把 Word 转 Markdown"
+    assert _tidy_title("1. 修复上下文泄漏") == "修复上下文泄漏"
+    assert _tidy_title("请分析销售数据，再看月度趋势走向并给出结论") == "请分析销售数据"
+    assert _tidy_title("Please help me refactor the authentication module now") == "Please help me"
+
+    # 模型标题落地：只认还没命名过的会话，落地即锁定（后续轮次不再改、不重复落盘）
+    class _Sess:
+        def __init__(self) -> None:
+            self.id, self.title, self.title_custom, self.saved = "s-title", "新对话", False, 0
+
+        def save(self) -> None:
+            self.saved += 1
+
+    s = _Sess()
+    ui = WebUI(s)
+    ui.session_title("修复上下文泄漏")
+    assert (s.title, s.title_custom, s.saved) == ("修复上下文泄漏", True, 1), (s.title, s.saved)
+    ui.session_title("另一个标题")          # 已锁定：丢弃
+    ui.session_title("")                    # 空标题：丢弃
+    assert (s.title, s.saved) == ("修复上下文泄漏", 1)
+
+    renamed = _Sess()
+    renamed.title_custom = True             # 用户手动改过名 → 模型标题一律不覆盖
+    WebUI(renamed).session_title("不该生效")
+    assert (renamed.title, renamed.saved) == ("新对话", 0)
+    print("  [1c] 会话标题：规则兜底 + 模型标题落地与锁定 通过")
 
 
 def scenario_chat_and_history() -> None:
@@ -517,10 +615,40 @@ def scenario_models() -> None:
     # 切回默认并删除新增；最后一条不可删
     assert api("POST", "/api/models/default/activate")[0] == 200
     assert api("GET", "/api/state")[1]["model"] == "mock-gpt"
+
+    # ---- 会话级模型配置：每个对话单独保存，互不影响 ----
+    import core.webui as _w
+
+    _, sess = api("POST", "/api/sessions", {"workspace": "default"})
+    msid = sess["id"]
+    # 设置推理等级 → 落盘 + 列表可见
+    status, r = api("POST", f"/api/sessions/{msid}/model", {"reasoning": "max"})
+    assert status == 200 and r["reasoning"] == "max", f"设置推理等级应 200：{status} {r}"
+    disk = _w._load_session_file(msid)
+    assert disk.get("reasoning") == "max", f"推理等级应写进会话 JSON：{disk.get('reasoning')}"
+    _, lst = api("GET", "/api/sessions")
+    mine = next(s for s in lst["sessions"] if s["id"] == msid)
+    assert mine["reasoning"] == "max", "会话列表应返回本会话的推理等级"
+    # 换成 ollama（先创建一条可用的模型记录），model_id 也持久化
+    status, created = api("POST", "/api/models", {"provider": "ollama", "model": "qwen2.5:7b"})
+    pid2 = created["id"]
+    assert api("POST", f"/api/sessions/{msid}/model", {"model_id": pid2})[0] == 200
+    assert _w._load_session_file(msid).get("model_id") == pid2, "model_id 应写进会话 JSON"
+    # 缺省项保持原值：只改 model_id 不动 reasoning
+    assert _w._load_session_file(msid).get("reasoning") == "max"
+    # 非法值：不存在的模型 / 非法等级（含已废弃的 off）→ 400，且不落盘
+    assert api("POST", f"/api/sessions/{msid}/model", {"model_id": "no-such"})[0] == 400
+    assert api("POST", f"/api/sessions/{msid}/model", {"reasoning": "bogus"})[0] == 400
+    assert api("POST", f"/api/sessions/{msid}/model", {"reasoning": "off"})[0] == 400
+    assert api("POST", "/api/sessions/no-such-session/model", {"reasoning": "low"})[0] == 404
+    assert _w._load_session_file(msid).get("model_id") == pid2
+    # 清理
+    api("DELETE", f"/api/sessions/{msid}")
+    assert api("DELETE", f"/api/models/{pid2}")[0] == 200
     assert api("DELETE", f"/api/models/{pid}")[0] == 200
     status, err = api("DELETE", "/api/models/default")
     assert status == 400 and "error" in err, f"至少保留一条：{status} {err}"
-    print("  [11] 模型配置：默认 DeepSeek/脱敏/新增校验/切换/删除保护 通过")
+    print("  [11] 模型配置：默认/脱敏/新增校验/切换/删除保护 + 会话级模型配置 通过")
 
 
 def scenario_search() -> None:
@@ -684,6 +812,8 @@ def main() -> int:
     results: list[tuple[str, bool]] = []
     scenarios = [
         ("会话工具表矩阵", scenario_registry_matrix),
+        ("展示分组-注入不拆气泡", scenario_display_grouping),
+        ("会话标题生成与锁定", scenario_session_title),
         ("chat 模式 + history", scenario_chat_and_history),
         ("agent 模式工具轨迹", scenario_agent_tools),
         ("事件流轨迹回放", scenario_trajectory),

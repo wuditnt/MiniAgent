@@ -40,6 +40,10 @@ DEFAULTS: dict = {
     "memory_enabled": True,        # 总开关：关闭后不注入、不自动提炼、不暴露 remember
     "memory_auto_extract": True,   # 每轮结束自动提炼偏好/决定/坑（关闭则只靠手动）
     "memory_budget_chars": 1500,   # 注入 system prompt 的记忆字符预算
+    # ---- 联网搜索 ----
+    # 搜索后端：deepseek 用 DeepSeek 官方 Search API（key 复用 DeepSeek 模型配置），
+    # 其余走 Tavily / 博查 / Bing 兜底。与聊天模型无关，任何厂商的模型都能用。
+    "search_provider": "deepseek",
     # ---- 运行日志 ----
     "log_enabled": True,           # 是否写本地文件日志（logs/ 下分类文件）
     "log_level": "INFO",           # DEBUG 才能看到 HTTP 访问日志
@@ -75,6 +79,7 @@ BOOL_KEYS = ("stream", "parallel_tools", "memory_enabled", "memory_auto_extract"
 ENUM_KEYS: dict[str, tuple[str, ...]] = {
     "sandbox_read": ("strict", "whitelist", "open"),
     "log_level": ("DEBUG", "INFO", "WARNING", "ERROR"),
+    "search_provider": ("deepseek", "tavily", "bocha", "bing"),
 }
 #: 字符串列表字段（元素必须是非空字符串，自动去空白）
 LIST_KEYS = ("sandbox_read_whitelist",)

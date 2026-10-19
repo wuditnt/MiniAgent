@@ -1,10 +1,13 @@
 """
 联网搜索工具：让模型能查「今天/最新」这类时效性问题。
 
-三级后端自动降级（按优先级探测一次，结果缓存）：
-    1. Tavily   —— 环境变量 TAVILY_API_KEY，专为 LLM 设计，质量最好
-    2. 博查     —— 环境变量 BOCHA_API_KEY，国内合规、中文质量好
-    3. Bing CN  —— 无需 key，抓取 cn.bing.com 搜索结果页解析，国内可达兜底
+搜索后端可在「系统配置 → 联网搜索」里选择，与聊天模型解耦 —— 用任何厂商的
+模型都能走 DeepSeek 的搜索能力：
+
+    deepseek —— DeepSeek 官方 Search API（默认），Key 复用模型配置里的 DeepSeek
+    tavily   —— 环境变量 TAVILY_API_KEY，专为 LLM 设计
+    bocha    —— 环境变量 BOCHA_API_KEY，国内合规、中文质量好
+    bing     —— 无需 key，抓取 cn.bing.com 结果页解析，国内可达兜底
 
 只读、非危险；全部走 urllib，不引入新依赖。失败返回 [error] 文本，
 不阻塞对话 —— 模型看到错误会自行改用已有信息作答。
@@ -20,7 +23,7 @@ import urllib.request
 
 from core import clip, tool
 
-PLUGIN_INFO = {"name": "联网搜索", "version": "1.0", "author": "mini-agent"}
+PLUGIN_INFO = {"name": "联网搜索", "version": "1.1", "author": "mini-agent"}
 
 MAX_BYTES = 1024 * 1024          # 单次响应最多读 1MB
 SNIPPET_LEN = 200                # 每条摘要截断长度
@@ -30,21 +33,40 @@ UA = (
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
-# 解析结果缓存在模块级：env 配好后无需重启（进程内生效）
-_backend_cache: str | None = None
+DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search"
+
+#: 后端 id → 展示名（给模型看的结果抬头）
+_LABELS = {"deepseek": "DeepSeek", "tavily": "Tavily", "bocha": "博查", "bing": "Bing"}
 
 
 def _backend() -> str:
-    """确定当前可用后端：tavily / bocha / bing。"""
-    global _backend_cache
-    if _backend_cache is None:
-        if os.environ.get("TAVILY_API_KEY"):
-            _backend_cache = "tavily"
-        elif os.environ.get("BOCHA_API_KEY"):
-            _backend_cache = "bocha"
-        else:
-            _backend_cache = "bing"
-    return _backend_cache
+    """当前搜索后端：默认 deepseek，可在系统配置里切换（改完即时生效）。"""
+    from core import settings
+
+    try:
+        kind = str(settings.get("search_provider") or "deepseek")
+    except Exception:  # noqa: BLE001 —— 配置层异常不该让搜索工具崩掉
+        kind = "deepseek"
+    return kind if kind in _LABELS else "deepseek"
+
+
+def _deepseek_key() -> str:
+    """联网鉴权复用 DeepSeek 的 Key：优先模型配置，其次环境变量。"""
+    try:
+        from core import model_config
+
+        key = model_config.provider_key("deepseek")
+        if key:
+            return key
+    except Exception:  # noqa: BLE001
+        pass
+    key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if key:
+        return key
+    # 纯 .env 用法：接口地址指向 DeepSeek 时，主 Key 就是 DeepSeek 的 Key
+    if "deepseek" in os.environ.get("OPENAI_BASE_URL", "").lower():
+        return os.environ.get("OPENAI_API_KEY", "").strip()
+    return ""
 
 
 def _http_json(url: str, payload: dict, key: str) -> dict:
@@ -80,7 +102,31 @@ def _strip_tags(markup: str) -> str:
     return re.sub(r"\s{2,}", " ", _html.unescape(markup)).strip()
 
 
-# ---------------------------------------------------------------- 三级后端
+# ---------------------------------------------------------------- 各后端
+
+def _search_deepseek(query: str, n: int) -> list[tuple[str, str, str]]:
+    """DeepSeek 官方 Search API（https://api-docs.deepseek.com/guides/search）。
+
+    与聊天模型无关：任何厂商的模型都可以用这套搜索能力，鉴权复用 DeepSeek Key。
+    summary 是官方为模型准备的长摘要（约 600-800 字），比 snippet 更适合喂给模型。
+    """
+    key = _deepseek_key()
+    if not key:
+        raise RuntimeError(
+            "未找到 DeepSeek API Key：请先在「模型配置」里添加一条 DeepSeek 配置，"
+            "或在 .env 设置 DEEPSEEK_API_KEY"
+        )
+    data = _http_json(
+        DEEPSEEK_SEARCH_URL,
+        {"query": query, "count": n, "need_content": False},
+        key,
+    )
+    out = []
+    for item in (data.get("results") or [])[:n]:
+        snippet = item.get("summary") or item.get("snippet") or ""
+        out.append((item.get("title", ""), item.get("url", ""), snippet))
+    return out
+
 
 def _search_tavily(query: str, n: int) -> list[tuple[str, str, str]]:
     data = _http_json(
@@ -148,7 +194,12 @@ def _search_bing(query: str, n: int) -> list[tuple[str, str, str]]:
     return out
 
 
-_BACKENDS = {"tavily": _search_tavily, "bocha": _search_bocha, "bing": _search_bing}
+_BACKENDS = {
+    "deepseek": _search_deepseek,
+    "tavily": _search_tavily,
+    "bocha": _search_bocha,
+    "bing": _search_bing,
+}
 
 
 @tool(
@@ -173,22 +224,23 @@ def web_search(query: str, max_results: int = 5) -> str:
     n = max(1, min(int(max_results or 5), 10))
 
     kind = _backend()
+    label = _LABELS.get(kind, kind)
     results: list[tuple[str, str, str]] = []
     try:
         results = _BACKENDS[kind](query, n)
     except Exception as e:  # noqa: BLE001 —— 搜索失败不该阻塞对话
         return (
-            f"[error] 搜索失败（后端 {kind}）：{type(e).__name__}: {e}。"
-            f"建议配置 TAVILY_API_KEY 或 BOCHA_API_KEY 获得更稳定的结果。"
+            f"[error] 搜索失败（后端 {label}）：{type(e).__name__}: {e}。"
+            f"可在「系统配置 → 联网搜索」切换后端或检查对应的 Key。"
         )
 
     if not results:
         return (
-            f"[error] 后端 {kind} 未解析到结果（页面结构可能变化或被反爬拦截）。"
-            f"建议配置 TAVILY_API_KEY 或 BOCHA_API_KEY。"
+            f"[error] 后端 {label} 未返回结果（可能是查询无匹配，或页面结构变化/被反爬拦截）。"
+            f"可在「系统配置 → 联网搜索」切换后端。"
         )
 
-    lines = [f"搜索「{query}」（后端：{kind}）共 {len(results)} 条："]
+    lines = [f"搜索「{query}」（后端：{label}）共 {len(results)} 条："]
     for i, (title, url, snippet) in enumerate(results, 1):
         snippet = snippet[:SNIPPET_LEN] + ("…" if len(snippet) > SNIPPET_LEN else "")
         lines.append(f"{i}. {title}\n   URL: {url}\n   摘要: {snippet or '（无摘要）'}")

@@ -69,6 +69,8 @@ SUITES: list[tuple[str, str, bool]] = [
     ("test_logging.py", "文件日志 6 项：按日目录 / 错误聚合 / 幂等重配 / 关闭 / 配置 / 清理", False),
     ("test_workbench.py", "工作台文件接口 9 项：目录 / 安全 / 编码 / 图片 / HTML / MHTML", False),
     ("test_events.py", "事件流 8 项：只追加 / 请求可重建 / 裁剪留痕 / 开关 / 兜底", False),
+    ("test_model_config.py", "推理等级通用化 8 项：厂家 spec（low/high/max）/ 三种参数风格与 values 重映射 / 迁移 / 会话解析", False),
+    ("test_web_search.py", "联网搜索 3 项：后端选择 / DeepSeek Key 复用 / 请求与解析", False),
     ("test_ask.py", "内联提问 12 项：返回协议 / 选项规范化 / 工具契约 / 等待桥", False),
     ("test_real_mcp_cancel.py", "真实模型 + 真 MCP server：取消通知全链路", True),
 ]

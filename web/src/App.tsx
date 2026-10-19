@@ -3,12 +3,10 @@
  * Chat / ModeBar / WelcomePane / ConfirmPanel / ToolChain 是纯展示组件。
  */
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { DownOutlined, DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, SettingOutlined } from "@ant-design/icons";
-import { Dropdown, Input, message, Modal, Tooltip } from "antd";
+import { DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined } from "@ant-design/icons";
+import { Input, message, Modal, Tooltip } from "antd";
 import {
-  activateModel,
   chatStream,
-  createSession,
   createWorkspace,
   deleteSession,
   deleteWorkspace,
@@ -21,6 +19,7 @@ import {
   postAnswer,
   postConfirm,
   postStop,
+  setSessionModel,
   truncateSession,
   updateSession,
   updateWorkspace,
@@ -33,6 +32,7 @@ import type {
   Mode,
   ModelProvider,
   PendingAsk,
+  ReasoningLevel,
   SessionItem,
   SSEEvent,
   TraceEvent,
@@ -87,8 +87,12 @@ export default function App() {
   const curAsstRef = useRef<string | null>(null);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceItem[]>([]);
-  // 顶栏模型单选菜单的数据源（/api/models）
+  // 模型单选菜单的数据源（/api/models）；模型 chip 已迁到输入框工具栏
   const [models, setModels] = useState<ModelProvider[]>([]);
+  // 全局推理档位（low/high/max）
+  const [reasoning, setReasoning] = useState<ReasoningLevel>("high");
+  // provider id → 服务商展示名（来自 /api/models 的 templates），用于 chip 与菜单 pill
+  const [providerNames, setProviderNames] = useState<Record<string, string>>({});
   const [wsModal, setWsModal] = useState<{
     mode: "create" | "edit";
     item?: WorkspaceItem;
@@ -113,6 +117,16 @@ export default function App() {
   const titleDone = useRef(false);
   // 当前（或下一个新）对话使用的工作区；没选过就是默认工作区
   const [ws, setWs] = useState<string>(() => localStorage.getItem(WS_KEY) || "default");
+  // 新会话占位（草稿）：点「新会话」先在前端占一行，真正聊天前不落盘；
+  // null = 无草稿；字符串 = 草稿归属的工作区 id（草稿会话 id 即当前 session）
+  const [draftWs, setDraftWs] = useState<string | null>(null);
+  // 草稿会话的模型选择（还没落盘，先暂存在前端；随第一条消息一起持久化）
+  const [draftModel, setDraftModel] = useState<{
+    modelId: string;
+    reasoning: ReasoningLevel;
+  } | null>(null);
+  // 厂家 → 支持的推理档位（来自内置模板声明）
+  const [tplLevels, setTplLevels] = useState<Record<string, ReasoningLevel[]>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
@@ -154,10 +168,24 @@ export default function App() {
     fetchWorkspaces().then(setWorkspaces).catch(() => {});
   };
 
-  /** 模型列表刷新（顶栏模型单选菜单） */
+  /** 模型列表刷新（输入框工具栏的模型 chip 菜单） */
   const refreshModels = () => {
     fetchModels()
-      .then((m) => setModels(m.providers))
+      .then((m) => {
+        setModels(m.providers);
+        setReasoning(m.reasoning);
+        setProviderNames(
+          Object.fromEntries(Object.entries(m.templates).map(([k, t]) => [k, t.name]))
+        );
+        setTplLevels(
+          Object.fromEntries(
+            Object.entries(m.templates).map(([k, t]) => [
+              k,
+              t.reasoning?.levels ?? ["low", "high", "max"],
+            ])
+          ) as Record<string, ReasoningLevel[]>
+        );
+      })
       .catch(() => {});
   };
 
@@ -243,6 +271,14 @@ export default function App() {
     const cur = sessions.find((s) => s.id === session);
     if (cur && cur.message_count > 0 && cur.workspace_id) setWs(cur.workspace_id);
   }, [session, sessions]);
+
+  // 草稿一旦落盘（出现在会话列表里），撤掉占位，交给真实会话行
+  useEffect(() => {
+    if (draftWs !== null && sessions.some((s) => s.id === session)) {
+      setDraftWs(null);
+      setDraftModel(null); // 模型配置也由会话记录接管
+    }
+  }, [draftWs, session, sessions]);
 
   const patchAssistant = (id: string, patch: (it: ChatItem) => ChatItem) =>
     setItems((prev) => prev.map((it) => (it.id === id ? patch(it) : it)));
@@ -332,7 +368,12 @@ export default function App() {
     abortRef.current = ac;
 
     chatStream(
-      { message: msg, mode, web, approval, session, workspace: ws, attachments },
+      {
+        message: msg, mode, web, approval, session, workspace: ws, attachments,
+        // 会话级模型配置：新会话（草稿）在首条消息时随请求落盘
+        model_id: effModelId,
+        reasoning: effReasoning,
+      },
       (ev: SSEEvent) => {
         switch (ev.type) {
           case "delta":
@@ -391,6 +432,9 @@ export default function App() {
               usage: ev.usage,
             }));
             foldAsk(asstId); // 若有未答的卡片，随本轮结束标记失效
+            // 标题没被用户命名过：记忆提炼会在后台再补一个模型标题，但它晚于
+            // done 才落盘（那时这条 SSE 连接已经关了），所以稍后自己再拉一次列表
+            if (ev.title_pending) window.setTimeout(() => refreshSessions(), 5000);
             break;
           case "error":
             patchAssistant(asstId, (it) =>
@@ -469,11 +513,20 @@ export default function App() {
       .catch((e: unknown) => message.error(e instanceof Error ? e.message : "编辑重发失败"));
   };
 
-  /** 新建对话：在当前选中的工作区下创建空会话 → 切换过去 */
+  /** 开一个未落盘的草稿会话（前端先占位），真正聊天时才由后端落盘 */
+  const startDraft = () => {
+    const id =
+      typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `s-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setDraftWs(ws);
+    setSession(id);
+  };
+
+  /** 新建对话：先在前端占一个空位（草稿），不落盘；已有占位则保持现状 */
   const handleNewSession = () => {
-    createSession(ws)
-      .then((s) => setSession(s.id))
-      .catch(() => {});
+    if (draftWs !== null) return;
+    startDraft();
   };
 
   /** 触发一次「定位到第 idx 条消息并闪烁」 */
@@ -505,6 +558,8 @@ export default function App() {
       if (hasHit) jumpToHit(hitIndex as number);
       return;
     }
+    setDraftWs(null); // 离开草稿占位：新会话还没聊天就被切走 → 占位消失
+    setDraftModel(null);
     pendingHit.current = hasHit ? (hitIndex as number) : null;
     setSession(sid);
   };
@@ -535,13 +590,9 @@ export default function App() {
       .then(() => {
         if (sid === session) {
           const rest = sessions.filter((s) => s.id !== sid);
-          setSession(rest[0]?.id || "");
-          if (!rest.length) {
-            // 删完了，新建一个兜底（落在当前选中的工作区）
-            createSession(ws)
-              .then((s) => setSession(s.id))
-              .catch(() => {});
-          }
+          // 还有别的会话 → 切过去；删完了 → 改在前端占一个草稿位（不落盘）
+          if (rest.length) setSession(rest[0].id);
+          else startDraft();
         }
         refreshAll();
       })
@@ -651,8 +702,52 @@ export default function App() {
 
   // 当前会话（可能还没落盘，所以找不到就是 undefined）
   const currentSession = sessions.find((s) => s.id === session);
-  // 顶栏模型菜单里当前激活的那一项
+  // 模型 chip 菜单里当前激活的那一项（全局默认，新会话的缺省模型）
   const activeModelId = models.find((m) => m.is_active)?.id;
+  // ---- 会话级模型配置（每个对话单独保存，互不影响）----
+  const isDraft = draftWs !== null && !currentSession;
+  // 会话保存值 > 草稿暂存值 > 全局默认
+  const effModelId = currentSession?.model_id || draftModel?.modelId || activeModelId || "";
+  const effReasoning: ReasoningLevel =
+    currentSession?.reasoning || draftModel?.reasoning || reasoning;
+  const effModelName = models.find((m) => m.id === effModelId)?.name || "";
+  // 当前模型的厂家支持的推理档位（未知厂家按通用三档）
+  const effProvider = models.find((m) => m.id === effModelId)?.provider || "";
+  const reasoningLevels: ReasoningLevel[] =
+    tplLevels[effProvider] || ["low", "high", "max"];
+
+  /** 切换当前会话的模型：持久化到会话，别的对话不受影响 */
+  const handleActivateModel = (id: string) => {
+    if (isDraft) {
+      // 草稿还没落盘：先暂存在前端，随第一条消息一起保存
+      setDraftModel((p) => ({ modelId: id, reasoning: p?.reasoning ?? effReasoning }));
+      return;
+    }
+    setSessionModel(session, { model_id: id })
+      .then(() => refreshSessions())
+      .catch((e: unknown) =>
+        message.error(e instanceof Error ? e.message : "切换模型失败")
+      );
+  };
+
+  /** 设置当前会话的推理等级（只在智能体模式下生效） */
+  const handleSetReasoning = (level: ReasoningLevel) => {
+    if (isDraft) {
+      setDraftModel((p) => ({ modelId: p?.modelId ?? effModelId, reasoning: level }));
+      return;
+    }
+    setSessionModel(session, { reasoning: level })
+      .then(() => refreshSessions())
+      .catch((e: unknown) =>
+        message.error(e instanceof Error ? e.message : "设置推理等级失败")
+      );
+  };
+
+  /** 打开「模型」设置页 */
+  const handleManageModels = () => {
+    setSettingsTab("model");
+    setSettingsOpen(true);
+  };
   // 上下文水位：所有非 notice 消息的文本总长度（近似值，含 reasoning/tools）
   const contextUsage = items.reduce((sum, it) => {
     if (it.role === "notice") return sum;
@@ -690,6 +785,11 @@ export default function App() {
         <Sidebar
           workspaces={workspaces}
           sessions={sessions}
+          draft={
+            draftWs !== null && !sessions.some((s) => s.id === session)
+              ? { id: session, workspaceId: draftWs }
+              : null
+          }
           currentId={session}
           collapsed={collapsed}
           remote={!!state?.remote}
@@ -769,43 +869,7 @@ export default function App() {
                 <ExportOutlined />
               </span>
             </Tooltip>
-            {/* 模型单选菜单：选中即切换激活模型，末项固定为「管理模型」 */}
-            <Dropdown
-              trigger={["click"]}
-              placement="bottomRight"
-              menu={{
-                selectable: true,
-                selectedKeys: activeModelId ? [activeModelId] : [],
-                items: [
-                  ...models.map((m) => ({
-                    key: m.id,
-                    label: <span className="model-option">{m.name || m.model}</span>,
-                  })),
-                  { type: "divider" as const },
-                  { key: "__manage__", label: "管理模型", icon: <SettingOutlined /> },
-                ],
-                onClick: ({ key }) => {
-                  if (key === "__manage__") {
-                    setSettingsTab("model");
-                    setSettingsOpen(true);
-                    return;
-                  }
-                  activateModel(key)
-                    .then(() => {
-                      refreshModels();
-                      fetchState().then(setState).catch(() => {});
-                    })
-                    .catch((e: unknown) =>
-                      message.error(e instanceof Error ? e.message : "切换模型失败")
-                    );
-                },
-              }}
-            >
-              <span className="model-chip">
-                {state?.model || "连接中…"}
-                <DownOutlined className="model-chip-caret" />
-              </span>
-            </Dropdown>
+            {/* 联网搜索开关：两种模式都可联网，快速对话只是不做推理思考 */}
             <ModeBar web={web} state={state} onWeb={setWeb} />
             {/* 工作台抽屉开关 */}
             <Tooltip title={workbenchOpen ? "收起工作区" : "工作区文件"}>
@@ -839,7 +903,11 @@ export default function App() {
           focusId={focus?.id ?? null}
           workspaces={workspaces}
           workspaceId={ws}
-          onWorkspaceChange={(id) => setWs(id)}
+          onWorkspaceChange={(id) => {
+            setWs(id);
+            // 草稿还没落盘：占位跟着用户选的工作区走
+            if (draftWs !== null) setDraftWs(id);
+          }}
           workspaceLocked={!!currentSession && currentSession.message_count > 0}
           onRegenerate={busy ? undefined : handleRegenerate}
           onEditResend={busy ? undefined : handleEditResend}
@@ -852,6 +920,15 @@ export default function App() {
           confirm={confirm}
           onAnswerConfirm={handleAnswerConfirm}
           confirmTimeout={state?.confirm_timeout ?? 120}
+          models={models}
+          providerNames={providerNames}
+          activeModelId={effModelId || undefined}
+          modelName={effModelName}
+          reasoning={effReasoning}
+          reasoningLevels={reasoningLevels}
+          onActivateModel={handleActivateModel}
+          onSetReasoning={handleSetReasoning}
+          onManageModels={handleManageModels}
         />
 
         <WorkspaceModal

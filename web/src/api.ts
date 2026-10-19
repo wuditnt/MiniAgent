@@ -183,6 +183,23 @@ export async function updateSession(sid: string, title: string): Promise<{ id: s
   return res.json();
 }
 
+/**
+ * 设置本会话自己的模型配置（持久化到会话 JSON，各对话互不影响）。
+ * model_id / reasoning 传 undefined 表示「保持原值」。
+ */
+export async function setSessionModel(
+  sid: string,
+  opts: { model_id?: string; reasoning?: string }
+): Promise<{ ok: boolean; model_id: string | null; reasoning: string | null }> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/model`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(opts),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 // ---------------------------------------------------------------- 工作区
 
 /** 弹出本机原生「选择文件夹」对话框（后端 tkinter 实现）；取消返回 null */
@@ -327,6 +344,19 @@ export async function activateModel(id: string): Promise<void> {
   if (!res.ok) throw new Error(await readError(res));
 }
 
+/** 设置全局推理等级（off/low/high/max），返回生效值 */
+export async function setModelReasoning(
+  level: string
+): Promise<{ ok: boolean; reasoning: string }> {
+  const res = await fetch("/api/models/reasoning", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ level }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 // ---------------------------------------------------------------- 通用配置
 
 export async function fetchSettings(): Promise<SettingsInfo> {
@@ -403,6 +433,9 @@ export async function chatStream(
     workspace?: string;
     attachments?: Attachment[];
     approval?: ApprovalMode;
+    /** 会话级模型配置：新会话（磁盘上还没有文件）首条消息时随请求落盘 */
+    model_id?: string;
+    reasoning?: string;
   },
   onEvent: (ev: SSEEvent) => void,
   signal?: AbortSignal

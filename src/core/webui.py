@@ -4,8 +4,8 @@ Web UI 后端：把 Agent 的 9 个 UI 回调翻译成 SSE 事件流，浏览器
 设计要点（对应 docs/WEBUI_ANTDX_PLAN.md）：
   · 零依赖：stdlib http.server（ThreadingHTTPServer）+ 手写 SSE 帧
   · 双模式 = 每消息定制工具表：chat 关联网 → 空注册表；chat 开联网 → {web_search}；
-    agent → 全量 REGISTRY。Agent.run() 全程走 self.registry（schemas/get/call），
-    所以逐消息换 agent.registry 即可，核心代码一行不改。
+    agent → 全量 REGISTRY（关联网时剔除 web_search）。Agent.run() 全程走
+    self.registry（schemas/get/call），所以逐消息换 agent.registry 即可，核心代码一行不改。
   · 一个会话一个 Agent（保住消息历史与用量统计）；同一会话同时只允许一个任务
   · 危险确认：ask_confirm 回调推 confirm_request 事件后，在工作线程上
     Event.wait(120) 挂起；POST /api/confirm 置位事件返回用户选择
@@ -32,6 +32,7 @@ from core import logging_setup
 from core import model_config
 from core import settings
 from core import workspace_config
+from core.images import ATTACH_NOTE
 # brief 不再从 core.ui 导入：它会把 \n 换成 ⏎ 给控制台单行展示用，
 # SSE 路径（confirm_request / tool 事件）需要保留真实换行让前端代码块渲染。
 
@@ -170,6 +171,8 @@ class _Session:
         self.title = "新对话"
         self.title_custom = False            # 标题是否被手动改过（改过则不再按首条消息自动生成）
         self.workspace_id = workspace_config.DEFAULT_ID   # 归属工作区（决定沙箱根）
+        self.model_id: str | None = None     # 本会话的模型配置 id（None = 跟全局默认）
+        self.reasoning: str | None = None    # 本会话的推理等级（None = 跟全局默认）
         now = time.time()
         self.created_at = now
         self.updated_at = now
@@ -181,8 +184,14 @@ class _Session:
 
             from core.registry import REGISTRY
 
+            # 会话级模型：优先本会话保存的 model_id，无效/未存 → 回退全局 active
+            cfg = model_config.resolve_model(self.model_id)
             self.agent = Agent(
-                model=self.server.model,
+                model=cfg["model"] or self.server.model,
+                base_url=cfg["base_url"],
+                api_key=cfg["api_key"],
+                reasoning_level=self.reasoning or model_config.reasoning_level(),
+                reasoning_spec=model_config.reasoning_spec(cfg["provider"]),
                 system_prompt=self.server.system_prompt,
                 max_turns=self.server.max_turns,
                 verbose=False,
@@ -193,7 +202,20 @@ class _Session:
             )
             self.agent.ui = WebUI(self)
             self._inject_history()          # 从磁盘恢复历史消息
+            # 构造完成后再盖章：_inject_history 可能从磁盘补回 model_id/reasoning，
+            # 之后 _agent_stale() 靠这两个章判断内存 Agent 是否需要重建
+            self._agent_model_id = self.model_id
+            self._agent_reasoning = self.reasoning
         return self.agent
+
+    def _agent_stale(self) -> bool:
+        """内存 Agent 是否已与会话的模型配置脱节（构造之后 model_id/reasoning 被更新过）。
+        会话中换模型：字段先更新、Agent 到下一次对话时才重建（历史落盘不丢）。
+        """
+        return self.agent is not None and (
+            (self.model_id, self.reasoning)
+            != (getattr(self, "_agent_model_id", None), getattr(self, "_agent_reasoning", None))
+        )
 
     def _inject_history(self) -> None:
         """首次创建 Agent 时，把磁盘上的 user/assistant 消息灌入。"""
@@ -204,10 +226,16 @@ class _Session:
             self.title = data.get("title") or self.title
             self.title_custom = bool(data.get("title_custom", False))
             self.workspace_id = data.get("workspace_id") or self.workspace_id
+            self.model_id = data.get("model_id") or None
+            self.reasoning = model_config.normalize_reasoning(data.get("reasoning"))
             self.created_at = data.get("created_at") or self.created_at
             self.updated_at = data.get("updated_at") or self.updated_at
             for m in data.get("messages", []):
                 role, content = m.get("role"), m.get("content")
+                # 老会话文件里混着内部注入消息（那时还没打标记），一并跳过，
+                # 否则它们会被当成用户说过的话灌回模型上下文
+                if _is_injected(m):
+                    continue
                 if role in ("user", "assistant") and isinstance(content, str) and content:
                     msg: dict[str, Any] = {"role": role, "content": content}
                     # 每轮的用量/耗时一并灌回内存（_ 前缀字段不会发给模型接口）
@@ -225,6 +253,8 @@ class _Session:
             return
         messages = []
         for m in self.agent.messages[1:]:   # [0] 是 system
+            if _is_injected(m):
+                continue    # 内部注入消息不落盘：既不是用户说的话，图片也无法还原
             role, content = m.get("role"), m.get("content")
             # 多模态用户消息（content 数组）：只把文本分片落盘，
             # 附件元数据单独保存（data_url 体积大且文件已在工作区，无需重复存储）
@@ -246,16 +276,18 @@ class _Session:
                 if stats.get("sec") is not None:
                     item["sec"] = stats["sec"]
                 messages.append(item)
-        # 标题 = 第一条 user 消息前 20 字；用户手动改过标题则保留
+        # 标题 = 首条真实用户消息（剥口语前缀后截断）；用户手动改过名则保留。
+        # 模型生成的标题走 session_title()，同时把 title_custom 置真把这行短路掉。
         if messages and not self.title_custom:
-            first = next((m["content"] for m in messages if m["role"] == "user"), "")
-            self.title = first[:20].replace("\n", " ") or "新对话"
+            self.title = _derive_title(messages) or self.title
         self.updated_at = time.time()
         data = {
             "id": self.id,
             "title": self.title,
             "title_custom": self.title_custom,
             "workspace_id": self.workspace_id,
+            "model_id": self.model_id,        # 本会话的模型配置（None = 跟全局默认）
+            "reasoning": self.reasoning,     # 本会话的推理等级（None = 跟全局默认）
             "messages": messages,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -308,7 +340,7 @@ class _Session:
 
 
 class WebUI:
-    """Agent 的 UI 实现：9 个回调全部翻译成事件，推入当前会话队列。
+    """Agent 的 UI 实现：10 个回调全部翻译成事件，推入当前会话队列。
 
     方法签名与 core/ui.py 的约定一致；agent 通过 _ui_call 反射调用，
     少实现某个方法也只是「网页上看不到对应信息」，不会崩。
@@ -331,6 +363,24 @@ class WebUI:
 
     def notice(self, text: str) -> None:
         self._push({"type": "notice", "text": _RICH_TAG.sub("", text or "")})
+
+    def session_title(self, title: str) -> None:
+        """模型产出的会话标题（搭记忆提炼那次调用的顺风车，零额外开销）。
+
+        只认「还没被命名」的会话：用户手动改过名（title_custom）就丢弃。
+        落地后把 title_custom 置真 —— 标题就此锁定，后续轮次的提炼与规则截断
+        都不再改它，免得侧栏标签随对话一直漂。落盘失败不影响任何主流程。
+        """
+        s = self.session
+        clean = _tidy_title(title)
+        if not clean or s.title_custom:
+            return
+        s.title = clean
+        s.title_custom = True
+        try:
+            s.save()
+        except Exception:  # noqa: BLE001 —— 标题落盘失败是纯增益丢失，不该上抛
+            _log.warning("session.title.save_failed session=%s", s.id, exc_info=True)
 
     def turn_start(self, turn: int) -> None:
         self._push({"type": "turn", "turn": turn, "mode": self.session.mode})
@@ -451,9 +501,11 @@ def _brief_args(args: dict, limit: int = 1200) -> dict:
     return {k: _clip(v) for k, v in (args or {}).items()}
 
 
-def _session_registry(mode: str, web: bool, approval: str = "ask"):
+def _session_registry(mode: str, approval: str = "ask", web: bool = False):
     """按行为矩阵克隆一份会话工具表（见方案 §3.1）。
 
+    chat 模式 = 不做推理思考、只保留联网搜索（开关打开时），其余工具一律不加载；
+    联网开关关闭时，agent 模式同样不加载 web_search。
     Tool 对象本身无状态，跨注册表共享引用是安全的。
     request_approval 仅在 auto 档暴露 —— 其它档位模型看不到它。
     """
@@ -468,8 +520,11 @@ def _session_registry(mode: str, web: bool, approval: str = "ask"):
 
     reg = ToolRegistry()
     for t in REGISTRY.all():
-        if mode == "chat" and not (web and t.name == "web_search"):
-            continue
+        if t.name == "web_search":
+            if not web:
+                continue          # 联网开关关闭：两种模式都不加载搜索工具
+        elif mode == "chat":
+            continue              # 快速对话：除联网搜索外不调用任何工具
         if t.name == "request_approval" and approval != "auto":
             continue
         if t.name == "remember" and not memory_on:
@@ -619,6 +674,8 @@ def _list_session_files() -> list[dict]:
             "id": data.get("id") or sid,
             "title": data.get("title") or "新对话",
             "workspace_id": data.get("workspace_id") or workspace_config.DEFAULT_ID,
+            "model_id": data.get("model_id") or "",
+            "reasoning": model_config.normalize_reasoning(data.get("reasoning")) or "",
             "message_count": len(msgs),
             "created_at": data.get("created_at", 0),
             "updated_at": data.get("updated_at", 0),
@@ -653,6 +710,90 @@ def _user_text(content: object) -> str:
     return ""
 
 
+def _is_injected(m: dict) -> bool:
+    """这条消息是主循环的内部注入，而不是用户真的说了什么。
+
+    目前有两种：工具递图片时附的说明（images.ATTACH_NOTE），以及轮数用尽时
+    的收尾提示。它们都是「借 user 角色进对话」，必须排除在落盘、历史回放与
+    标题之外 —— 否则一次回复会被它们打断成多个气泡，会话标题也会被顶掉。
+
+    新会话带 _injected 私有标记；老会话文件里只留下了那句固定文案，
+    没有标记，所以再用文案前缀兜底，让历史会话同样不再裂开。
+    """
+    if m.get("_injected"):
+        return True
+    return _user_text(m.get("content")).startswith(ATTACH_NOTE)
+
+
+# ---------------------------------------------------------------- 会话标题
+
+_TITLE_MAX = 20
+# 标题两端要去掉的装饰：空白、引号、书名号、括号、序号标记、句末标点
+_TITLE_TRIM = " \t\u3000\"'“”‘’《》「」『』<>()（）[]【】{}#*·-—,，.。!！?？;；:：、\n\r"
+# 切标题时认定的「停顿」：只收全角标点。ASCII 的 . , : 在文件名/URL/版本号里
+# 到处都是（sales.csv、http://…），拿它们切会把标题切碎。
+_TITLE_BREAK = re.compile(r"[，。！？；、]")
+# 首条消息开头常见的口语前缀/敬语：剥掉它们，标题才看得出「到底要做什么」。
+# 只收多字短语 —— 光秃秃的「请」「我想」不收（「请假流程」会被误伤）；
+# 长短语优先，免得「麻烦你帮我」被「麻烦」抢先切成「你帮我…」。
+_TITLE_PREFIXES = tuple(sorted((
+    "麻烦你帮我看看", "麻烦你帮我", "麻烦帮我", "请你帮我", "可以帮我", "请帮忙",
+    "请你帮忙", "我想请你", "麻烦你", "帮我看一下", "帮我看看", "帮我", "麻烦",
+    "请你", "请帮我", "请问一下", "请问", "我想问一下", "想问一下", "问一下",
+    "能不能帮我", "能否帮我", "能不能", "能否", "可否", "你好", "您好",
+    "看一下", "看下", "看看",
+), key=len, reverse=True))
+
+
+def _tidy_title(text: str, limit: int = _TITLE_MAX) -> str:
+    """把一个候选标题规整成能看的短标签：压平空白、去装饰、超长时尽量切在停顿处。
+
+    规则标题与模型标题共用它 —— 模型偶尔会带引号、书名号或「1. 」这种序号。
+    """
+    s = re.sub(r"\s+", " ", text or "").strip().strip(_TITLE_TRIM)
+    s = re.sub(r"^\d+\s*[.、)）]\s*", "", s)
+    if not s:
+        return ""
+    if len(s) <= limit:
+        return s.strip(_TITLE_TRIM)
+    head = _TITLE_BREAK.split(s, maxsplit=1)[0].strip(_TITLE_TRIM)
+    if 2 <= len(head) <= limit:
+        return head
+    cut = s[:limit]
+    if " " in cut:
+        cut = cut[: cut.rfind(" ")]           # 英文：别切在单词中间
+    return (cut or s[:limit]).strip(_TITLE_TRIM)
+
+
+def _derive_title(messages: list[dict]) -> str:
+    """从历史消息里提炼标题（本地规则，不花 token）。
+
+    取第一条真实用户消息（跳过内部注入）剥掉口语前缀后截断。它是两层兜底：
+    模型标题还没生成时先顶上，记忆提炼被关掉 / 首轮太短没触发时则为最终值。
+    """
+    for m in messages:
+        if m.get("role") != "user" or _is_injected(m):
+            continue
+        text = _user_text(m.get("content"))
+        if not text.strip():
+            continue
+        # 附件消息（“[附件：a.pdf（路径 …）]”）用文件名当标题，比机器文案可读
+        att = re.match(r"^\s*\[附件：([^（(]+)", text)
+        if att:
+            return _tidy_title(att.group(1))
+        s = re.sub(r"\s+", " ", text).strip()
+        changed = True
+        while changed:                       # 反复剥：「麻烦你帮我看一下」要剥两次
+            changed = False
+            for p in _TITLE_PREFIXES:
+                if s.startswith(p) and len(s) > len(p) + 1:
+                    s = s[len(p):].lstrip(_TITLE_TRIM)
+                    changed = True
+                    break
+        return _tidy_title(s)
+    return ""
+
+
 def _display_items(raw: list[dict]) -> list[dict]:
     """原始消息序列 → 前端展示项（历史回放 / 搜索 / keep 截断三处共用，保证索引口径一致）。
 
@@ -664,6 +805,8 @@ def _display_items(raw: list[dict]) -> list[dict]:
       · 每条 user 消息一个展示项；
       · 相邻的 assistant/tool 消息（直到下一条 user）合并为一个 assistant 项，
         各段文本用空行连接；用量/耗时取最后一个带统计的段（worker 挂在轮末回答）。
+      · 主循环的内部注入消息（见 _is_injected）不算「下一条 user」——
+        它们直接跨过去继续合并，否则 ReAct 中途递图片会把一次回复切成多个气泡。
 
     每个展示项附带 "_end"：该项在 raw 中的最后下标，供 keep 截断映射回原始序列。
     """
@@ -673,6 +816,9 @@ def _display_items(raw: list[dict]) -> list[dict]:
     while i < n:
         role = raw[i].get("role")
         if role == "user":
+            if _is_injected(raw[i]):
+                i += 1
+                continue
             text = _user_text(raw[i].get("content"))
             if text:
                 item: dict = {"role": "user", "content": text, "_end": i}
@@ -685,15 +831,20 @@ def _display_items(raw: list[dict]) -> list[dict]:
             segs: list[str] = []
             stats_src: dict | None = None
             j = i
-            while j < n and raw[j].get("role") in ("assistant", "tool"):
+            while j < n:
                 seg = raw[j]
-                if seg.get("role") == "assistant":
-                    c = seg.get("content")
-                    if isinstance(c, str) and c:
-                        segs.append(c)
-                    if seg.get("_stats") or seg.get("usage") is not None:
-                        stats_src = seg
-                j += 1
+                if seg.get("role") in ("assistant", "tool"):
+                    if seg.get("role") == "assistant":
+                        c = seg.get("content")
+                        if isinstance(c, str) and c:
+                            segs.append(c)
+                        if seg.get("_stats") or seg.get("usage") is not None:
+                            stats_src = seg
+                    j += 1
+                elif _is_injected(seg):
+                    j += 1          # 内部注入：跨过去，继续合并同一次回复
+                else:
+                    break
             if segs:
                 item = {"role": "assistant", "content": "\n\n".join(segs), "_end": j - 1}
                 if stats_src is not None:
@@ -1018,6 +1169,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_session_create()
         elif (m := re.match(r"^/api/sessions/([^/]+)/truncate$", route)):
             self._handle_session_truncate(m.group(1))
+        elif (m := re.match(r"^/api/sessions/([^/]+)/model$", route)):
+            self._handle_session_model(m.group(1))
         elif route == "/api/workspaces/pick":
             self._handle_workspace_pick()
         elif route == "/api/workspaces":
@@ -1026,6 +1179,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_model_create()
         elif route == "/api/models/test":
             self._handle_model_test_raw()
+        elif route == "/api/models/reasoning":
+            self._handle_model_reasoning()
         else:
             m = re.match(r"^/api/models/([^/]+)/(test|activate)$", route)
             if m:
@@ -1263,6 +1418,45 @@ class _RequestHandler(BaseHTTPRequestHandler):
             _save_session_file(sid, data)
         self._json({"ok": True, "keep": keep})
 
+    def _handle_session_model(self, sid: str) -> None:
+        """设置本会话的模型配置：{model_id?, reasoning?}（缺省项保持原值）。
+        每个对话单独保存自己的模型选择，互不影响；全局 active 只管新会话的缺省。
+        """
+        sid = sid[:64]
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON（{model_id, reasoning}）")
+            return
+        data = _load_session_file(sid)
+        if data is None:
+            self._fail(404, "会话不存在")
+            return
+        if "model_id" in body:
+            mid = str(body.get("model_id") or "")[:64]
+            if mid and model_config.get_entry(mid) is None:
+                self._fail(400, "模型配置不存在")
+                return
+        else:
+            mid = data.get("model_id") or ""
+        if "reasoning" in body:
+            rlv = str(body.get("reasoning") or "")[:16]
+            if rlv and rlv not in model_config.REASONING_LEVELS:
+                self._fail(400, "推理档位不合法")
+                return
+        else:
+            rlv = model_config.normalize_reasoning(data.get("reasoning")) or ""
+        data["model_id"] = mid or None
+        data["reasoning"] = rlv or None
+        _save_session_file(sid, data)
+        # 内存中的会话同步更新字段；Agent 交给下一次对话的过期检查（_agent_stale）
+        # 去重建 —— 正在运行的 worker 仍握着旧 Agent 引用，不受影响
+        with self.web._lock:
+            sess = self.web.sessions.get(sid)
+            if sess is not None:
+                sess.model_id = mid or None
+                sess.reasoning = rlv or None
+        self._json({"ok": True, "model_id": mid or None, "reasoning": rlv or None})
+
     def _handle_session_update(self, sid: str) -> None:
         """修改会话标题：{title}。改过之后不再按首条消息自动生成标题。"""
         sid = sid[:64]
@@ -1379,6 +1573,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             "providers": model_config.list_public(),
             "templates": model_config.templates(),
             "active": model_config.active_id(),
+            "reasoning": model_config.reasoning_level(),
         })
 
     def _handle_model_create(self) -> None:
@@ -1449,6 +1644,17 @@ class _RequestHandler(BaseHTTPRequestHandler):
             return
         self.web.reset_agents()          # 换模型 → 已有会话 Agent 重建
         self._json({"ok": True, "model": model_config.resolve_active()})
+
+    def _handle_model_reasoning(self) -> None:
+        """设置全局推理等级（off/low/high/max）。"""
+        body = self._read_body() or {}
+        try:
+            level = model_config.set_reasoning(str(body.get("level") or ""))
+        except ValueError as e:
+            self._fail(400, str(e))
+            return
+        self.web.reset_agents()          # 等级变化 → 已有会话 Agent 重建
+        self._json({"ok": True, "reasoning": level})
 
     # ------------------------------------------------ 工具 / 插件列表 API
 
@@ -1934,7 +2140,23 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._fail(409, "该会话已有任务在执行，请先停止或等待完成")
             return
 
+        # 全新会话（磁盘无记录，含前端「草稿占位」的首条消息）：接受请求带来的
+        # 会话级模型配置并落进 session；已开始的会话由 /api/sessions/<id>/model
+        # 端点负责变更（与 workspace 同一套「空会话才可指定」的口径）
+        if _load_session_file(sid) is None:
+            mid = str(body.get("model_id") or "")[:64]
+            if mid and model_config.get_entry(mid):
+                session.model_id = mid
+            rlv = str(body.get("reasoning") or "")[:16]
+            if rlv in model_config.REASONING_LEVELS:
+                session.reasoning = rlv
+
         agent = session.ensure_agent()
+        # 会话级模型配置与内存 Agent 脱节（磁盘恢复晚于构造 / 上次运行中换过模型）→ 重建
+        if session._agent_stale():
+            session.agent = None
+            session._loaded = False
+            agent = session.ensure_agent()
 
         # 还没开始过的会话，允许前端指定工作区（缺省留在默认工作区）；
         # 一旦有了消息就不再改 —— 换沙箱根会让「之前写的文件在哪」变得难以理解
@@ -1953,7 +2175,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
         worker = threading.Thread(
             target=self._run_worker,
-            args=(session, agent, message, mode, web, q, attachments, approval),
+            args=(session, agent, message, mode, q, attachments, approval, web),
             daemon=True,
             name=f"web-chat-{sid}",
         )
@@ -1998,8 +2220,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _run_worker(
-        session: _Session, agent, message: str, mode: str, web: bool, q: queue.Queue,
+        session: _Session, agent, message: str, mode: str, q: queue.Queue,
         attachments: list[dict] | None = None, approval: str = "ask",
+        web: bool = False,
     ) -> None:
         """工作线程：换工具表 → agent.run() → 终态事件。
 
@@ -2033,7 +2256,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             set_workspace(ws_root)
             agent.approval_mode = approval   # 三档确认逐轮生效
             agent.session_id = session.id   # 工作区切换后仍按本会话沉淀摘要
-            agent.registry = _session_registry(mode, web, approval)
+            agent.registry = _session_registry(mode, approval, web)
+            agent.chat_mode = mode == "chat"   # 快速对话：显式关闭思考（推理等级只在智能体模式生效）
             answer = agent.run(
                 message, attachments=_resolve_attachments(attachments or [], ws_root)
             )
@@ -2056,6 +2280,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
             )
             q.put({"type": "done", "answer": answer,
                    "sec": sec,
+                   # 标题还没被用户命名 → 记忆提炼可能在几秒后补一个模型标题，
+                   # 前端据此在稍后再拉一次会话列表（这个事件发完连接就关了）
+                   "title_pending": not session.title_custom,
                    "usage": usage})
         except Cancelled as e:
             # cancel / run_end{status:"cancelled"} 已由 agent.run() 的取消路径发出，
