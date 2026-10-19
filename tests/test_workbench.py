@@ -31,6 +31,17 @@ from bootstrap import PACKAGE_ROOT as HERE
 import core.workspace_config as workspace_config  # noqa: E402
 from core.webui import WebServer  # noqa: E402
 
+# 本模块是「脚本型」用例：main() 自己起一个 WebServer，再依次调用下面的测试函数。
+# 被 pytest 直接收集时没有服务在跑，会得到 9 条「连接被拒绝」的假失败 ——
+# 这里显式跳过，并指向真正能跑的入口。
+if __name__ != "__main__":
+    import pytest
+
+    pytest.skip(
+        "脚本型用例需自带服务：python tests/test_workbench.py（或 python tests/run_tests.py）",
+        allow_module_level=True,
+    )
+
 PORT = 8791
 BASE = f"http://127.0.0.1:{PORT}"
 

@@ -11,7 +11,7 @@ import {
   FileUnknownOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
-import { Alert, Segmented, Spin, Tooltip } from "antd";
+import { Alert, Image, Segmented, Spin, Tooltip } from "antd";
 import { fetchWorkspaceFile } from "../api";
 import type { WorkspaceFileData } from "../types";
 import CodeBlock, { langFromExt } from "./CodeBlock";
@@ -181,7 +181,12 @@ export default function FilePreview({ workspaceId, path, name, ext }: Props) {
 
         {data?.kind === "image" && (
           <div className="wb-image-wrap">
-            <img src={data.url} alt={name} />
+            {/* 点击图片进入全屏预览（antd Image 的 lightbox 覆盖全屏，支持缩放/旋转） */}
+            <Image
+              src={data.url}
+              alt={name}
+              preview={{ mask: "点击全屏查看" }}
+            />
           </div>
         )}
 

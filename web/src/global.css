@@ -2472,9 +2472,14 @@ body,
   overflow: auto;
 }
 
+.wb-image-wrap .ant-image {
+  max-width: 100%;
+}
+
 .wb-image-wrap img {
   max-width: 100%;
   border-radius: 8px;
+  cursor: zoom-in;
 }
 
 .wb-placeholder {
@@ -2825,16 +2830,18 @@ body,
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 8px;
-  margin-top: 10px;
-  padding: 10px 12px;
-  background: #f0f7ff;
-  border-left: 3px solid #1677ff;
-  border-radius: 0 8px 8px 0;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 14px 16px;
+  background: #e6f4ff;
+  border: 1px solid #91caff;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(22, 119, 255, 0.06);
 }
 
 .ask-question {
-  font-size: 14px;
+  font-size: 15px;
+  font-weight: 500;
   line-height: 1.6;
   color: rgba(0, 0, 0, 0.88);
   word-break: break-word;
@@ -2843,16 +2850,24 @@ body,
 .ask-options {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: 14px;
+  gap: 8px;
+  width: 100%;
+  font-size: 15px;
 }
 
-.ask-options .ant-radio-wrapper {
-  margin-right: 0;
-}
-
+/* 每个候选项独占一整行，方便点击 */
+.ask-options .ant-radio-wrapper,
 .ask-options .ant-checkbox-wrapper {
-  margin-inline-start: 0;
+  width: 100%;
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  transition: background 0.15s;
+}
+
+.ask-options .ant-radio-wrapper:hover,
+.ask-options .ant-checkbox-wrapper:hover {
+  background: rgba(22, 119, 255, 0.08);
 }
 
 .ask-input {
@@ -2869,7 +2884,7 @@ body,
   align-items: baseline;
   gap: 8px;
   background: #fafafa;
-  border-left-color: #d9d9d9;
+  border-color: #e0e0e0;
   padding: 6px 12px;
 }
 

@@ -634,6 +634,8 @@ export default function Chat({
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevLen = useRef(0);
+  // 上一轮的决策卡片：用于在卡片出现的瞬间强制滚到底部
+  const prevAsk = useRef<PendingAsk | null>(null);
   // 已上传、待发送的附件（chips 展示在输入框上方）
   const [pending, setPending] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -674,6 +676,17 @@ export default function Chat({
     }
     prevLen.current = items.length;
   }, [items, focusId]);
+
+  // 决策卡片（ask_user）出现时消息条数不变，上面的跟随滚动不会触发；
+  // 卡片插进最后一条助手消息后会撑高内容、把卡片顶出可视区，这里补一次强制回底。
+  useEffect(() => {
+    const appeared = !!pendingAsk && !prevAsk.current;
+    prevAsk.current = pendingAsk ?? null;
+    if (appeared && !focusId) {
+      const el = scrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+  }, [pendingAsk, focusId]);
 
   // 搜索命中定位：滚动 + 闪烁由 App 统一处理（见 App 的 focus effect）；
   // 这里只负责在有定位请求时让位，不把视图自动拉到底部。
