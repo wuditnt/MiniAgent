@@ -55,18 +55,9 @@ def _deepseek_key() -> str:
     try:
         from core import model_config
 
-        key = model_config.provider_key("deepseek")
-        if key:
-            return key
+        return model_config.deepseek_key()
     except Exception:  # noqa: BLE001
-        pass
-    key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    if key:
-        return key
-    # 纯 .env 用法：接口地址指向 DeepSeek 时，主 Key 就是 DeepSeek 的 Key
-    if "deepseek" in os.environ.get("OPENAI_BASE_URL", "").lower():
-        return os.environ.get("OPENAI_API_KEY", "").strip()
-    return ""
+        return ""
 
 
 def _http_json(url: str, payload: dict, key: str) -> dict:
@@ -206,7 +197,9 @@ _BACKENDS = {
     "web_search",
     "联网搜索：查询实时信息、新闻、时效性问题（今天/最新/现在等）。"
     "返回按相关度排序的「标题/URL/摘要」列表。"
-    "适合在回答前获取最新事实；对不变的基础知识无需调用。",
+    "适合在回答前获取最新事实；对不变的基础知识无需调用。"
+    "本轮工具列表里有本工具就说明联网已开启，直接调用即可；"
+    "不要依据历史对话里说过的「没有联网」判断本轮能力。",
     params={
         "query": {"type": "string", "description": "搜索关键词，简洁明确，2-8 个词效果最好"},
         "max_results": {

@@ -176,18 +176,31 @@ def collect(payload: dict) -> list[dict]:
 
 def scenario_registry_matrix() -> None:
     """① 每会话工具表矩阵：不改 agent.py 就能实现双模式的根基。"""
+    import tools  # noqa: F401  —— 确保插件已加载（测试进程可能尚未初始化）
     from core.registry import REGISTRY
     from core.webui import _session_registry
 
     all_names = {t.name for t in REGISTRY.all()}
-    assert "web_search" in all_names, "插件未加载：web_search 应在 REGISTRY 里"
+    missing = {"web_search", "fetch_url"} - all_names
+    assert not missing, (
+        f"插件未加载：缺 {missing}；REGISTRY 共 {len(all_names)} 个：{sorted(all_names)[:12]}"
+    )
 
-    assert len(_session_registry("chat").all()) == 0, "chat 不联网应零工具"
-    chat_web = {t.name for t in _session_registry("chat", "ask", True).all()}
-    assert chat_web == {"web_search"}, f"chat 联网只应保留 web_search，实际 {chat_web}"
-    assert {t.name for t in _session_registry("agent").all()} == all_names - {"web_search"}, \
-        "agent 关联网应剔除 web_search"
-    assert len(_session_registry("agent", "ask", True).all()) == len(REGISTRY), "agent 联网应为全量表"
+    # 关联网：不提供搜索，只保留本地抓取
+    chat_local = {t.name for t in _session_registry("chat").all()}
+    assert chat_local == {"fetch_url"}, f"chat 不联网应只有 fetch_url：{sorted(chat_local)}"
+    # 开联网：搜索 + 抓取（chat 模式也只有这两个）
+    chat_cloud = {t.name for t in _session_registry("chat", "ask", True).all()}
+    assert chat_cloud == {"web_search", "fetch_url"}, f"chat 联网工具表异常：{sorted(chat_cloud)}"
+    # agent 模式：全量；关联网时剔除 web_search，抓取仍在；ask 档不暴露 request_approval
+    agent_local = {t.name for t in _session_registry("agent").all()}
+    expect_agent = all_names - {"web_search", "request_approval"}
+    assert agent_local == expect_agent, (
+        f"agent 关联网差异：多 {sorted(agent_local - expect_agent)} / "
+        f"少 {sorted(expect_agent - agent_local)}"
+    )
+    agent_cloud = {t.name for t in _session_registry("agent", "auto", True).all()}
+    assert agent_cloud == all_names, f"auto + 联网应为全量，差异：{sorted(all_names ^ agent_cloud)}"
     print("  [1] 会话工具表矩阵（chat±web / agent±web）通过")
 
 
@@ -735,6 +748,48 @@ def scenario_settings() -> None:
     print("  [13] 通用配置：默认/校验/生效/恢复默认 通过")
 
 
+def scenario_user_memory_command() -> None:
+    """用户显式「请帮我记住 XXX」：直接写用户画像，不依赖模型工具。
+
+    覆盖：快速对话（无工具）也能写、重复指令命中 upsert、普通消息不触发。
+    """
+    import shutil
+
+    import core.memory as mem
+
+    tmp = tempfile.mkdtemp(prefix="ma-user-mem-")
+    target = os.path.join(tmp, "user_profile.md")
+    orig = mem.user_profile_path
+    mem.user_profile_path = lambda: target   # type: ignore[assignment]
+    try:
+        events = collect({
+            "message": "请帮我记住 我偏好简洁的中文回答",
+            "mode": "chat", "web": False, "session": "t-mem-cmd",
+        })
+        saved = [e for e in events if e["type"] == "memory"]
+        assert saved and saved[0]["ok"] is True, saved
+        assert not saved[0].get("duplicate"), saved
+        with open(target, encoding="utf-8") as f:
+            body = f.read()
+        assert "简洁的中文回答" in body and "[pref]" in body, body
+
+        again = collect({
+            "message": "请帮我记住 我偏好简洁的中文回答",
+            "mode": "chat", "web": False, "session": "t-mem-cmd",
+        })
+        dup = [e for e in again if e["type"] == "memory"]
+        assert dup and dup[0].get("duplicate") is True, dup
+
+        plain = collect({
+            "message": "你好", "mode": "chat", "web": False, "session": "t-mem-cmd",
+        })
+        assert not [e for e in plain if e["type"] == "memory"], plain
+        print("  [16] 用户指令记忆：写入画像 / 重复 upsert / 普通消息不触发 通过")
+    finally:
+        mem.user_profile_path = orig
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def scenario_keepalive_body() -> None:
     """⑭ keep-alive 复用：没读的请求体不能污染下一个请求。
 
@@ -826,6 +881,7 @@ def main() -> int:
         ("模型配置", scenario_models),
         ("会话搜索", scenario_search),
         ("通用配置", scenario_settings),
+        ("用户指令记忆", scenario_user_memory_command),
         ("keep-alive 请求体", scenario_keepalive_body),
     ]
     for name, fn in scenarios:

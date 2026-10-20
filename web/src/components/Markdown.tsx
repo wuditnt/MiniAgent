@@ -4,7 +4,7 @@
  *  · 原生 HTML（rehype-raw），经 rehype-sanitize 白名单消毒（禁 script/事件/js: 链接）
  *  · ```echarts 代码块 → 渲染为真实图表；JSON 不合法时退回代码块并提示
  */
-import { isValidElement } from "react";
+import { isValidElement, memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -66,7 +66,7 @@ function joinRel(dir: string, src: string): string {
   return out.join("/");
 }
 
-export default function Markdown({
+function Markdown({
   text,
   workspaceId,
   assetBase,
@@ -134,3 +134,9 @@ export default function Markdown({
     </div>
   );
 }
+
+/**
+ * 消息列表会随输入、流式增量频繁重渲染：Markdown 解析（remark/rehype/KaTeX）
+ * 是这里最贵的一步，按 text 记忆化，未变化的旧消息直接跳过解析。
+ */
+export default memo(Markdown);

@@ -10,6 +10,10 @@
   6. run_python 护栏 —— open/pathlib/shutil 触碰 .memory 被拒，区内正常
   7. shell 检测 —— 重定向/删除/复制到 .memory 被拦
   8. 注入渲染 —— 三层拼接顺序、预算裁剪、空记忆不产生段落
+  9. 记忆分级 —— 条目类型解析（含旧格式兼容）、注入排序、容量淘汰
+ 10. 提炼过滤 —— 非法/低价值类型在写入前被丢弃
+ 11. 检索与合并 —— 规则常驻 + 相关度 top-k、预算截断、同主题 upsert
+ 12. 用户显式指令 —— 8 种「请帮我记住」句式、反例、画像类型粗判
 """
 
 from __future__ import annotations
@@ -82,7 +86,12 @@ def test_append_and_dedup():
         assert entries[0]["source"] == "对话"
         assert len(entries[0]["ts"]) == 16   # YYYY-MM-DD HH:MM
 
-        # 近似重复（只多一个标点）不重复写入
+        # 同主题的新表述 → upsert 替换（条数不变，内容更新为新表述）
+        assert memory.append_project_note("后端改完必须杀 python 重启！", workspace=ws)
+        entries = memory._parse_entries(memory.load_project(ws))
+        assert len(entries) == 1 and entries[0]["body"].endswith("！"), entries
+
+        # 完全相同的重复 → 跳过
         assert not memory.append_project_note("后端改完必须杀 python 重启！", workspace=ws)
         assert len(memory._parse_entries(memory.load_project(ws))) == 1
 
@@ -311,7 +320,133 @@ def test_render_block():
     print("✓ 注入：三层顺序、防指令注入提示、空记忆不渲染、超预算裁剪 topics")
 
 
-# ============================================================ 9. remember 工具
+# ============================================================ 9. 记忆分级
+
+def test_entry_kinds_and_prune():
+    ws = _new_ws()
+    try:
+        # 新格式：写入时带类型
+        assert memory.append_project_note("项目统一用 PowerShell 5", workspace=ws, kind="rule")
+        assert memory.append_project_note("决定前端不引入新 UI 库", workspace=ws, kind="decision")
+        assert memory.append_project_note("本机换页量 30MB", workspace=ws, kind="fact")
+        entries = memory._parse_entries(memory.load_project(ws))
+        assert [e["kind"] for e in entries] == ["rule", "decision", "fact"], entries
+        assert entries[0]["source"] == "对话"
+
+        # 旧格式（无 [kind]）按 fact 解析，历史数据不丢
+        memory.save_project("- 2026-01-01 00:00 · 手动 — 旧条目\n", ws)
+        old = memory._parse_entries(memory.load_project(ws))
+        assert old[0]["kind"] == "fact" and old[0]["body"] == "旧条目" and old[0]["source"] == "手动"
+
+        # 中文别名归一；非法值返回 None（由调用方决定丢弃）
+        assert memory.resolve_kind("偏好") == "pref"
+        assert memory.resolve_kind("踩坑") == "pitfall"
+        assert memory.resolve_kind("bogus") is None
+        assert memory.normalize_kind("bogus") == "fact"
+
+        # 注入排序：规则 → 决定 → 事实（预算不够时先丢事实）
+        text = "\n".join([
+            "- 2026-01-01 00:00 · [fact] 对话 — 一次性事实",
+            "- 2026-01-02 00:00 · [rule] 对话 — 重要规则",
+            "- 2026-01-03 00:00 · [decision] 对话 — 已做决定",
+        ])
+        ordered = memory.order_entries(text)
+        assert (
+            ordered.index("重要规则") < ordered.index("已做决定") < ordered.index("一次性事实")
+        ), ordered
+
+        # 容量淘汰：写满后新进的事实优先被淘汰（噪声不占额度）
+        memory.save_project("", ws)
+        for i in range(memory.PROJECT_KEEP):
+            memory.append_project_note(f"规则{i}", workspace=ws, kind="rule")
+        assert memory.append_project_note("最后一条事实", workspace=ws, kind="fact")
+        entries = memory._parse_entries(memory.load_project(ws))
+        assert len(entries) == memory.PROJECT_KEEP, len(entries)
+        assert all(e["kind"] == "rule" for e in entries), "超限时应先淘汰 fact"
+        print("✓ 分级：类型写入/解析、旧格式兼容、注入排序、超限先淘汰事实")
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+def test_extract_notes_filter():
+    from agent import Agent
+    raw = [
+        {"kind": "pref", "note": "用户喜欢浅色主题"},
+        "旧格式字符串条目",
+        {"kind": "fact", "note": "一次性任务事实"},
+        {"kind": "bogus", "note": "非法类型"},
+        {"note": "没写类型"},
+        None,
+    ]
+    # 项目层：fact（一次性事实）与非法类型都被丢弃，缺省类型补 rule
+    assert Agent._extract_notes(
+        raw, ("pref", "rule", "decision", "pitfall"), "rule"
+    ) == [("pref", "用户喜欢浅色主题"), ("rule", "没写类型")]
+    # 用户层：字符串与 fact 可保留，缺省类型补 pref
+    assert Agent._extract_notes(raw, ("pref", "fact"), "pref") == [
+        ("pref", "用户喜欢浅色主题"),
+        ("fact", "旧格式字符串条目"),
+        ("fact", "一次性任务事实"),
+        ("pref", "没写类型"),
+    ]
+    print("✓ 提炼过滤：项目层丢弃一次性事实/非法类型，缺省类型按层级补齐")
+
+
+def test_select_and_clip():
+    text = "\n".join([
+        "- 2026-01-01 00:00 · [rule] 对话 — 项目统一用 PowerShell 5",
+        "- 2026-01-01 00:00 · [rule] 对话 — 前端必须保持中文界面",
+        "- 2026-01-02 00:00 · [decision] 对话 — 决定不引入新的 UI 库",
+        "- 2026-01-03 00:00 · [pitfall] 对话 — 8123 端口被占用时先查 python 进程",
+        "- 2026-01-04 00:00 · [pitfall] 对话 — Windows 下 npx 要用 npx.cmd",
+        "- 2026-01-05 00:00 · [fact] 对话 — random_100.csv 有 100 列",
+    ])
+    picked = memory.select_project(text, "8123 端口被占用怎么排查", keep_rest=1)
+    # 规则全保留（与问题无关也要遵守）
+    assert "PowerShell 5" in picked and "中文界面" in picked, picked
+    # 非规则只留最相关的一条
+    assert "8123 端口" in picked, picked
+    assert "npx.cmd" not in picked and "random_100.csv" not in picked, picked
+
+    # 相关度打分：精确命中的更高
+    assert memory.relevance("端口占用", "8123 端口被占用时先查") > memory.relevance(
+        "端口占用", "random_100.csv 有 100 列"
+    )
+
+    # 预算截断：保留排在前面的条目并标注省略
+    clipped = memory.clip_entries(picked, 120)
+    assert "更多记忆条目已省略" in clipped, clipped
+    assert "PowerShell 5" in clipped
+    print("✓ 检索：规则常驻、非规则按相关度取 top-k、预算按条目截断")
+
+
+def test_remember_command_parse():
+    cases = {
+        "请帮我记住 我不喜欢红色": "我不喜欢红色",
+        "帮我记住：明天交周报": "明天交周报",
+        "请记住 用 PowerShell 5": "用 PowerShell 5",
+        "记住：项目用 pnpm": "项目用 pnpm",
+        "记一下：端口 8123": "端口 8123",
+        "记下来 每周五写周报": "每周五写周报",
+        "以后都记住 回答用中文": "回答用中文",
+        "以后请记住 先给结论": "先给结论",
+    }
+    for text, want in cases.items():
+        assert memory.parse_remember_command(text) == want, text
+
+    # 反例：问句、无冒号、空内容都不算指令
+    assert memory.parse_remember_command("你记住我刚才说的吗") is None
+    assert memory.parse_remember_command("记住我") is None
+    assert memory.parse_remember_command("请帮我记住") is None
+    assert memory.parse_remember_command("请帮我记住   ") is None
+
+    # 画像类型粗判
+    assert memory.infer_user_kind("我喜欢简短回答") == "pref"
+    assert memory.infer_user_kind("明天下午交周报") == "fact"
+    print("✓ 显式指令：8 种句式识别、反例不误触发、画像类型粗判")
+
+
+# ============================================================ 10. remember 工具
 
 def test_remember_tool():
     ws = _new_ws()
@@ -333,6 +468,8 @@ def test_remember_tool():
         # 参数校验
         assert memory.remember("bogus", "x").startswith("[error]")
         assert memory.remember("user", "  ").startswith("[error]")
+        # 项目层拒收一次性事实（kind=fact），避免记忆被任务数据污染
+        assert memory.remember("project", "某个临时文件 331 字节", kind="fact").startswith("[error]")
 
         # 注册幂等 + 工具表可见
         from core.registry import ToolRegistry
@@ -409,6 +546,10 @@ if __name__ == "__main__":
     test_python_prelude()
     test_shell_guard()
     test_render_block()
+    test_entry_kinds_and_prune()
+    test_extract_notes_filter()
+    test_select_and_clip()
+    test_remember_command_parse()
     test_remember_tool()
     test_agent_injection()
     print("---")

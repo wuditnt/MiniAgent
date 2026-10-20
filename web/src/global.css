@@ -18,6 +18,14 @@ body,
   background: #ffffff;
 }
 
+/* 窄屏侧栏浮层（抽屉）遮罩：点击空白处收起；桌面端侧栏常驻，不渲染 */
+.sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 99;
+  background: rgba(0, 0, 0, 0.28);
+}
+
 /* 常驻侧边栏：默认展开 260px，可折叠到 0；淡灰渐变底色 */
 .sidebar-fixed {
   flex: none;
@@ -103,26 +111,11 @@ body,
   width: 240px;
 }
 
-/* 顶栏右侧：模型菜单 + 模式条 */
+/* 顶栏右侧：更多操作 + 工作区文件 */
 .header-right {
   display: flex;
   align-items: center;
   gap: 16px;
-}
-
-.mode-bar {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.web-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  color: #555;
-  cursor: default;
 }
 
 .chat-scroll {
@@ -154,6 +147,22 @@ body,
   margin: 0 auto;
   padding: 24px 16px 8px;
   font-size: 16px;
+}
+
+/* 长会话分段渲染：顶部「加载更早消息」入口 */
+.load-earlier {
+  display: flex;
+  justify-content: center;
+  padding: 0 0 12px;
+}
+
+.load-earlier .ant-btn {
+  color: #1677ff;
+  font-size: 13px;
+}
+
+.load-earlier .ant-btn:hover {
+  background: #e6f4ff;
 }
 
 /* antd Bubble 默认吃 token 字号（14px），这里显式覆盖，
@@ -981,7 +990,7 @@ body,
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: 320px;
+  max-width: 240px;
   font-size: 13px;
   color: #1677ff;
   cursor: pointer;
@@ -996,7 +1005,7 @@ body,
 }
 
 .model-chip-name {
-  max-width: 160px;
+  max-width: 130px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1444,6 +1453,11 @@ body,
   color: #1677ff;
 }
 
+/* 「更多」入口：宽屏隐藏（模型胶囊直接可见），窄屏才显示 */
+.tb-more {
+  display: none;
+}
+
 /* 「+」上传菜单项：原生 label 撑满整行，整行点击/触摸都能激活文件选择框 */
 .plus-menu-label {
   display: flex;
@@ -1484,6 +1498,37 @@ body,
 .tb-mode:hover {
   background: #f0f0f0;
   color: #1677ff;
+}
+
+/* ---- 智能搜索胶囊（每个对话独立）：选中蓝底白底对称，参考设计图 ---- */
+.tb-web {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid #e5e6eb;
+  background: #fff;
+  color: #595959;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.tb-web:hover {
+  border-color: #91caff;
+  color: #1677ff;
+}
+
+.tb-web.on {
+  background: #e8f0fe;
+  border-color: #a8c7fa;
+  color: #1677ff;
+}
+
+.tb-web.on:hover {
+  background: #dbe7fd;
 }
 
 .tb-mode-caret {
@@ -1979,12 +2024,48 @@ body,
     max-width: 120px;
   }
 
+  /* 窄屏工具栏减负：模型/推理收进「⋯」，模式只留图标，审批只留图标+短名 */
+  .model-chip-wrap {
+    display: none;
+  }
+
+  .tb-more {
+    display: inline-flex;
+  }
+
+  .tb-mode-text {
+    display: none;
+  }
+
+  .tb-mode .tb-mode-caret,
+  .tb-approval .tb-mode-caret {
+    display: none;
+  }
+
+  .tb-approval {
+    padding: 4px 8px;
+  }
+
+  .tb-web {
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+
   .chat-inner {
     padding: 12px 12px 24px;
   }
 
   .composer-inner {
     padding: 8px 12px 12px;
+  }
+
+  /* 附件/工作区胶囊多时允许换行，避免撑破输入区 */
+  .composer-top {
+    flex-wrap: wrap;
+  }
+
+  .ws-chip-name {
+    max-width: 120px;
   }
 
   .composer-toolbar-left,

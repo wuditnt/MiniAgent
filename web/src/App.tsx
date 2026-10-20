@@ -1,10 +1,10 @@
 /**
  * 应用编排：模式/联网开关、消息流、SSE 消费、危险确认都在这里。
- * Chat / ModeBar / WelcomePane / ConfirmPanel / ToolChain 是纯展示组件。
+ * Chat / WelcomePane / ConfirmPanel / ToolChain 是纯展示组件。
  */
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined } from "@ant-design/icons";
-import { Input, message, Modal, Tooltip } from "antd";
+import { DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, MoreOutlined } from "@ant-design/icons";
+import { Dropdown, Input, message, Modal, Tooltip } from "antd";
 import {
   chatStream,
   createWorkspace,
@@ -39,7 +39,6 @@ import type {
   WorkspaceItem,
 } from "./types";
 import Chat from "./components/Chat";
-import ModeBar from "./components/ModeBar";
 import Sidebar from "./components/Sidebar";
 import WorkspaceModal from "./components/WorkspaceModal";
 import SettingsModal from "./components/SettingsModal";
@@ -49,7 +48,6 @@ import Trajectory from "./components/Trajectory";
 
 const SESSION_KEY = "miniagent.session";
 const MODE_KEY = "miniagent.mode";
-const WEB_KEY = "miniagent.web";
 const WS_KEY = "miniagent.workspace";
 const APPROVAL_KEY = "miniagent.approval";
 
@@ -71,7 +69,7 @@ export default function App() {
   const [mode, setMode] = useState<Mode>(() =>
     localStorage.getItem(MODE_KEY) === "chat" ? "chat" : "agent"
   );
-  const [web, setWeb] = useState<boolean>(() => localStorage.getItem(WEB_KEY) === "1");
+  const [web, setWeb] = useState<boolean>(false);
   const [approval, setApproval] = useState<ApprovalMode>(() => {
     const v = localStorage.getItem(APPROVAL_KEY);
     return v === "auto" || v === "full" ? v : "ask";
@@ -100,12 +98,18 @@ export default function App() {
   } | null>(null);
   // 窄屏（≤768px）默认收起侧栏，给聊天区留足空间
   const [collapsed, setCollapsed] = useState(() => typeof window !== "undefined" && window.innerWidth <= 768);
+  // 窄屏下侧栏是浮层（抽屉）：展开时点空白处应收起，所以需要知道当前是否浮层模式
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== "undefined" && window.innerWidth <= 768
+  );
 
   // 屏幕宽度变化时自动收起/展开侧栏
   useEffect(() => {
     const onResize = () => {
-      if (window.innerWidth <= 768 && !collapsed) setCollapsed(true);
-      else if (window.innerWidth > 768 && collapsed) setCollapsed(false);
+      const narrow = window.innerWidth <= 768;
+      setIsMobile(narrow);
+      if (narrow && !collapsed) setCollapsed(true);
+      else if (!narrow && collapsed) setCollapsed(false);
     };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
@@ -148,9 +152,6 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(MODE_KEY, mode);
   }, [mode]);
-  useEffect(() => {
-    localStorage.setItem(WEB_KEY, web ? "1" : "0");
-  }, [web]);
   useEffect(() => {
     localStorage.setItem(WS_KEY, ws);
   }, [ws]);
@@ -270,6 +271,14 @@ export default function App() {
   useEffect(() => {
     const cur = sessions.find((s) => s.id === session);
     if (cur && cur.message_count > 0 && cur.workspace_id) setWs(cur.workspace_id);
+  }, [session, sessions]);
+
+  // 切换会话时同步联网开关：每个对话保存自己的智能搜索配置，
+  // 草稿会话（还没落盘）不在列表里，沿用当前选择
+  useEffect(() => {
+    if (!sessions.some((s) => s.id === session)) return;
+    const cur = sessions.find((s) => s.id === session);
+    setWeb(!!cur?.web);
   }, [session, sessions]);
 
   // 草稿一旦落盘（出现在会话列表里），撤掉占位，交给真实会话行
@@ -422,6 +431,14 @@ export default function App() {
               },
             ]);
             break;
+          case "memory":
+            // 用户显式「请帮我记住 XXX」：写入成功/重复/被开关拦截都给一条轻提示
+            if (ev.ok) {
+              message.success(ev.duplicate ? "该内容已在用户画像中" : "已记入用户画像");
+            } else {
+              message.warning(ev.error || "未记入用户画像");
+            }
+            break;
           case "done":
             // answer 是服务端合并后的最终回答，比逐帧拼接更可靠
             patchAssistant(asstId, (it) => ({
@@ -520,6 +537,8 @@ export default function App() {
         ? crypto.randomUUID()
         : `s-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setDraftWs(ws);
+    // 新对话的智能搜索默认关闭（每个对话各自独立配置）
+    setWeb(false);
     setSession(id);
   };
 
@@ -743,6 +762,18 @@ export default function App() {
       );
   };
 
+  /** 切换当前会话的智能搜索：持久化到会话，别的对话不受影响 */
+  const handleSetWeb = (w: boolean) => {
+    setWeb(w);
+    if (!currentSession) return; // 会话还没落盘（草稿）：随首条消息一起保存
+    setSessionModel(session, { web: w })
+      .then(() => refreshSessions())
+      .catch((e: unknown) => {
+        setWeb(!w);
+        message.error(e instanceof Error ? e.message : "保存联网配置失败");
+      });
+  };
+
   /** 打开「模型」设置页 */
   const handleManageModels = () => {
     setSettingsTab("model");
@@ -781,6 +812,10 @@ export default function App() {
       className={`app ${wbFullscreen ? "wb-fullscreen" : ""}`}
       style={{ "--sidebar-w": collapsed ? "0px" : "260px" } as CSSProperties}
     >
+      {/* 窄屏抽屉遮罩：点击空白处收起侧栏（桌面端侧栏常驻，不显示） */}
+      {!collapsed && isMobile && (
+        <div className="sidebar-backdrop" onClick={() => setCollapsed(true)} />
+      )}
       <aside className={`sidebar-fixed ${collapsed ? "collapsed" : ""}`}>
         <Sidebar
           workspaces={workspaces}
@@ -851,26 +886,44 @@ export default function App() {
           </div>
 
           <div className="header-right">
-            {/* 用量统计 */}
-            <Tooltip title="用量统计">
-              <span className="tb-icon-btn" onClick={() => setStatsOpen(true)}>
-                <BarChartOutlined />
-              </span>
+            {/* 会话快捷操作：用量统计 / 清空会话 / 导出 Markdown 收进一个菜单 */}
+            <Tooltip title="更多操作">
+              <Dropdown
+                trigger={["click"]}
+                placement="bottomRight"
+                menu={{
+                  items: [
+                    {
+                      key: "stats",
+                      icon: <BarChartOutlined />,
+                      label: "用量统计",
+                    },
+                    {
+                      key: "export",
+                      icon: <ExportOutlined />,
+                      label: "导出为 Markdown",
+                    },
+                    { type: "divider" },
+                    {
+                      key: "clear",
+                      icon: <DeleteOutlined />,
+                      label: "清空会话",
+                      danger: true,
+                    },
+                  ],
+                  onClick: ({ key }) => {
+                    if (key === "stats") setStatsOpen(true);
+                    else if (key === "export") handleExportMarkdown();
+                    else if (key === "clear") handleClearSession();
+                  },
+                }}
+              >
+                <span className="tb-icon-btn">
+                  <MoreOutlined />
+                </span>
+              </Dropdown>
             </Tooltip>
-            {/* 清空会话 */}
-            <Tooltip title="清空会话">
-              <span className="tb-icon-btn" onClick={handleClearSession}>
-                <DeleteOutlined />
-              </span>
-            </Tooltip>
-            {/* 导出当前会话为 Markdown */}
-            <Tooltip title="导出为 Markdown">
-              <span className="tb-icon-btn" onClick={handleExportMarkdown}>
-                <ExportOutlined />
-              </span>
-            </Tooltip>
-            {/* 联网搜索开关：两种模式都可联网，快速对话只是不做推理思考 */}
-            <ModeBar web={web} state={state} onWeb={setWeb} />
+            {/* 联网搜索开关已迁到输入框工具栏（每个对话独立配置） */}
             {/* 工作台抽屉开关 */}
             <Tooltip title={workbenchOpen ? "收起工作区" : "工作区文件"}>
               <span
@@ -896,6 +949,8 @@ export default function App() {
           busy={busy}
           mode={mode}
           onMode={setMode}
+          web={web}
+          onWeb={handleSetWeb}
           approval={approval}
           onApproval={setApproval}
           onSend={send}

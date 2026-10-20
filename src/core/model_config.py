@@ -275,6 +275,23 @@ def provider_key(provider: str) -> str:
     return ""
 
 
+def deepseek_key() -> str:
+    """DeepSeek 的 API Key：优先模型配置，其次环境变量。
+
+    供联网搜索 / DeepSeek Fetch 等旁路能力复用，用户无需重复填写。
+    """
+    key = provider_key("deepseek")
+    if key:
+        return key
+    key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if key:
+        return key
+    # 纯 .env 用法：主接口地址指向 DeepSeek 时，主 Key 就是 DeepSeek 的 Key
+    if "deepseek" in os.environ.get("OPENAI_BASE_URL", "").lower():
+        return os.environ.get("OPENAI_API_KEY", "").strip()
+    return ""
+
+
 def resolve_model(mid: str | None = None) -> dict:
     """按 id 解析一份模型配置；id 为空 / 已被删掉 → 回退全局 active。
     返回 {model_id, provider, name, base_url, api_key, model}，空字段回退环境变量。

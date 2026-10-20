@@ -158,7 +158,6 @@ class _Session:
         self.server = server
         self.agent = None                     # 懒创建（首次对话）
         self.mode = "agent"
-        self.web = False
         self.approval_mode = "ask"            # 三档确认：ask / auto / full，逐轮生效
         self.queue: queue.Queue | None = None
         self.busy = False                     # run_lock 的可观察副本
@@ -173,6 +172,7 @@ class _Session:
         self.workspace_id = workspace_config.DEFAULT_ID   # 归属工作区（决定沙箱根）
         self.model_id: str | None = None     # 本会话的模型配置 id（None = 跟全局默认）
         self.reasoning: str | None = None    # 本会话的推理等级（None = 跟全局默认）
+        self.web = False                     # 本会话的联网搜索开关（每个对话独立）
         now = time.time()
         self.created_at = now
         self.updated_at = now
@@ -228,6 +228,7 @@ class _Session:
             self.workspace_id = data.get("workspace_id") or self.workspace_id
             self.model_id = data.get("model_id") or None
             self.reasoning = model_config.normalize_reasoning(data.get("reasoning"))
+            self.web = bool(data.get("web", False))
             self.created_at = data.get("created_at") or self.created_at
             self.updated_at = data.get("updated_at") or self.updated_at
             for m in data.get("messages", []):
@@ -288,6 +289,7 @@ class _Session:
             "workspace_id": self.workspace_id,
             "model_id": self.model_id,        # 本会话的模型配置（None = 跟全局默认）
             "reasoning": self.reasoning,     # 本会话的推理等级（None = 跟全局默认）
+            "web": self.web,                 # 本会话的联网搜索开关
             "messages": messages,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -504,8 +506,8 @@ def _brief_args(args: dict, limit: int = 1200) -> dict:
 def _session_registry(mode: str, approval: str = "ask", web: bool = False):
     """按行为矩阵克隆一份会话工具表（见方案 §3.1）。
 
-    chat 模式 = 不做推理思考、只保留联网搜索（开关打开时），其余工具一律不加载；
-    联网开关关闭时，agent 模式同样不加载 web_search。
+    chat 模式 = 不做推理思考，只保留联网能力（web_search / fetch_url），其余工具不加载；
+    web_search 仅在联网开关打开时加载；fetch_url 始终可用（云端 or 本地按本轮模式分派）。
     Tool 对象本身无状态，跨注册表共享引用是安全的。
     request_approval 仅在 auto 档暴露 —— 其它档位模型看不到它。
     """
@@ -522,15 +524,44 @@ def _session_registry(mode: str, approval: str = "ask", web: bool = False):
     for t in REGISTRY.all():
         if t.name == "web_search":
             if not web:
-                continue          # 联网开关关闭：两种模式都不加载搜索工具
+                continue          # 关闭联网：不提供搜索（只保留本地抓取）
+        elif t.name == "fetch_url":
+            pass                  # 抓取始终可用：云端 / 本地实现按本轮联网模式分派
         elif mode == "chat":
-            continue              # 快速对话：除联网搜索外不调用任何工具
+            continue              # 快速对话：除联网能力外不调用任何工具
         if t.name == "request_approval" and approval != "auto":
             continue
         if t.name == "remember" and not memory_on:
             continue
         reg.add(t)
     return reg
+
+
+def _remember_from_message(message: str) -> dict | None:
+    """处理用户显式「请帮我记住 XXX」：不依赖模型/工具，直接写用户画像。
+
+    两种模式都生效（快速对话没有工具也能记）。返回要推给前端的 memory 事件；
+    没有指令时返回 None。任何失败都只记日志，绝不影响本轮对话。
+    """
+    try:
+        from core import memory
+
+        note = memory.parse_remember_command(message)
+        if not note:
+            return None
+        if not memory.is_enabled():
+            return {
+                "type": "memory", "ok": False, "note": note,
+                "error": "记忆功能已关闭（系统配置 → 记忆 里可打开）",
+            }
+        written = memory.append_user_note(
+            note, source="用户指令", kind=memory.infer_user_kind(note)
+        )
+        _log.info("memory.command session-note chars=%d duplicate=%s", len(note), not written)
+        return {"type": "memory", "ok": True, "note": note, "duplicate": not written}
+    except Exception:  # noqa: BLE001
+        _log.warning("memory.command.failed", exc_info=True)
+        return {"type": "memory", "ok": False, "note": "", "error": "写入记忆失败"}
 
 
 def _search_backend() -> str:
@@ -676,6 +707,7 @@ def _list_session_files() -> list[dict]:
             "workspace_id": data.get("workspace_id") or workspace_config.DEFAULT_ID,
             "model_id": data.get("model_id") or "",
             "reasoning": model_config.normalize_reasoning(data.get("reasoning")) or "",
+            "web": bool(data.get("web", False)),
             "message_count": len(msgs),
             "created_at": data.get("created_at", 0),
             "updated_at": data.get("updated_at", 0),
@@ -1419,8 +1451,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self._json({"ok": True, "keep": keep})
 
     def _handle_session_model(self, sid: str) -> None:
-        """设置本会话的模型配置：{model_id?, reasoning?}（缺省项保持原值）。
-        每个对话单独保存自己的模型选择，互不影响；全局 active 只管新会话的缺省。
+        """设置本会话的配置：{model_id?, reasoning?, web?}（缺省项保持原值）。
+        每个对话单独保存自己的模型与联网选择，互不影响；全局 active 只管新会话的缺省。
         """
         sid = sid[:64]
         body = self._read_body()
@@ -1445,8 +1477,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return
         else:
             rlv = model_config.normalize_reasoning(data.get("reasoning")) or ""
+        if "web" in body:
+            wv = bool(body.get("web"))
+        else:
+            wv = bool(data.get("web", False))
         data["model_id"] = mid or None
         data["reasoning"] = rlv or None
+        data["web"] = wv
         _save_session_file(sid, data)
         # 内存中的会话同步更新字段；Agent 交给下一次对话的过期检查（_agent_stale）
         # 去重建 —— 正在运行的 worker 仍握着旧 Agent 引用，不受影响
@@ -1455,7 +1492,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if sess is not None:
                 sess.model_id = mid or None
                 sess.reasoning = rlv or None
-        self._json({"ok": True, "model_id": mid or None, "reasoning": rlv or None})
+                sess.web = wv
+        self._json({"ok": True, "model_id": mid or None, "reasoning": rlv or None, "web": wv})
 
     def _handle_session_update(self, sid: str) -> None:
         """修改会话标题：{title}。改过之后不再按首条消息自动生成标题。"""
@@ -2129,13 +2167,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._fail(400, "message 不能为空")
             return
         mode = body.get("mode") if body.get("mode") in ("chat", "agent") else "agent"
-        web = bool(body.get("web"))
+        # 联网开关：前端总是随请求带上本会话的值；未带则沿用会话已保存的配置
+        web = bool(body.get("web")) if "web" in body else None
         approval = str(body.get("approval") or "ask")
         if approval not in ("ask", "auto", "full"):
             approval = "ask"
         sid = str(body.get("session") or "default")[:64]
 
         session = self.web.session(sid)
+        if web is None:
+            web = session.web
         if not session.run_lock.acquire(blocking=False):
             self._fail(409, "该会话已有任务在执行，请先停止或等待完成")
             return
@@ -2172,6 +2213,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
         session.busy = True
         q: queue.Queue = queue.Queue()
         session.queue = q
+        # 用户显式「请帮我记住 XXX」：在 run 之前写入用户画像，
+        # 这样本轮重建 system prompt 时记忆块里就已经包含它
+        mem_event = _remember_from_message(message)
+        if mem_event:
+            q.put(mem_event)
 
         worker = threading.Thread(
             target=self._run_worker,
@@ -2231,6 +2277,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         """
         from core.cancel import Cancelled
         from core.sandbox import set_workspace
+        from core import net_mode
 
         t0 = time.time()
         before = dict(agent.usage)
@@ -2251,6 +2298,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
             len(attachments or []),
         )
         try:
+            # 本轮联网模式：开 = 云端（DeepSeek 搜索/抓取），关 = 本地抓取
+            net_mode.set_mode("cloud" if web else "local")
+            agent.net_mode = "cloud" if web else "local"
             # 把沙箱根切到本会话所属工作区，之后工具的相对路径都落在这里
             ws_root = workspace_config.resolve_path(session.workspace_id)
             set_workspace(ws_root)
@@ -2300,6 +2350,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             q.put({"type": "error", "message": f"{type(e).__name__}: {e}",
                    "usage": _usage_delta(before, agent.usage)})
         finally:
+            net_mode.reset()
             agent.event_writer = None
             writer.close()
 

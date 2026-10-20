@@ -4,7 +4,7 @@
  *  · 流式效果来自 items 增量更新，不靠打字机动画
  *  · Sender 的 loading 态自动把发送按钮变成「停止」
  */
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   CheckOutlined,
   CopyOutlined,
@@ -13,7 +13,9 @@ import {
   DownOutlined,
   EditOutlined,
   FolderOpenOutlined,
+  GlobalOutlined,
   HistoryOutlined,
+  MoreOutlined,
   PaperClipOutlined,
   PictureOutlined,
   PlusOutlined,
@@ -26,6 +28,7 @@ import {
 } from "@ant-design/icons";
 import { Bubble, Sender } from "@ant-design/x";
 import { Button, Checkbox, Collapse, Dropdown, Input, message, Radio, Tag, Tooltip } from "antd";
+import type { MenuProps } from "antd";
 import type {
   ApprovalMode,
   AskRecord,
@@ -341,7 +344,7 @@ function AskCard({
   );
 }
 
-function AssistantBody({
+function AssistantBodyInner({
   item,
   onRegenerate,
   onDelete,
@@ -423,11 +426,17 @@ function AssistantBody({
   );
 }
 
+/** 历史消息的 item 对象不变 → 跳过整棵子树（Markdown / 工具轨迹 / KaTeX） */
+const AssistantBody = memo(AssistantBodyInner);
+
 interface Props {
   items: ChatItem[];
   busy: boolean;
   mode: Mode;
   onMode: (m: Mode) => void;
+  /** 本会话的联网搜索开关（每个对话独立保存） */
+  web: boolean;
+  onWeb: (w: boolean) => void;
   /** 三档确认模式（ask / auto / full），仅智能体模式下可切 */
   approval: ApprovalMode;
   onApproval: (m: ApprovalMode) => void;
@@ -480,6 +489,13 @@ const LEVEL_LABEL: Record<ReasoningLevel, string> = {
   high: "High",
   max: "Max",
 };
+
+/**
+ * 长会话分段渲染：默认只渲染最近 INITIAL_VISIBLE 条，向上滚动或点按钮再往前加载，
+ * 避免一次性解析上百条 Markdown（以及 KaTeX / 图表）把首屏和输入拖慢。
+ */
+const INITIAL_VISIBLE = 30;
+const LOAD_STEP = 30;
 
 /**
  * 输入框上方左侧的工作区胶囊：告诉用户「这条对话的文件操作边界在哪」。
@@ -576,9 +592,9 @@ function ApprovalChip({
         onClick: ({ key }) => onChange(key as ApprovalMode),
       }}
     >
-      <span className={`tb-approval tb-approval-${value}`}>
+      <span className={`tb-approval tb-approval-${value}`} title={current.name}>
         <SafetyCertificateOutlined />
-        <span>{current.short}</span>
+        <span className="tb-approval-text">{current.short}</span>
         <DownOutlined className="tb-mode-caret" />
       </span>
     </Dropdown>
@@ -634,6 +650,8 @@ export default function Chat({
   busy,
   mode,
   onMode,
+  web,
+  onWeb,
   approval,
   onApproval,
   onSend,
@@ -672,6 +690,60 @@ export default function Chat({
   // 已上传、待发送的附件（chips 展示在输入框上方）
   const [pending, setPending] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(false);
+  // 当前渲染的历史窗口（条数，从最新往前数）；长会话分段加载
+  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE);
+  // 消息区是否已可滚动：可滚动时靠「滚到顶部」自动加载，否则才显示按钮
+  const [scrollable, setScrollable] = useState(false);
+  // 加载更早消息时记录滚动位置，渲染后按高度差补偿，避免视口跳动
+  const anchor = useRef<{ height: number; top: number } | null>(null);
+  const hiddenCount = Math.max(0, items.length - visibleCount);
+
+  // 切会话时 App 会先清空 items：窗口恢复到默认值
+  useEffect(() => {
+    if (items.length === 0) setVisibleCount(INITIAL_VISIBLE);
+  }, [items.length]);
+
+  // 搜索定位的目标可能在窗口外：把窗口扩到包含它，否则 #msg-xxx 找不到
+  useEffect(() => {
+    if (!focusId) return;
+    const idx = items.findIndex((it) => it.id === focusId);
+    if (idx >= 0) setVisibleCount((c) => Math.max(c, items.length - idx));
+  }, [focusId, items]);
+
+  // 展开更早消息后保持视口锚定（新内容在上方，scrollTop 顺延同样的高度差）
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    const a = anchor.current;
+    if (!el || !a) return;
+    anchor.current = null;
+    el.scrollTop = a.top + (el.scrollHeight - a.height);
+  }, [visibleCount]);
+
+  // 记录「能否滚动」：不能滚动时滚不到顶部，自动加载永远不会触发，需要用按钮兜底。
+  // 只在条数/窗口变化时测一次——流式期间长度不变，就不必每个 token 都读一次布局
+  useLayoutEffect(() => {
+    if (hiddenCount <= 0) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const can = el.scrollHeight > el.clientHeight + 40;
+    setScrollable((prev) => (prev === can ? prev : can));
+  }, [items.length, visibleCount, hiddenCount]);
+
+  /** 往前加载一批历史消息 */
+  const loadEarlier = () => {
+    const el = scrollRef.current;
+    if (el) anchor.current = { height: el.scrollHeight, top: el.scrollTop };
+    setVisibleCount((c) => c + LOAD_STEP);
+  };
+
+  /** 滚到顶部附近自动加载（内容还没撑满一屏时不自动，交给按钮） */
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el || hiddenCount <= 0) return;
+    if (el.scrollTop > 60) return;
+    if (el.scrollHeight <= el.clientHeight + 200) return;
+    loadEarlier();
+  };
 
   // 模型子菜单：按服务商分组，组名用服务商展示名；组内条目用模型显示名称
   const modelGroups: { name: string; children: { key: string; label: React.ReactNode }[] }[] = [];
@@ -699,6 +771,62 @@ export default function Chat({
         : reasoningLevels[reasoningLevels.length - 1];
   // 推理等级仅在智能体模式下可配置（快速对话不思考，直接输出）
   const canReasoning = mode === "agent" && reasoningLevels.length > 0;
+
+  // 模型 / 推理等级菜单：宽屏挂在模型胶囊上，窄屏收进「⋯」，两者共用同一份配置
+  const modelMenuSelected = [
+    activeModelId ?? "",
+    ...(canReasoning ? [`rc:${showReasoning}`] : []),
+  ];
+  const modelMenuOnClick: MenuProps["onClick"] = ({ key }) => {
+    if (key === "__manage__") {
+      onManageModels();
+      return;
+    }
+    if (key.startsWith("rc:")) {
+      onSetReasoning(key.slice(3) as ReasoningLevel);
+      return;
+    }
+    onActivateModel(key);
+  };
+  const modelMenuItems: MenuProps["items"] = [
+    {
+      key: "model",
+      label: (
+        <span className="mm-row">
+          <span className="mm-label">模型</span>
+          <span className="mm-value">{modelName || "选择模型"}</span>
+        </span>
+      ),
+      children: [
+        ...modelGroups.map((g) => ({
+          type: "group" as const,
+          label: g.name,
+          children: g.children,
+        })),
+        { type: "divider" as const },
+        { key: "__manage__", label: "管理模型", icon: <SettingOutlined /> },
+      ],
+    },
+    // 推理等级行只在智能体模式下出现，档位按当前模型厂家过滤；
+    // 快速对话本身就不思考，没有再配置的意义
+    ...(canReasoning
+      ? [
+          {
+            key: "reasoning",
+            label: (
+              <span className="mm-row">
+                <span className="mm-label">推理等级</span>
+                <span className="mm-value">{LEVEL_LABEL[showReasoning]}</span>
+              </span>
+            ),
+            children: reasoningLevels.map((l) => ({
+              key: `rc:${l}`,
+              label: LEVEL_LABEL[l],
+            })),
+          },
+        ]
+      : []),
+  ];
 
   /** 选中文件后立即上传到工作区 .attachments/，结果暂存 pending 等发送 */
   const onPickFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -751,23 +879,28 @@ export default function Chat({
   // 搜索命中定位：滚动 + 闪烁由 App 统一处理（见 App 的 focus effect）；
   // 这里只负责在有定位请求时让位，不把视图自动拉到底部。
 
-  const roles: Record<string, any> = {
-    user: {
-      placement: "end",
-      variant: "filled",
-    },
-    assistant: {
-      placement: "start",
-      // 无外框、无背景，文字直接落在白色聊天区上（参考千问）
-      variant: "borderless",
-    },
-    notice: {
-      placement: "start",
-      variant: "borderless",
-    },
-  };
+  const roles: Record<string, any> = useMemo(
+    () => ({
+      user: {
+        placement: "end",
+        variant: "filled",
+      },
+      assistant: {
+        placement: "start",
+        // 无外框、无背景，文字直接落在白色聊天区上（参考千问）
+        variant: "borderless",
+      },
+      notice: {
+        placement: "start",
+        variant: "borderless",
+      },
+    }),
+    []
+  );
 
-  const bubbleItems = items.map((it) => {
+  // 只有真正影响气泡的依赖变化时才重建列表：输入框打字、附件增删等局部状态
+  // 不应该把整段历史重新构造一遍（长会话下这是输入卡顿的主要来源之一）
+  const bubbleItems = useMemo(() => items.slice(hiddenCount).map((it) => {
     // 每条消息套一层带 id 的容器，供搜索命中后 scrollIntoView 定位
     if (it.role === "assistant") {
       const waiting =
@@ -829,15 +962,33 @@ export default function Chat({
         </span>
       ),
     };
-  });
+  }), [
+    items,
+    hiddenCount,
+    busy,
+    onRegenerate,
+    onDelete,
+    onTrajectory,
+    workspaceId,
+    pendingAsk,
+    onAnswerAsk,
+    onEditResend,
+  ]);
 
   return (
     <>
-      <div className="chat-scroll" ref={scrollRef}>
+      <div className="chat-scroll" ref={scrollRef} onScroll={onScroll}>
         {items.length === 0 ? (
           <WelcomePane mode={mode} onPick={onSend} />
         ) : (
           <div className="chat-inner">
+            {hiddenCount > 0 && !scrollable && (
+              <div className="load-earlier">
+                <Button type="text" size="small" onClick={loadEarlier}>
+                  加载更早的 {hiddenCount} 条消息
+                </Button>
+              </div>
+            )}
             <Bubble.List items={bubbleItems} roles={roles} />
           </div>
         )}
@@ -944,91 +1095,84 @@ export default function Chat({
                           onClick: ({ key }) => onMode(key as Mode),
                         }}
                       >
-                        <span className="tb-mode">
+                        <span
+                          className="tb-mode"
+                          title={mode === "chat" ? "快速对话" : "智能体"}
+                        >
                           {mode === "chat" ? <ThunderboltOutlined /> : <RobotOutlined />}
-                          <span>{mode === "chat" ? "快速对话" : "智能体"}</span>
+                          <span className="tb-mode-text">
+                            {mode === "chat" ? "快速对话" : "智能体"}
+                          </span>
                           <DownOutlined className="tb-mode-caret" />
                         </span>
                       </Dropdown>
+                      {/* 智能搜索：本对话独立联网开关（选中蓝底，未选白底） */}
+                      <Tooltip
+                        title={
+                          web
+                            ? "智能搜索已开启：本轮会调用联网搜索与网页抓取"
+                            : "智能搜索已关闭：不联网，仅在你给出链接时本地读取"
+                        }
+                      >
+                        <span
+                          className={`tb-web${web ? " on" : ""}`}
+                          onClick={() => onWeb(!web)}
+                        >
+                          <GlobalOutlined />
+                          <span className="tb-web-text">智能搜索</span>
+                        </span>
+                      </Tooltip>
                       {/* 确认模式：仅智能体模式有意义（chat 模式无危险本地工具） */}
                       {mode === "agent" && (
                         <ApprovalChip value={approval} onChange={onApproval} />
                       )}
                     </div>
                     <div className="composer-toolbar-right">
-                      {/* 模型选择器：两行菜单（模型 / 推理等级），自顶栏迁移至此 */}
-                      <Dropdown
-                        trigger={["click"]}
-                        placement="topRight"
-                        menu={{
-                          className: "model-menu",
-                          selectable: true,
-                          selectedKeys: [
-                            activeModelId ?? "",
-                            ...(canReasoning ? [`rc:${showReasoning}`] : []),
-                          ],
-                          items: [
-                            {
-                              key: "model",
-                              label: (
-                                <span className="mm-row">
-                                  <span className="mm-label">模型</span>
-                                  <span className="mm-value">
-                                    {modelName || "选择模型"}
-                                  </span>
-                                </span>
-                              ),
-                              children: [
-                                ...modelGroups.map((g) => ({
-                                  type: "group" as const,
-                                  label: g.name,
-                                  children: g.children,
-                                })),
-                                { type: "divider" as const },
-                                { key: "__manage__", label: "管理模型", icon: <SettingOutlined /> },
-                              ],
-                            },
-                            // 推理等级行只在智能体模式下出现，档位按当前模型厂家过滤；
-                            // 快速对话本身就不思考，没有再配置的意义
-                            ...(canReasoning
-                              ? [
-                                  {
-                                    key: "reasoning",
-                                    label: (
-                                      <span className="mm-row">
-                                        <span className="mm-label">推理等级</span>
-                                        <span className="mm-value">{LEVEL_LABEL[showReasoning]}</span>
-                                      </span>
-                                    ),
-                                    children: reasoningLevels.map((l) => ({
-                                      key: `rc:${l}`,
-                                      label: LEVEL_LABEL[l],
-                                    })),
-                                  },
-                                ]
-                              : []),
-                          ],
-                          onClick: ({ key }) => {
-                            if (key === "__manage__") {
-                              onManageModels();
-                              return;
-                            }
-                            if (key.startsWith("rc:")) {
-                              onSetReasoning(key.slice(3) as ReasoningLevel);
-                              return;
-                            }
-                            onActivateModel(key);
-                          },
-                        }}
-                      >
-                        <span className="model-chip">
-                          <span className="model-chip-name">{modelName || "选择模型"}</span>
-                          {canReasoning && (
-                            <span className="model-chip-level">{LEVEL_LABEL[showReasoning]}</span>
-                          )}
-                          <UpOutlined className="model-chip-caret" />
-                        </span>
-                      </Dropdown>
+                      {/* 模型胶囊：宽屏直接展示；窄屏由「⋯」承载（显隐由 CSS 控制） */}
+                      <span className="model-chip-wrap">
+                        <Dropdown
+                          trigger={["click"]}
+                          placement="topRight"
+                          menu={{
+                            className: "model-menu",
+                            selectable: true,
+                            selectedKeys: modelMenuSelected,
+                            items: modelMenuItems,
+                            onClick: modelMenuOnClick,
+                          }}
+                        >
+                          <span
+                            className="model-chip"
+                            title={`${modelName || "选择模型"}${
+                              canReasoning ? " · " + LEVEL_LABEL[showReasoning] : ""
+                            }`}
+                          >
+                            <span className="model-chip-name">{modelName || "选择模型"}</span>
+                            {canReasoning && (
+                              <span className="model-chip-level">{LEVEL_LABEL[showReasoning]}</span>
+                            )}
+                            <UpOutlined className="model-chip-caret" />
+                          </span>
+                        </Dropdown>
+                      </span>
+                      {/* 窄屏「⋯」：模型 / 推理等级收在这里，避免工具栏拥挤 */}
+                      <Tooltip title="模型与推理等级">
+                        <Dropdown
+                          trigger={["click"]}
+                          placement="topRight"
+                          menu={{
+                            className: "model-menu",
+                            selectable: true,
+                            selectedKeys: modelMenuSelected,
+                            items: modelMenuItems,
+                            onClick: modelMenuOnClick,
+                          }}
+                        >
+                          <span className="tb-icon-btn tb-more">
+                            <MoreOutlined />
+                          </span>
+                        </Dropdown>
+                      </Tooltip>
                       {/* 语音输入（浏览器 SpeechRecognition，不支持时自动变禁用态） */}
                       <SpeechButton />
                       {/* 发送按钮保持默认主色圆形样式，在一排文字图标中最醒目 */}

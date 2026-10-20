@@ -184,13 +184,13 @@ export async function updateSession(sid: string, title: string): Promise<{ id: s
 }
 
 /**
- * 设置本会话自己的模型配置（持久化到会话 JSON，各对话互不影响）。
- * model_id / reasoning 传 undefined 表示「保持原值」。
+ * 设置本会话自己的配置（持久化到会话 JSON，各对话互不影响）。
+ * model_id / reasoning / web 传 undefined 表示「保持原值」。
  */
 export async function setSessionModel(
   sid: string,
-  opts: { model_id?: string; reasoning?: string }
-): Promise<{ ok: boolean; model_id: string | null; reasoning: string | null }> {
+  opts: { model_id?: string; reasoning?: string; web?: boolean }
+): Promise<{ ok: boolean; model_id: string | null; reasoning: string | null; web: boolean }> {
   const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/model`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

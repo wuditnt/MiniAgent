@@ -48,6 +48,8 @@ export type SSEEvent =
   | { type: "confirm_request"; id: string; tool: string; args: Record<string, unknown> }
   | { type: "ask_request"; id: string; question: string; options: string[]; allow_free_text: boolean; multi: boolean }
   | { type: "notice"; text: string }
+  /** 用户显式「请帮我记住 XXX」的写入结果（两种模式都会发） */
+  | { type: "memory"; ok: boolean; note: string; duplicate?: boolean; error?: string }
   | { type: "cancelled"; reason: string; usage?: Usage }
   | { type: "done"; answer: string; sec: number; title_pending?: boolean; usage?: Usage }
   | { type: "error"; message: string; usage?: Usage }
@@ -174,6 +176,8 @@ export interface SessionItem {
   model_id?: string;
   /** 本会话保存的推理等级（空 = 跟全局默认） */
   reasoning?: ReasoningLevel;
+  /** 本会话的联网搜索开关（每个对话独立） */
+  web?: boolean;
 }
 
 /** 工作区（GET /api/workspaces 返回） */

@@ -365,11 +365,16 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
               <div className="gs-group-title">使用方式</div>
               <div className="gs-section">
                 <div className="gs-note" style={{ marginTop: 0 }}>
-                  输入框右上角的「联网搜索」开关控制本轮是否加载搜索工具。
+                  输入框右上角的「联网搜索」开关决定本轮的联网方式：
                   <br />
-                  快速对话模式不做推理思考，但开启开关后可以联网搜索后直接回答。
+                  <b>开启</b>：<code>web_search</code> 用上面选定的搜索后端；
+                  <code>fetch_url</code> 优先走 DeepSeek Fetch（返回 Markdown），
+                  失败自动回退本地抓取。
                   <br />
-                  智能体模式下可与其他工具配合完成复杂任务。
+                  <b>关闭</b>：不提供搜索工具；<code>fetch_url</code> 仅做本地直连抓取，
+                  适合读取你明确给出的链接。
+                  <br />
+                  快速对话模式同样支持联网，只是不做推理思考。
                 </div>
               </div>
               {dirty && (

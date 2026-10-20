@@ -42,11 +42,45 @@ USER_PROFILE_FILE = "user_profile.md"
 
 #: 每个工作区保留的主题摘要数量上限，更老的在写入时滚动删除
 TOPICS_KEEP = 20
+#: 项目记忆最多保留的条目数（超出时按类型权重 + 新旧淘汰）
+PROJECT_KEEP = 60
 #: 追加条目去重相似度阈值（0~1，越高越严格）
 DEDUP_RATIO = 0.88
 
-#: 条目行：- 2026-10-17 14:30 · 对话 — 正文
-_LINE_RE = re.compile(r"^- (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) · ([^—]+?) — (.*)$")
+#: 条目类型 → 注入权重（越大越优先，容量不足时越小越先淘汰）
+#:   pref=用户偏好/习惯  rule=项目规则/约定  decision=已做决定
+#:   pitfall=踩过的坑    fact=普通事实
+KINDS: dict[str, int] = {"pref": 4, "rule": 4, "decision": 3, "pitfall": 2, "fact": 1}
+
+#: 模型/用户可能写的中文或同义类型名 → 内部 id
+_KIND_ALIASES = {
+    "preference": "pref", "偏好": "pref", "习惯": "pref",
+    "规则": "rule", "约定": "rule", "规范": "rule",
+    "决定": "decision", "决策": "decision",
+    "坑": "pitfall", "踩坑": "pitfall", "教训": "pitfall",
+    "事实": "fact", "note": "fact", "": "fact",
+}
+
+
+def resolve_kind(kind: str | None) -> str | None:
+    """别名归一；空值或非法类型返回 None（调用方据此决定丢弃还是兜底）。"""
+    k = str(kind or "").strip().lower()
+    if not k:
+        return None
+    k = _KIND_ALIASES.get(k, k)
+    return k if k in KINDS else None
+
+
+def normalize_kind(kind: str | None) -> str:
+    """把中文/别名/非法类型归一到 KINDS 里的 id（未知一律 fact）。"""
+    return resolve_kind(kind) or "fact"
+
+
+#: 条目行：新格式 `- 2026-10-17 14:30 · [rule] 对话 — 正文`
+#:        旧格式 `- 2026-10-17 14:30 · 对话 — 正文`（kind 缺省 fact）
+_LINE_RE = re.compile(
+    r"^- (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) · (?:\[([a-z]+)\] )?([^—]+?) — (.*)$"
+)
 
 _lock = threading.RLock()
 
@@ -246,29 +280,160 @@ def _timestamp() -> str:
 
 
 def _parse_entries(text: str) -> list[dict]:
+    """解析条目行；旧格式（无 [kind]）按 fact 处理，保证历史数据可读。"""
     items = []
     for ln in text.splitlines():
         m = _LINE_RE.match(ln.strip())
         if m:
-            items.append({"ts": m.group(1), "source": m.group(2).strip(), "body": m.group(3).strip()})
+            items.append({
+                "ts": m.group(1),
+                "kind": normalize_kind(m.group(2)),
+                "source": m.group(3).strip(),
+                "body": m.group(4).strip(),
+            })
     return items
 
 
-def append_note(path: str, note: str, source: str = "对话") -> bool:
-    """向「条目型」记忆文件追加一行带时间戳的笔记。
+def _format_entry(entry: dict) -> str:
+    return (
+        f"- {entry['ts']} · [{normalize_kind(entry.get('kind'))}] "
+        f"{entry.get('source') or '对话'} — {entry.get('body') or ''}"
+    )
 
-    与已有条目高度相似（≥DEDUP_RATIO）则跳过。返回是否真的写入。
+
+def order_entries(text: str) -> str:
+    """按「类型权重 → 时间新旧」重排条目，非条目行原样保留在最前。
+
+    只用于注入渲染（不落盘）：让规则/偏好这类高价值记忆排在前面，
+    一次性事实沉到末尾，预算被截断时先丢的自然是低价值内容。
+    """
+    if not (text or "").strip():
+        return text or ""
+    entries: list[dict] = []
+    others: list[str] = []
+    for ln in text.splitlines():
+        parsed = _parse_entries(ln.strip())
+        if parsed:
+            entries.append(parsed[0])
+        elif ln.strip():
+            others.append(ln)
+    entries.sort(key=lambda e: (KINDS.get(e["kind"], 1), e["ts"]), reverse=True)
+    return "\n".join(others + [_format_entry(e) for e in entries])
+
+
+def _bigrams(text: str) -> set[str]:
+    """轻量相关度特征：去空白后的字符 2-gram（中英文通用，无需分词/依赖）。"""
+    s = re.sub(r"\s+", "", str(text or "").lower())
+    if not s:
+        return set()
+    return {s} if len(s) < 2 else {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+def relevance(query: str, body: str) -> float:
+    """query 的 2-gram 有多大比例出现在 body 中（0~1）。"""
+    q = _bigrams(query)
+    if not q:
+        return 0.0
+    return len(q & _bigrams(body)) / len(q)
+
+
+def select_project(text: str, query: str = "", keep_rest: int = 8) -> str:
+    """项目记忆的相关性筛选与排序。
+
+    规则/偏好是「必须遵守」的约束，无论本轮聊什么都全量保留；
+    决定/坑/事实按与本轮输入的相关度取前 keep_rest 条（相关度相同看新旧）。
+    这样记忆变多后，上下文里留下的是「规矩 + 当下相关」，而不是时间上最近的一堆事实。
+    """
+    if not (text or "").strip():
+        return text or ""
+    core: list[dict] = []
+    rest: list[dict] = []
+    others: list[str] = []
+    for ln in text.splitlines():
+        parsed = _parse_entries(ln.strip())
+        if parsed:
+            (core if parsed[0]["kind"] in ("pref", "rule") else rest).append(parsed[0])
+        elif ln.strip():
+            others.append(ln)
+    core.sort(key=lambda e: (KINDS.get(e["kind"], 1), e["ts"]), reverse=True)
+    rest.sort(key=lambda e: (relevance(query, e["body"]), e["ts"]), reverse=True)
+    keep = core + rest[:max(0, keep_rest)]
+    return "\n".join(others + [_format_entry(e) for e in keep])
+
+
+def clip_entries(text: str, budget: int) -> str:
+    """按字符预算逐条保留（调用方已排好优先级），超出部分用省略标记收尾。"""
+    if not (text or "").strip() or budget <= 0:
+        return ""
+    out: list[str] = []
+    used = 0
+    for ln in text.splitlines():
+        s = ln.rstrip()
+        if not s.strip():
+            continue
+        if used + len(s) + 1 > budget:
+            out.append("…（更多记忆条目已省略）")
+            break
+        out.append(s)
+        used += len(s) + 1
+    return "\n".join(out)
+
+
+def prune_entries(path: str, keep: int = PROJECT_KEEP) -> int:
+    """条目数超过 keep 时按「类型权重低 → 时间旧」淘汰，返回删除条数。
+
+    非条目行（用户手写的标题/段落）原样保留，不会被吞掉。
+    """
+    text = _read(path)
+    if not text.strip():
+        return 0
+    lines = text.splitlines()
+    idx = [i for i, ln in enumerate(lines) if _LINE_RE.match(ln.strip())]
+    if len(idx) <= keep:
+        return 0
+    entries = [(i, _parse_entries(lines[i].strip())[0]) for i in idx]
+    ranked = sorted(entries, key=lambda p: (KINDS.get(p[1]["kind"], 1), p[1]["ts"]),
+                    reverse=True)
+    keep_idx = {i for i, _ in ranked[:keep]}
+    out = [ln for i, ln in enumerate(lines) if i not in idx or i in keep_idx]
+    _atomic_write(path, "\n".join(out).rstrip("\n") + "\n")
+    return len(idx) - keep
+
+
+def append_note(path: str, note: str, source: str = "对话", kind: str = "fact") -> bool:
+    """向「条目型」记忆文件写入一条带时间戳的笔记（同主题按 upsert 处理）。
+
+    · 与已有条目完全一致 → 跳过（返回 False）
+    · 相似度 ≥DEDUP_RATIO（同一主题的新表述，例如规则升级、数字变化）→
+      用新条目替换旧条目，而不是再追加一条（返回 True）
+    · 其余情况追加到末尾（返回 True）
+
     笔记压成单行（换行替换为空格），保持条目文件可按行解析。
     """
     note = re.sub(r"\s+", " ", str(note or "")).strip()
     if not note:
         return False
+    kind = normalize_kind(kind)
     with _lock:
         text = _read(path)
-        for ent in _parse_entries(text):
-            if SequenceMatcher(None, ent["body"], note).ratio() >= DEDUP_RATIO:
+        lines = text.splitlines()
+        best_idx, best_ratio, best_body = -1, 0.0, ""
+        for i, ln in enumerate(lines):
+            parsed = _parse_entries(ln.strip())
+            if not parsed:
+                continue
+            ratio = SequenceMatcher(None, parsed[0]["body"], note).ratio()
+            if ratio > best_ratio:
+                best_idx, best_ratio, best_body = i, ratio, parsed[0]["body"]
+
+        line = _format_entry({"ts": _timestamp(), "kind": kind, "source": source, "body": note})
+        if best_ratio >= DEDUP_RATIO:
+            if best_body == note:
                 return False
-        line = f"- {_timestamp()} · {source} — {note}"
+            lines[best_idx] = line
+            _atomic_write(path, "\n".join(lines).rstrip("\n") + "\n")
+            return True
+
         new_text = text
         if new_text and not new_text.endswith("\n"):
             new_text += "\n"
@@ -278,16 +443,20 @@ def append_note(path: str, note: str, source: str = "对话") -> bool:
     return True
 
 
-def append_user_note(note: str, source: str = "对话") -> bool:
+def append_user_note(note: str, source: str = "对话", kind: str = "pref") -> bool:
     ensure_layout()
     os.makedirs(os.path.dirname(user_profile_path()), exist_ok=True)
-    return append_note(user_profile_path(), note, source)
+    return append_note(user_profile_path(), note, source, kind)
 
 
 def append_project_note(note: str, source: str = "对话",
-                        workspace: str | None = None) -> bool:
+                        workspace: str | None = None, kind: str = "rule") -> bool:
     ensure_layout(workspace)
-    return append_note(project_path(workspace), note, source)
+    path = project_path(workspace)
+    ok = append_note(path, note, source, kind)
+    if ok:
+        prune_entries(path)
+    return ok
 
 
 # ---------------------------------------------------------------- 注入渲染
@@ -308,9 +477,14 @@ def render_memory_block(*, user_text: str, project_text: str,
         sections.append(s)
         used += len(s)
     if project_text:
-        s = "### 当前项目记忆（规则 / 决定 / 踩过的坑，请遵循）\n" + project_text
-        sections.append(s)
-        used += len(s)
+        # 项目记忆占剩余预算的 80%（给历史摘要留 20%）；超预算按条目截断，
+        # 调用方已按「规则 → 决定 → 坑 → 事实」排好序，先丢的自然是低价值内容
+        project_budget = int(max(0, budget - used) * 0.8)
+        body = clip_entries(project_text, project_budget)
+        if body:
+            s = "### 当前项目记忆（规则 / 决定 / 踩过的坑，请遵循）\n" + body
+            sections.append(s)
+            used += len(s)
 
     topic_budget = max(0, budget - used)
     if topic_texts and topic_budget > 0:
@@ -330,6 +504,61 @@ def render_memory_block(*, user_text: str, project_text: str,
     return header + "\n".join(sections)
 
 
+# ---------------------------------------------------------------- 用户显式指令
+
+#: 「请帮我记住…」类指令的前缀：命中即把内容写进用户画像。
+#: 只认祈使句开头，避免「你记住我刚才说的吗」这类问句误触发。
+_REMEMBER_PREFIXES = (
+    "请帮我记住", "帮我记住", "请记住", "以后都记住", "以后请记住",
+)
+#: 这两个必须带冒号才算指令（否则「记住我」会被误判）
+_REMEMBER_COLON_PREFIXES = ("记住", "记一下")
+_REMEMBER_PLAIN_PREFIXES = ("记下来",)
+_CMD_SEPARATORS = " \t　:：,，、"
+
+
+def _clean_remember_body(rest: str) -> str | None:
+    s = rest.lstrip(_CMD_SEPARATORS)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:500] if s else None
+
+
+def parse_remember_command(text: str) -> str | None:
+    """识别用户消息开头的「请帮我记住 XXX」指令，返回要记的正文。
+
+    支持：请帮我记住 / 帮我记住 / 请记住 / 以后都记住 / 以后请记住 /
+         记住：/ 记一下：/ 记下来。没有指令或内容为空时返回 None。
+    """
+    raw = str(text or "").lstrip()
+    for p in _REMEMBER_PREFIXES:
+        if raw.startswith(p):
+            return _clean_remember_body(raw[len(p):])
+    for p in _REMEMBER_COLON_PREFIXES:
+        if raw.startswith(p):
+            rest = raw[len(p):]
+            return _clean_remember_body(rest[1:]) if rest[:1] in (":", "：") else None
+    for p in _REMEMBER_PLAIN_PREFIXES:
+        if raw.startswith(p):
+            return _clean_remember_body(raw[len(p):])
+    return None
+
+
+def infer_user_kind(note: str) -> str:
+    """用户画像条目的类型粗判：偏好类措辞 → pref，其余 → fact。"""
+    text = str(note or "")
+    if any(w in text for w in (
+        "我喜欢", "我偏好", "我习惯", "我不喜欢", "我讨厌", "我希望",
+        "我倾向", "以后都", "请用", "不要用",
+    )):
+        return "pref"
+    return "fact"
+
+
+def is_enabled() -> bool:
+    """记忆总开关（供 Web 层判断显式指令能否写入）。"""
+    return _memory_enabled()
+
+
 # ---------------------------------------------------------------- remember 核心工具
 
 SCOPE_USER = "user"
@@ -345,12 +574,13 @@ def _memory_enabled() -> bool:
         return True
 
 
-def remember(scope: str, note: str) -> str:
+def remember(scope: str, note: str, kind: str | None = None) -> str:
     """核心工具：把一条值得长期保留的信息写入记忆。
 
     scope=user    跨项目的用户偏好/习惯/长期事实 → web_data/memory/user_profile.md
     scope=project 当前项目的规则/决定/踩坑记录   → <workspace>/.memory/project.md
     只记三类：明确偏好、做出的决定、踩过的坑；任务过程数据不要记。
+    kind 用于分级（pref/rule/decision/pitfall/fact），缺省按 scope 推断。
     """
     if not _memory_enabled():
         return "[skipped] 记忆功能已关闭（通用配置里可打开），本次未写入。"
@@ -359,10 +589,16 @@ def remember(scope: str, note: str) -> str:
         return "[error] note 为空，没有可记录的内容。"
     scope = (scope or "").strip().lower()
     if scope == SCOPE_USER:
-        ok = append_user_note(note, source="模型记录")
+        k = normalize_kind(kind) if kind else "pref"
+        if k not in ("pref", "fact"):
+            k = "pref"          # 用户层只收与具体项目无关的偏好 / 长期事实
+        ok = append_user_note(note, source="模型记录", kind=k)
         where = "用户画像（跨项目）"
     elif scope == SCOPE_PROJECT:
-        ok = append_project_note(note, source="模型记录")
+        k = normalize_kind(kind) if kind else "rule"
+        if k not in ("pref", "rule", "decision", "pitfall"):
+            return "[error] 项目记忆只收规则 / 决定 / 踩坑；一次性事实不要记录。"
+        ok = append_project_note(note, source="模型记录", kind=k)
         where = "当前项目记忆"
     else:
         return f"[error] scope 只能是 {SCOPE_USER!r} 或 {SCOPE_PROJECT!r}，收到：{scope!r}"
@@ -388,8 +624,10 @@ _REMEMBER_TOOL = Tool(
     description=(
         "把值得长期保留的信息写入记忆，之后的每次对话都会自动带上。"
         "只记录三类内容：(1) 用户明确表达的偏好与习惯；(2) 已做出的决定/约定；"
-        "(3) 排查过的坑与结论。不要记录一次性任务数据、密钥隐私或未经用户认可的推测。"
+        "(3) 排查过的坑与结论。不要记录一次性任务数据（文件大小、进程/内存数字、"
+        "命令输出、临时文件路径、会话进度）、密钥隐私或未经用户认可的推测。"
         "scope=user 表示跨项目的用户偏好；scope=project 表示当前项目的规则。"
+        "kind 标明类型，便于之后按价值排序与淘汰。"
     ),
     parameters={
         "type": "object",
@@ -398,6 +636,15 @@ _REMEMBER_TOOL = Tool(
                 "type": "string",
                 "enum": [SCOPE_USER, SCOPE_PROJECT],
                 "description": "user=跨项目的用户偏好；project=当前项目的规则/决定/坑",
+            },
+            "kind": {
+                "type": "string",
+                "enum": list(KINDS),
+                "description": (
+                    "pref=偏好/习惯；rule=项目规则；decision=已做决定；"
+                    "pitfall=踩过的坑；fact=长期事实（仅 user 用）。"
+                    "缺省时 user 记 pref、project 记 rule"
+                ),
             },
             "note": {
                 "type": "string",
