@@ -3,7 +3,7 @@
  * Chat / WelcomePane / ConfirmPanel / ToolChain 是纯展示组件。
  */
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, MoreOutlined } from "@ant-design/icons";
+import { DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, MoreOutlined, TeamOutlined, LockOutlined, LogoutOutlined, UserOutlined } from "@ant-design/icons";
 import { Dropdown, Input, message, Modal, Tooltip } from "antd";
 import {
   chatStream,
@@ -36,6 +36,7 @@ import type {
   SessionItem,
   SSEEvent,
   TraceEvent,
+  User,
   WorkspaceItem,
 } from "./types";
 import Chat from "./components/Chat";
@@ -44,6 +45,8 @@ import WorkspaceModal from "./components/WorkspaceModal";
 import WorkspaceMemoryModal from "./components/WorkspaceMemoryModal";
 import SettingsModal from "./components/SettingsModal";
 import type { SettingsTab } from "./components/SettingsModal";
+import AccountSettingsModal from "./components/AccountSettingsModal";
+import ChangePasswordModal from "./components/ChangePasswordModal";
 import Workbench from "./components/Workbench";
 import Trajectory from "./components/Trajectory";
 
@@ -65,7 +68,15 @@ function loadSession(): string {
   return sid;
 }
 
-export default function App() {
+export default function App({
+  user,
+  loginEnabled = true,
+  onLogout,
+}: {
+  user: User;
+  loginEnabled?: boolean;
+  onLogout: () => void;
+}) {
   const [session, setSession] = useState<string>(loadSession);
   const [mode, setMode] = useState<Mode>(() =>
     localStorage.getItem(MODE_KEY) === "chat" ? "chat" : "agent"
@@ -146,6 +157,9 @@ export default function App() {
   // 每次运行结束自增，通知 Trajectory 做一次磁盘全量兜底拉取
   const [tjReload, setTjReload] = useState(0);
   const [statsOpen, setStatsOpen] = useState(false);
+  // 账号管理（仅超管）/ 修改自己的密码
+  const [accountsOpen, setAccountsOpen] = useState(false);
+  const [pwdOpen, setPwdOpen] = useState(false);
   // 搜索命中后要定位闪烁的消息 id
   const [focus, setFocus] = useState<{ id: string; nonce: number } | null>(null);
   const pendingHit = useRef<number | null>(null);
@@ -846,7 +860,6 @@ export default function App() {
             setSettingsTab("general");
             setSettingsOpen(true);
           }}
-          onLogin={() => message.info("「登录」功能开发中")}
         />
       </aside>
 
@@ -907,7 +920,7 @@ export default function App() {
                       icon: <ExportOutlined />,
                       label: "导出为 Markdown",
                     },
-                    { type: "divider" },
+                    { type: "divider" as const },
                     {
                       key: "clear",
                       icon: <DeleteOutlined />,
@@ -928,6 +941,63 @@ export default function App() {
               </Dropdown>
             </Tooltip>
             {/* 联网搜索开关已迁到输入框工具栏（每个对话独立配置） */}
+            {/* 账号菜单：账号相关功能统一收在这个用户图标下（--no-login 时没有身份，不显示） */}
+            {loginEnabled && (
+              <Tooltip title={user.display_name || user.username}>
+                <Dropdown
+                  trigger={["click"]}
+                  placement="bottomRight"
+                  menu={{
+                    items: [
+                      {
+                        key: "me",
+                        disabled: true,
+                        label: (
+                          <span className="user-menu-me">
+                            <span className="user-menu-name">
+                              {user.display_name || user.username}
+                            </span>
+                            <span className="user-menu-role">
+                              {user.role === "superadmin" ? "超级管理员" : "普通用户"}
+                            </span>
+                          </span>
+                        ),
+                      },
+                      { type: "divider" as const },
+                      ...(user.role === "superadmin"
+                        ? [
+                            {
+                              key: "accounts",
+                              icon: <TeamOutlined />,
+                              label: "账号管理",
+                            },
+                          ]
+                        : []),
+                      {
+                        key: "password",
+                        icon: <LockOutlined />,
+                        label: "修改密码",
+                      },
+                      { type: "divider" as const },
+                      {
+                        key: "logout",
+                        icon: <LogoutOutlined />,
+                        label: "退出登录",
+                      },
+                    ],
+                    onClick: ({ key }) => {
+                      if (key === "accounts") setAccountsOpen(true);
+                      else if (key === "password") setPwdOpen(true);
+                      else if (key === "logout") onLogout();
+                    },
+                  }}
+                >
+                  <span className="tb-icon-btn user-btn">
+                    <UserOutlined />
+                  </span>
+                </Dropdown>
+              </Tooltip>
+            )}
             {/* 工作台抽屉开关 */}
             <Tooltip title={workbenchOpen ? "收起工作区" : "工作区文件"}>
               <span
@@ -1017,6 +1087,17 @@ export default function App() {
             refreshModels();
           }}
         />
+
+        {loginEnabled && (
+          <>
+            <AccountSettingsModal
+              open={accountsOpen}
+              current={user}
+              onClose={() => setAccountsOpen(false)}
+            />
+            <ChangePasswordModal open={pwdOpen} onClose={() => setPwdOpen(false)} />
+          </>
+        )}
 
         {/* 用量统计面板 */}
         <Modal

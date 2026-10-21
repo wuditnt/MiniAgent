@@ -4,7 +4,7 @@
  *  ② 大号「新会话」按钮
  *  ③ 功能菜单区：插件 / 自动化任务（暂为占位，点击仅提示）
  *  ④ 工作区：按工作区分组的会话列表（搜索 / 新建 / 改名 / 删除）
- *  ⑤ 底部设置区：「…」弹出菜单（系统配置 / 登录）
+ *  ⑤ 底部设置区：直接进入系统配置
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -13,7 +13,6 @@ import {
   BulbOutlined,
   DeleteOutlined,
   EditOutlined,
-  EllipsisOutlined,
   FolderOpenOutlined,
   HistoryOutlined,
   MenuOutlined,
@@ -22,9 +21,8 @@ import {
   SearchOutlined,
   SettingOutlined,
   ThunderboltOutlined,
-  UserOutlined,
 } from "@ant-design/icons";
-import { Dropdown, Empty, Input, Popconfirm, Tooltip, message } from "antd";
+import { Empty, Input, Popconfirm, Tooltip, message } from "antd";
 import type { SessionItem, WorkspaceItem } from "../types";
 
 interface Props {
@@ -56,8 +54,6 @@ interface Props {
   onSearch: (q: string) => void;
   /** 打开「系统配置」弹窗（模型 / 通用） */
   onOpenSettings: () => void;
-  /** 登录（占位，暂不实现） */
-  onLogin: () => void;
 }
 
 /** 把命中的词用 <mark> 包起来（多词 AND，命中片段全部高亮） */
@@ -129,7 +125,6 @@ export default function Sidebar({
   remote = false,
   onSearch,
   onOpenSettings,
-  onLogin,
 }: Props) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -417,26 +412,12 @@ export default function Sidebar({
         </div>
       </div>
 
-      {/* ⑤ 底部设置区 */}
+      {/* ⑤ 底部设置区：直接进入系统配置 */}
       <div className="sidebar-foot">
-        <Dropdown
-          trigger={["click"]}
-          placement="topLeft"
-          menu={{
-            items: [
-              { key: "settings", label: "系统配置", icon: <SettingOutlined /> },
-              { key: "login", label: "登录", icon: <UserOutlined /> },
-            ],
-            onClick: ({ key }) => {
-              if (key === "settings") onOpenSettings();
-              else onLogin();
-            },
-          }}
-        >
-          <div className="foot-more">
-            <EllipsisOutlined />
-          </div>
-        </Dropdown>
+        <div className="foot-settings" onClick={onOpenSettings}>
+          <SettingOutlined />
+          <span>系统配置</span>
+        </div>
       </div>
     </div>
   );

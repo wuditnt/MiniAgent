@@ -27,6 +27,11 @@ Web UI 开关（配合 --web）：
     --port N            监听端口（默认 8000）
     --host ADDR         监听地址（默认 0.0.0.0，本机 + 局域网均可访问）
                         传 127.0.0.1 可收窄为仅本机；启动时会打印局域网访问地址
+    --no-login          关闭登录校验（仅调试/自动化测试；任何能访问端口的人都能操作本机）
+
+账号：
+    首次启动会自动创建 admin / admin123，登录后强制改密；
+    --reset-password U  在终端重置某个账号的密码后退出（忘记密码的救援通道）
 
 结构：main() 只做编排，真正的活儿在下面的分段函数里：
     _bootstrap        所有路径共用的前半场（环境变量 → UI → 插件 → 技能）
@@ -131,6 +136,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--plain", action="store_true", help="不使用彩色输出")
     ap.add_argument("-q", "--quiet", action="store_true", help="不显示工具调用轨迹")
     ap.add_argument("--web", action="store_true", help="启动 Web UI（浏览器聊天界面）")
+    ap.add_argument("--no-login", action="store_true",
+                    help="关闭登录校验（仅调试/自动化测试；任何能访问端口的人都能操作本机）")
+    ap.add_argument("--reset-password", metavar="USERNAME", default=None,
+                    help="重置某个本地账号的密码后退出（终端救援通道）")
     ap.add_argument("--port", type=int, default=8000, help="Web UI 监听端口（默认 8000）")
     ap.add_argument(
         "--host",
@@ -405,6 +414,7 @@ def _run_web(
             model=args.model or os.environ.get("OPENAI_MODEL"),
             system_prompt=system_prompt,
             max_turns=args.max_turns,
+            login_enabled=not args.no_login,
         )
     except OSError as e:
         logging.getLogger("mini-agent.app").exception("Web UI 启动失败：%s", e)
@@ -416,10 +426,49 @@ def _run_web(
     return 0
 
 
+# ---------------------------------------------------------------- 账号救援
+
+def _cmd_reset_password(username: str) -> int:
+    """终端救援通道：重置本地账号密码后退出。
+
+    为什么不做成 HTTP 接口：那等于给系统留一个「无需登录即可改密」的后门。
+    只有能登录这台机器、能执行命令的人，才应该拥有这个能力。
+    """
+    import getpass
+
+    from core import auth
+
+    auth.init_db()
+    if auth.get_user_by_name(username) is None:
+        print(f"错误：账号 {username} 不存在。", file=sys.stderr)
+        return 1
+    try:
+        pwd = getpass.getpass("新密码：")
+        confirm = getpass.getpass("再输一次：")
+    except (EOFError, KeyboardInterrupt):
+        print("\n已取消。", file=sys.stderr)
+        return 1
+    if pwd != confirm:
+        print("错误：两次输入不一致。", file=sys.stderr)
+        return 1
+    try:
+        auth.reset_password(username, pwd)
+    except auth.AuthError as e:
+        print(f"错误：{e.message}", file=sys.stderr)
+        return 1
+    print(f"已重置 {username} 的密码（下次登录后无需再强制改密）。")
+    return 0
+
+
 # ---------------------------------------------------------------- 编排
 
 def main() -> int:
     args = build_parser().parse_args()
+
+    # 账号救援不依赖模型与插件：先处理，避免被「没配 Key」挡在门外
+    if args.reset_password:
+        return _cmd_reset_password(args.reset_password)
+
     ui, skill_loader, skill_report = _bootstrap(args)
 
     # 通用配置（Web UI「系统配置 → 通用配置」可改）：把运行时项先落地；

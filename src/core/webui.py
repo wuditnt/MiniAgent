@@ -27,6 +27,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from core._paths import ROOT
+from core import auth
 from core import events
 from core import logging_setup
 from core import model_config
@@ -48,9 +49,28 @@ MAX_ATTACHMENT_TEXT = 8000     # 文本附件注入消息的内容节选上限�
 ATTACH_DIR = ".attachments"    # 工作区内附件存放子目录
 
 # 远程访问识别：判定依据是 TCP 对端地址 —— 回环地址视为本机，其余视为远程。
-# 该标志目前仅用于 /api/state → 前端侧栏隐藏工作区管理入口（软性收窄）；
-# 接口层面不拦截，远程仍可完整使用包括设置在内的全部功能。多用户权限体系后续再议。
+# 该标志仅用于 /api/state → 前端侧栏隐藏工作区管理入口（软性收窄）；
+# 真正的访问控制由登录会话（core.auth）负责，与本标志无关。
 _LOCAL_CLIENTS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1"})
+
+#: 登录会话 Cookie 名。HttpOnly + SameSite=Lax，脚本读不到、跨站表单带不上。
+_SESSION_COOKIE = "ma_session"
+
+#: Host 头白名单：只认「本机回环 + 本机网卡 IP + 本机主机名 + 显式配置」。
+#: 为什么要校验：DNS rebinding 会把攻击者的域名解析到 127.0.0.1，
+#: 浏览器随后发出的请求会带上受害者的 Cookie —— 但 Host 是攻击者的域名。
+#: 反向代理 / 自定义域名场景用环境变量 MINI_AGENT_ALLOWED_HOSTS 追加（逗号分隔）。
+_ALLOWED_HOSTS_ENV = "MINI_AGENT_ALLOWED_HOSTS"
+_ALLOWED_HOSTS_TTL = 60          # 网卡 IP 可能随 DHCP 变化，缓存 60 秒足够
+_allowed_hosts_cache: tuple[float, frozenset[str]] = (0.0, frozenset())
+_allowed_hosts_lock = threading.Lock()
+
+#: --no-login 时用的占位身份（仅供调试与自动化测试，不写库）
+_LOCAL_USER = {
+    "id": 0, "username": "local", "display_name": "本机用户",
+    "role": auth.ROLE_SUPERADMIN, "disabled": False,
+    "must_change_password": False, "created_at": "", "last_login_at": None,
+}
 
 _DIST = os.path.join(ROOT, "web", "dist")
 _SESSIONS_DIR = os.path.join(ROOT, "web_data", "sessions")  # 会话持久化目录
@@ -992,6 +1012,46 @@ def _lan_addresses() -> list[str]:
     return out
 
 
+def _host_of(header: str) -> str:
+    """从 Host 头取出主机部分：去掉端口，IPv6 去掉方括号。"""
+    host = (header or "").strip().lower()
+    if not host:
+        return ""
+    if host.startswith("["):
+        end = host.find("]")
+        return host[1:end] if end > 0 else host
+    if host.count(":") == 1:          # host:port（裸 IPv6 会有多个冒号）
+        return host.split(":", 1)[0]
+    return host
+
+
+def _allowed_hosts() -> frozenset[str]:
+    """本机允许的 Host 集合。带 60 秒缓存，避免每个请求都去枚举网卡。"""
+    global _allowed_hosts_cache
+    now = time.time()
+    cached_at, cached = _allowed_hosts_cache
+    if cached and now - cached_at < _ALLOWED_HOSTS_TTL:
+        return cached
+
+    hosts = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+    hosts.update(_lan_addresses())
+    name = (socket.gethostname() or "").strip().lower()
+    if name:
+        hosts.add(name)
+        hosts.add(f"{name}.local")
+
+    raw = os.environ.get(_ALLOWED_HOSTS_ENV, "")
+    for item in raw.replace(";", ",").split(","):
+        h = _host_of(item)
+        if h:
+            hosts.add(h)
+
+    frozen = frozenset(hosts)
+    with _allowed_hosts_lock:
+        _allowed_hosts_cache = (now, frozen)
+    return frozen
+
+
 class WebServer:
     """HTTP 服务外壳：装配 handler、会话表与静态托管。"""
 
@@ -1002,12 +1062,14 @@ class WebServer:
         model: str | None = None,
         system_prompt: str = "",
         max_turns: int | None = None,
+        login_enabled: bool = True,
     ) -> None:
         self.host = host
         self.port = port
         self.model = model
         self.system_prompt = system_prompt
         self.max_turns = max_turns      # None = 交给通用配置决定
+        self.login_enabled = login_enabled
         self.sessions: dict[str, _Session] = {}
         self._lock = threading.Lock()
         self._httpd: ThreadingHTTPServer | None = None
@@ -1078,12 +1140,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     #: 本次请求的 body 是否已从 rfile 读完（keep-alive 下必须保证，见 _drain_body）
     _body_read = False
+    #: 本次请求已解析出的登录用户（由 _guard 填充）
+    _user: dict | None = None
+    #: 需要在响应头里补发的 Set-Cookie（_json 统一出口，避免各处漏发）
+    _resp_headers: list[tuple[str, str]] = []
 
     # ---------------------------------------------------------- 基础设施
 
     def handle_one_request(self) -> None:
         """每个请求开始时重置 body 标记（连接是复用的，状态不能跨请求）。"""
         self._body_read = False
+        self._user = None
+        self._resp_headers = []
         super().handle_one_request()
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002, A003
@@ -1123,6 +1191,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for key, value in self._resp_headers:
+            self.send_header(key, value)
+        self._resp_headers = []
         self.end_headers()
         self.wfile.write(body)
 
@@ -1171,10 +1242,91 @@ class _RequestHandler(BaseHTTPRequestHandler):
         """TCP 对端不是回环地址即为远程客户端（手机/局域网其他设备）。"""
         return self.client_address[0] not in _LOCAL_CLIENTS
 
+    # ---------------------------------------------------------- 登录与会话
+
+    def _cookie(self, name: str) -> str:
+        raw = self.headers.get("Cookie") or ""
+        for part in raw.split(";"):
+            key, _, value = part.strip().partition("=")
+            if key == name:
+                return value.strip()
+        return ""
+
+    def _set_cookie(self, name: str, value: str, max_age: int) -> None:
+        self._resp_headers.append(
+            ("Set-Cookie", f"{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}")
+        )
+
+    def _session_token(self) -> str:
+        return self._cookie(_SESSION_COOKIE)
+
+    def _guard(self, route: str) -> bool:
+        """统一登录校验。返回 False 表示已经写好响应，调用方应立即 return。
+
+        白名单只有「登录接口」和「非 /api 的静态资源」——
+        静态资源本身不含数据，未登录也能拿到登录页；数据都在 /api 下。
+        """
+        # Host 校验放在最前面：连域名都不对，就没必要继续解析身份（防 DNS rebinding）
+        host = _host_of(self.headers.get("Host") or "")
+        if not host or host not in _allowed_hosts():
+            _log.warning("http.bad_host host=%r path=%s", self.headers.get("Host"), route)
+            self._json({"error": "Host 不被允许", "code": "BAD_HOST"}, 403)
+            return False
+
+        if not self.web.login_enabled:
+            self._user = dict(_LOCAL_USER)
+            return True
+        if route == "/api/auth/login" or not route.startswith("/api/"):
+            return True
+        user = None
+        token = self._session_token()
+        if token:
+            try:
+                user = auth.resolve_session(token)
+            except Exception:  # noqa: BLE001 —— 数据库异常按未登录处理，绝不 500
+                _log.exception("auth.resolve_failed")
+                user = None
+        if user is None:
+            self._json(
+                {"error": "未登录或登录已过期", "code": "UNAUTHENTICATED"}, 401
+            )
+            return False
+        if user["must_change_password"] and route not in (
+            # 这三个接口必须放行，否则「未改密」会连自己也认不出来：
+            #   me      → 前端要知道当前是谁、是否待改密
+            #   password→ 唯一的出口
+            #   logout  → 允许退出换个账号
+            "/api/auth/me",
+            "/api/auth/password",
+            "/api/auth/logout",
+        ):
+            self._json(
+                {"error": "请先修改初始密码", "code": "MUST_CHANGE_PASSWORD"}, 403
+            )
+            return False
+        self._user = user
+        return True
+
+    def _require_superadmin(self) -> bool:
+        user = self._user or {}
+        if user.get("role") != auth.ROLE_SUPERADMIN:
+            self._json({"error": "仅超级管理员可执行该操作", "code": "FORBIDDEN"}, 403)
+            return False
+        return True
+
+    def _client_ip(self) -> str:
+        return str(self.client_address[0] if self.client_address else "")
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         route = parsed.path
-        if route == "/api/state":
+        if not self._guard(route):
+            return
+        if route == "/api/auth/me":
+            self._handle_auth_me()
+        elif route == "/api/users":
+            self._handle_users_list()
+        elif route == "/api/state":
             self._handle_state()
         elif route == "/api/history":
             self._handle_history(parse_qs(parsed.query))
@@ -1207,7 +1359,19 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         route = urlparse(self.path).path
-        if route == "/api/chat":
+        if not self._guard(route):
+            return
+        if route == "/api/auth/login":
+            self._handle_auth_login()
+        elif route == "/api/auth/logout":
+            self._handle_auth_logout()
+        elif route == "/api/auth/password":
+            self._handle_auth_password()
+        elif route == "/api/users":
+            self._handle_user_create()
+        elif (m := re.match(r"^/api/users/(\d+)/logout-all$", route)):
+            self._handle_user_logout_all(int(m.group(1)))
+        elif route == "/api/chat":
             self._handle_chat()
         elif route == "/api/upload":
             self._handle_upload()
@@ -1242,6 +1406,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:  # noqa: N802
         route = urlparse(self.path).path
+        if not self._guard(route):
+            return
+        if (m := re.match(r"^/api/users/(\d+)$", route)):
+            self._handle_user_update(int(m.group(1)))
+            return
         if route == "/api/settings":
             self._handle_settings_put()
             return
@@ -1264,6 +1433,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         route = urlparse(self.path).path
+        if not self._guard(route):
+            return
+        if (m := re.match(r"^/api/users/(\d+)$", route)):
+            self._handle_user_delete(int(m.group(1)))
+            return
         if route == "/api/memory/topic":
             self._handle_memory_topic_delete()
             return
@@ -1282,6 +1456,125 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self._fail(404, f"未知接口：{route}")
 
     # ---------------------------------------------------------- API 实现
+
+    # ---------------------------------------------------------- 登录与账号
+
+    def _handle_auth_me(self) -> None:
+        self._json({"user": self._user, "login_enabled": self.web.login_enabled})
+
+    def _handle_auth_login(self) -> None:
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON（{username, password}）")
+            return
+        username = str(body.get("username") or "")
+        password = str(body.get("password") or "")
+        try:
+            token, user = auth.login(
+                username, password,
+                ip=self._client_ip(),
+                user_agent=self.headers.get("User-Agent", ""),
+            )
+        except auth.AuthError as e:
+            _log.info("auth.login_failed user=%s code=%s", username[:32], e.code)
+            self._json({"error": e.message, "code": e.code},
+                       429 if e.code == "LOCKED" else 401)
+            return
+        self._set_cookie(_SESSION_COOKIE, token, auth.SESSION_TTL)
+        _log.info("auth.login_ok user=%s ip=%s", user["username"], self._client_ip())
+        self._json({"user": user, "login_enabled": True})
+
+    def _handle_auth_logout(self) -> None:
+        auth.delete_session(self._session_token())
+        self._set_cookie(_SESSION_COOKIE, "", 0)
+        self._json({"ok": True})
+
+    def _handle_auth_password(self) -> None:
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON（{old_password, new_password}）")
+            return
+        user = self._user or {}
+        try:
+            auth.change_password(
+                int(user.get("id") or 0),
+                str(body.get("old_password") or ""),
+                str(body.get("new_password") or ""),
+                keep_token=self._session_token(),
+            )
+        except auth.AuthError as e:
+            self._fail(400, e.message)
+            return
+        self._json({"ok": True, "user": auth.get_user(int(user["id"]))})
+
+    def _handle_users_list(self) -> None:
+        if not self._require_superadmin():
+            return
+        self._json({"users": auth.list_users()})
+
+    def _handle_user_create(self) -> None:
+        if not self._require_superadmin():
+            return
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON")
+            return
+        try:
+            user = auth.create_user(
+                str(body.get("username") or ""),
+                str(body.get("password") or ""),
+                display_name=str(body.get("display_name") or ""),
+                role=str(body.get("role") or auth.ROLE_USER),
+                must_change_password=bool(body.get("must_change_password", True)),
+            )
+        except auth.AuthError as e:
+            self._fail(400, e.message)
+            return
+        self._json({"user": user}, 201)
+
+    def _handle_user_update(self, uid: int) -> None:
+        if not self._require_superadmin():
+            return
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON")
+            return
+        try:
+            user = auth.update_user(
+                uid,
+                actor_id=int((self._user or {}).get("id") or 0),
+                display_name=body.get("display_name") if "display_name" in body else None,
+                role=str(body["role"]) if "role" in body else None,
+                disabled=bool(body["disabled"]) if "disabled" in body else None,
+                password=str(body["password"]) if body.get("password") else None,
+                # 管理员重置密码后强制下次登录改密（自助改密走 /api/auth/password，不受影响）
+                must_change_password=True if body.get("password") else None,
+            )
+        except auth.AuthError as e:
+            self._fail(400, e.message)
+            return
+        self._json({"user": user})
+
+    def _handle_user_delete(self, uid: int) -> None:
+        if not self._require_superadmin():
+            return
+        try:
+            auth.delete_user(uid, actor_id=int((self._user or {}).get("id") or 0))
+        except auth.AuthError as e:
+            self._fail(400, e.message)
+            return
+        self._json({"ok": True})
+
+    def _handle_user_logout_all(self, uid: int) -> None:
+        if not self._require_superadmin():
+            return
+        if auth.get_user(uid) is None:
+            self._fail(404, "账号不存在")
+            return
+        auth.delete_user_sessions(uid)
+        self._json({"ok": True})
+
+    # ---------------------------------------------------------- 状态
 
     def _handle_state(self) -> None:
         sessions = []
@@ -2477,10 +2770,22 @@ def serve(
     model: str | None = None,
     system_prompt: str = "",
     max_turns: int | None = None,
+    login_enabled: bool = True,
 ) -> None:
     """便捷入口：构建服务并阻塞运行（main.py 的 --web 走这里）。"""
     settings.apply_to_runtime()      # 通用配置里的运行时项（工具输出上限、日志）先落地
+    if login_enabled:
+        auth.init_db()
+        if auth.ensure_default_admin():
+            print(
+                f"已创建默认管理员账号 {auth.DEFAULT_ADMIN} / "
+                f"{auth.DEFAULT_ADMIN_PASSWORD}，首次登录后必须修改密码。"
+            )
+        auth.cleanup_expired()
+    else:
+        print("警告：已禁用登录（--no-login），任何能访问该端口的人都能操作本机。")
     WebServer(
         host=host, port=port, model=model,
         system_prompt=system_prompt, max_turns=max_turns,
+        login_enabled=login_enabled,
     ).serve_forever()

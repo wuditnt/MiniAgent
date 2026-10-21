@@ -71,6 +71,7 @@ SUITES: list[tuple[str, str, bool]] = [
     ("test_events.py", "事件流 8 项：只追加 / 请求可重建 / 裁剪留痕 / 开关 / 兜底", False),
     ("test_model_config.py", "推理等级通用化 8 项：厂家 spec（low/high/max）/ 三种参数风格与 values 重映射 / 迁移 / 会话解析", False),
     ("test_web_search.py", "联网搜索 3 项：后端选择 / DeepSeek Key 复用 / 请求与解析", False),
+    ("test_auth.py", "登录与账号 9 项：建库 / 默认超管 / 哈希 / 会话 / 限流 / 保护规则 / 改密 / 写入节流", False),
     ("test_net_tools.py", "网络工具 4 项：云端/本地分派 / 失败回退 / 协议校验 / Fetch 请求解析", False),
     ("test_ask.py", "内联提问 12 项：返回协议 / 选项规范化 / 工具契约 / 等待桥", False),
     ("test_real_mcp_cancel.py", "真实模型 + 真 MCP server：取消通知全链路", True),

@@ -204,6 +204,21 @@ def scenario_registry_matrix() -> None:
     print("  [1] 会话工具表矩阵（chat±web / agent±web）通过")
 
 
+def scenario_host_guard() -> None:
+    """Host 头白名单：本机地址放行，外部域名拒绝（防 DNS rebinding）。"""
+    from core.webui import _allowed_hosts, _host_of
+
+    assert _host_of("127.0.0.1:8000") == "127.0.0.1"
+    assert _host_of("LOCALHOST:8000") == "localhost"
+    assert _host_of("[::1]:8000") == "::1"
+    assert _host_of("my-pc.local") == "my-pc.local"
+
+    allowed = _allowed_hosts()
+    assert "localhost" in allowed and "127.0.0.1" in allowed
+    assert "evil.example.com" not in allowed
+    print("  [0] Host 头白名单通过")
+
+
 def scenario_display_grouping() -> None:
     """一次回复只呈现一个气泡：ReAct 多段 assistant/tool + 内部注入消息必须合并。
 
@@ -845,10 +860,11 @@ def main() -> int:
     mock.daemon_threads = True
     threading.Thread(target=mock.serve_forever, daemon=True).start()
 
-    # 被测的 Web UI 服务
+    # 被测的 Web UI 服务。登录校验另有用例覆盖，这里统一关掉，
+    # 避免每个场景都要先走一遍登录、拿 Cookie。
     from core.webui import WebServer
 
-    wsrv = WebServer(port=WEB_PORT, model="mock-gpt")
+    wsrv = WebServer(port=WEB_PORT, model="mock-gpt", login_enabled=False)
     threading.Thread(target=wsrv.serve_forever, daemon=True).start()
     # 测试里若有确认没被应答，10s 就该超时拒绝并暴露问题，不必等 120s
     _webui.CONFIRM_TIMEOUT = 10
@@ -867,6 +883,7 @@ def main() -> int:
     results: list[tuple[str, bool]] = []
     scenarios = [
         ("会话工具表矩阵", scenario_registry_matrix),
+        ("Host 头白名单", scenario_host_guard),
         ("展示分组-注入不拆气泡", scenario_display_grouping),
         ("会话标题生成与锁定", scenario_session_title),
         ("chat 模式 + history", scenario_chat_and_history),

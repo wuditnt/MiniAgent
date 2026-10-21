@@ -350,3 +350,28 @@ export interface ToolInfo {
   exclusive: boolean;
   signature: string;
 }
+
+// ---------------------------------------------------------------- 登录与账号
+
+/** 账号角色：superadmin 管账号，user 只能用功能 */
+export type UserRole = "superadmin" | "user";
+
+/** 一个本地账号（后端永不返回密码哈希） */
+export interface User {
+  id: number;
+  username: string;
+  display_name: string;
+  role: UserRole;
+  disabled: boolean;
+  /** 首次登录 / 管理员重置后必须改密，改完才放行其它接口 */
+  must_change_password: boolean;
+  created_at: string;
+  last_login_at: string | null;
+}
+
+/** GET /api/auth/me */
+export interface AuthMe {
+  user: User | null;
+  /** --no-login 时为 false（此时 user 是后端给的占位身份） */
+  login_enabled: boolean;
+}

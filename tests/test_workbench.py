@@ -270,7 +270,8 @@ def main() -> int:
     original = workspace_config.resolve_path
     workspace_config.resolve_path = lambda _wid: ws  # type: ignore[assignment]
 
-    srv = WebServer(host="127.0.0.1", port=PORT)
+    # 本用例只验证文件浏览接口，登录校验由 test_auth.py 覆盖
+    srv = WebServer(host="127.0.0.1", port=PORT, login_enabled=False)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     for _ in range(50):
         try:

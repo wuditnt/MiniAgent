@@ -19,6 +19,8 @@ import type {
   TestResult,
   ToolInfo,
   TrajectoryData,
+  User,
+  UserRole,
   WorkspaceDirData,
   WorkspaceFileData,
   WorkspaceItem,
@@ -35,8 +37,24 @@ async function readError(res: Response): Promise<string> {
   return `HTTP ${res.status}`;
 }
 
+// ---------------------------------------------------------------- 请求出口
+
+/** 401 时通知上层切回登录页（由 AuthGate 注册，避免每个调用方各写一遍） */
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  unauthorizedHandler = fn;
+}
+
+/** 统一请求出口：仅额外处理 401，其余原样返回给调用方判断 */
+async function req(input: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(input, init);
+  if (res.status === 401) unauthorizedHandler?.();
+  return res;
+}
+
 export async function fetchState(): Promise<AgentState> {
-  const res = await fetch("/api/state");
+  const res = await req("/api/state");
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
@@ -44,7 +62,7 @@ export async function fetchState(): Promise<AgentState> {
 export async function fetchHistory(
   session: string
 ): Promise<{ session: string; messages: HistoryMessage[] }> {
-  const res = await fetch(`/api/history?session=${encodeURIComponent(session)}`);
+  const res = await req(`/api/history?session=${encodeURIComponent(session)}`);
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
@@ -60,7 +78,7 @@ export async function fetchTrajectory(
     from_seq: String(fromSeq),
     limit: String(limit),
   });
-  const res = await fetch(`/api/trajectory?${qs}`);
+  const res = await req(`/api/trajectory?${qs}`);
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
@@ -70,7 +88,7 @@ export async function postConfirm(
   approve: boolean,
   session: string
 ): Promise<void> {
-  const res = await fetch("/api/confirm", {
+  const res = await req("/api/confirm", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id, approve, session }),
@@ -84,7 +102,7 @@ export async function postAnswer(
   answer: string,
   session: string
 ): Promise<void> {
-  const res = await fetch("/api/answer", {
+  const res = await req("/api/answer", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id, answer, session }),
@@ -93,7 +111,7 @@ export async function postAnswer(
 }
 
 export async function postStop(session: string): Promise<void> {
-  const res = await fetch("/api/stop", {
+  const res = await req("/api/stop", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session }),
@@ -110,7 +128,7 @@ export async function uploadFile(
     const reader = new FileReader();
     reader.onload = async () => {
       try {
-        const res = await fetch("/api/upload", {
+        const res = await req("/api/upload", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -139,7 +157,7 @@ export async function fetchSessions(
   if (q) params.set("q", q);
   if (workspace) params.set("workspace", workspace);
   const qs = params.toString();
-  const res = await fetch(`/api/sessions${qs ? `?${qs}` : ""}`);
+  const res = await req(`/api/sessions${qs ? `?${qs}` : ""}`);
   if (!res.ok) throw new Error(await readError(res));
   return (await res.json()).sessions;
 }
@@ -147,7 +165,7 @@ export async function fetchSessions(
 export async function createSession(
   workspace: string = ""
 ): Promise<{ id: string; title: string; workspace_id: string }> {
-  const res = await fetch("/api/sessions", {
+  const res = await req("/api/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ workspace }),
@@ -157,13 +175,13 @@ export async function createSession(
 }
 
 export async function deleteSession(sid: string): Promise<void> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}`, { method: "DELETE" });
+  const res = await req(`/api/sessions/${encodeURIComponent(sid)}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await readError(res));
 }
 
 /** 截断会话：保留前 keep 条 user/assistant 消息（不含 system），删除其后的全部内容 */
 export async function truncateSession(sid: string, keep: number): Promise<{ ok: boolean; keep: number }> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/truncate`, {
+  const res = await req(`/api/sessions/${encodeURIComponent(sid)}/truncate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ keep }),
@@ -174,7 +192,7 @@ export async function truncateSession(sid: string, keep: number): Promise<{ ok: 
 
 /** 修改会话标题（改过之后后端不再按首条消息自动生成） */
 export async function updateSession(sid: string, title: string): Promise<{ id: string; title: string }> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}`, {
+  const res = await req(`/api/sessions/${encodeURIComponent(sid)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
@@ -191,7 +209,7 @@ export async function setSessionModel(
   sid: string,
   opts: { model_id?: string; reasoning?: string; web?: boolean }
 ): Promise<{ ok: boolean; model_id: string | null; reasoning: string | null; web: boolean }> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/model`, {
+  const res = await req(`/api/sessions/${encodeURIComponent(sid)}/model`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(opts),
@@ -204,13 +222,13 @@ export async function setSessionModel(
 
 /** 弹出本机原生「选择文件夹」对话框（后端 tkinter 实现）；取消返回 null */
 export async function pickFolder(): Promise<string | null> {
-  const res = await fetch("/api/workspaces/pick", { method: "POST" });
+  const res = await req("/api/workspaces/pick", { method: "POST" });
   if (!res.ok) throw new Error(await readError(res));
   return (await res.json()).path ?? null;
 }
 
 export async function fetchWorkspaces(): Promise<WorkspaceItem[]> {
-  const res = await fetch("/api/workspaces");
+  const res = await req("/api/workspaces");
   if (!res.ok) throw new Error(await readError(res));
   return (await res.json()).workspaces;
 }
@@ -222,7 +240,7 @@ export async function fetchWorkspaceDir(
   path = ""
 ): Promise<WorkspaceDirData> {
   const qs = new URLSearchParams({ workspace_id: workspaceId, path });
-  const res = await fetch(`/api/workspace/dir?${qs}`);
+  const res = await req(`/api/workspace/dir?${qs}`);
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
@@ -232,7 +250,7 @@ export async function fetchWorkspaceFile(
   path: string
 ): Promise<WorkspaceFileData> {
   const qs = new URLSearchParams({ workspace_id: workspaceId, path });
-  const res = await fetch(`/api/workspace/file?${qs}`);
+  const res = await req(`/api/workspace/file?${qs}`);
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
@@ -247,7 +265,7 @@ export async function createWorkspace(
   name: string,
   path: string
 ): Promise<WorkspaceItem> {
-  const res = await fetch("/api/workspaces", {
+  const res = await req("/api/workspaces", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, path }),
@@ -260,7 +278,7 @@ export async function updateWorkspace(
   wid: string,
   patch: { name?: string; path?: string }
 ): Promise<WorkspaceItem> {
-  const res = await fetch(`/api/workspaces/${encodeURIComponent(wid)}`, {
+  const res = await req(`/api/workspaces/${encodeURIComponent(wid)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
@@ -270,14 +288,14 @@ export async function updateWorkspace(
 }
 
 export async function deleteWorkspace(wid: string): Promise<void> {
-  const res = await fetch(`/api/workspaces/${encodeURIComponent(wid)}`, { method: "DELETE" });
+  const res = await req(`/api/workspaces/${encodeURIComponent(wid)}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await readError(res));
 }
 
 // ---------------------------------------------------------------- 模型配置
 
 export async function fetchModels(): Promise<ModelsInfo> {
-  const res = await fetch("/api/models");
+  const res = await req("/api/models");
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
@@ -289,7 +307,7 @@ export async function createModel(payload: {
   api_key: string;
   model: string;
 }): Promise<{ id: string }> {
-  const res = await fetch("/api/models", {
+  const res = await req("/api/models", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -302,7 +320,7 @@ export async function updateModel(
   id: string,
   patch: { name?: string; base_url?: string; api_key?: string; model?: string }
 ): Promise<void> {
-  const res = await fetch(`/api/models/${encodeURIComponent(id)}`, {
+  const res = await req(`/api/models/${encodeURIComponent(id)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
@@ -311,12 +329,12 @@ export async function updateModel(
 }
 
 export async function deleteModel(id: string): Promise<void> {
-  const res = await fetch(`/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const res = await req(`/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await readError(res));
 }
 
 export async function testModel(id: string): Promise<TestResult> {
-  const res = await fetch(`/api/models/${encodeURIComponent(id)}/test`, {
+  const res = await req(`/api/models/${encodeURIComponent(id)}/test`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: "{}",
@@ -326,7 +344,7 @@ export async function testModel(id: string): Promise<TestResult> {
 }
 
 export async function testModelRaw(base_url: string, api_key: string): Promise<TestResult> {
-  const res = await fetch("/api/models/test", {
+  const res = await req("/api/models/test", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ base_url, api_key }),
@@ -339,7 +357,7 @@ export async function testModelRaw(base_url: string, api_key: string): Promise<T
 export async function setModelReasoning(
   level: string
 ): Promise<{ ok: boolean; reasoning: string }> {
-  const res = await fetch("/api/models/reasoning", {
+  const res = await req("/api/models/reasoning", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ level }),
@@ -351,14 +369,14 @@ export async function setModelReasoning(
 // ---------------------------------------------------------------- 通用配置
 
 export async function fetchSettings(): Promise<SettingsInfo> {
-  const res = await fetch("/api/settings");
+  const res = await req("/api/settings");
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
 
 /** 获取全部工具列表（插件管理界面用） */
 export async function fetchTools(): Promise<{ tools: ToolInfo[]; groups: Record<string, ToolInfo[]>; sources: Record<string, number> }> {
-  const res = await fetch("/api/tools");
+  const res = await req("/api/tools");
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
@@ -367,7 +385,7 @@ export async function fetchTools(): Promise<{ tools: ToolInfo[]; groups: Record<
 export async function updateSettings(
   patch: Partial<GeneralSettings> | { reset: true }
 ): Promise<SettingsInfo> {
-  const res = await fetch("/api/settings", {
+  const res = await req("/api/settings", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
@@ -380,7 +398,7 @@ export async function updateSettings(
 
 /** 读取当前工作区的三层记忆（用户画像 / 项目记忆 / 主题摘要） */
 export async function fetchMemory(workspaceId: string): Promise<MemoryData> {
-  const res = await fetch(`/api/memory?workspace_id=${encodeURIComponent(workspaceId)}`);
+  const res = await req(`/api/memory?workspace_id=${encodeURIComponent(workspaceId)}`);
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
@@ -391,7 +409,7 @@ export async function saveMemory(
   content: string,
   workspaceId: string
 ): Promise<void> {
-  const res = await fetch("/api/memory", {
+  const res = await req("/api/memory", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ scope, content, workspace_id: workspaceId }),
@@ -401,11 +419,103 @@ export async function saveMemory(
 
 /** 删除一条主题摘要 */
 export async function deleteMemoryTopic(session: string, workspaceId: string): Promise<void> {
-  const res = await fetch("/api/memory/topic", {
+  const res = await req("/api/memory/topic", {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session, workspace_id: workspaceId }),
   });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+// ---------------------------------------------------------------- 登录与账号
+
+/** 当前登录状态；未登录返回 user=null（不抛异常，供启动时判断） */
+export async function fetchAuthMe(): Promise<{ user: User | null; login_enabled: boolean }> {
+  const res = await req("/api/auth/me");
+  if (res.status === 401) return { user: null, login_enabled: true };
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function login(username: string, password: string): Promise<User> {
+  const res = await req("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()).user;
+}
+
+export async function logout(): Promise<void> {
+  const res = await req("/api/auth/logout", { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+/** 修改自己的密码（首次登录强制改密走同一个接口） */
+export async function changePassword(
+  oldPassword: string,
+  newPassword: string
+): Promise<User> {
+  const res = await req("/api/auth/password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()).user;
+}
+
+// ---------------------------------------------------------------- 账号管理（超管）
+
+export async function fetchUsers(): Promise<User[]> {
+  const res = await req("/api/users");
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()).users;
+}
+
+export async function createUser(payload: {
+  username: string;
+  password: string;
+  display_name?: string;
+  role?: UserRole;
+  must_change_password?: boolean;
+}): Promise<User> {
+  const res = await req("/api/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()).user;
+}
+
+export async function updateUser(
+  id: number,
+  patch: {
+    display_name?: string;
+    role?: UserRole;
+    disabled?: boolean;
+    password?: string;
+  }
+): Promise<User> {
+  const res = await req(`/api/users/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()).user;
+}
+
+export async function deleteUser(id: number): Promise<void> {
+  const res = await req(`/api/users/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+/** 强制某账号下线（删掉它的全部登录会话） */
+export async function logoutAllSessions(id: number): Promise<void> {
+  const res = await req(`/api/users/${id}/logout-all`, { method: "POST" });
   if (!res.ok) throw new Error(await readError(res));
 }
 
@@ -431,7 +541,7 @@ export async function chatStream(
   onEvent: (ev: SSEEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {
-  const res = await fetch("/api/chat", {
+  const res = await req("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(opts),
