@@ -41,6 +41,7 @@ import type {
 import Chat from "./components/Chat";
 import Sidebar from "./components/Sidebar";
 import WorkspaceModal from "./components/WorkspaceModal";
+import WorkspaceMemoryModal from "./components/WorkspaceMemoryModal";
 import SettingsModal from "./components/SettingsModal";
 import type { SettingsTab } from "./components/SettingsModal";
 import Workbench from "./components/Workbench";
@@ -96,6 +97,8 @@ export default function App() {
     item?: WorkspaceItem;
     pickedPath?: string;
   } | null>(null);
+  // 工作区记忆弹窗：从侧栏某个工作区的快捷工具打开
+  const [wsMemory, setWsMemory] = useState<WorkspaceItem | null>(null);
   // 窄屏（≤768px）默认收起侧栏，给聊天区留足空间
   const [collapsed, setCollapsed] = useState(() => typeof window !== "undefined" && window.innerWidth <= 768);
   // 窄屏下侧栏是浮层（抽屉）：展开时点空白处应收起，所以需要知道当前是否浮层模式
@@ -835,6 +838,7 @@ export default function App() {
           onCreateWorkspace={handleCreateWorkspace}
           onRenameWorkspace={handleRenameWorkspace}
           onDeleteWorkspace={handleDeleteWorkspace}
+          onOpenWorkspaceMemory={setWsMemory}
           onSearch={(q) => refreshSessions(q)}
           onRenameSession={handleRenameSession}
           onReplaySession={handleReplaySession}
@@ -993,6 +997,13 @@ export default function App() {
           pickedPath={wsModal?.pickedPath ?? null}
           onCancel={() => setWsModal(null)}
           onSubmit={handleWorkspaceSubmit}
+        />
+
+        {/* 工作区记忆：从左侧抽屉的工作区快捷工具打开 */}
+        <WorkspaceMemoryModal
+          open={wsMemory !== null}
+          workspace={wsMemory}
+          onClose={() => setWsMemory(null)}
         />
 
         <SettingsModal

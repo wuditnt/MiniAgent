@@ -10,6 +10,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   AppstoreOutlined,
+  BulbOutlined,
   DeleteOutlined,
   EditOutlined,
   EllipsisOutlined,
@@ -48,6 +49,8 @@ interface Props {
   onCreateWorkspace: () => void;
   onRenameWorkspace: (w: WorkspaceItem) => void;
   onDeleteWorkspace: (w: WorkspaceItem) => void;
+  /** 打开该工作区的「工作区记忆」页（项目记忆 + 主题摘要） */
+  onOpenWorkspaceMemory: (w: WorkspaceItem) => void;
   /** 远程访问时隐藏工作区新建/改名/删除入口（后端同样 403 拦截） */
   remote?: boolean;
   onSearch: (q: string) => void;
@@ -122,6 +125,7 @@ export default function Sidebar({
   onCreateWorkspace,
   onRenameWorkspace,
   onDeleteWorkspace,
+  onOpenWorkspaceMemory,
   remote = false,
   onSearch,
   onOpenSettings,
@@ -275,6 +279,13 @@ export default function Sidebar({
                     </span>
                     <span className="ws-count">{list.length + (draftHere ? 1 : 0)}</span>
                     <span className="ws-actions" onClick={(e) => e.stopPropagation()}>
+                      {/* 工作区记忆：项目记忆 + 主题摘要（放在改名左边） */}
+                      <Tooltip title="工作区记忆">
+                        <BulbOutlined
+                          className="ws-action"
+                          onClick={() => onOpenWorkspaceMemory(w)}
+                        />
+                      </Tooltip>
                       {!remote && (
                         <>
                           <Tooltip title="改名">

@@ -1628,6 +1628,31 @@ body,
   color: #999;
 }
 
+/* ---- 工作区记忆弹窗（左侧抽屉 → 工作区快捷工具） ---- */
+.ws-memory-modal .ant-modal-body {
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.ws-memory-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 14px;
+}
+
+.ws-memory-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: rgba(0, 0, 0, 0.88);
+}
+
+.ws-memory-path {
+  font-size: 12px;
+  color: #999;
+  word-break: break-all;
+}
+
 .mem-editor {
   margin-bottom: 16px;
 }
