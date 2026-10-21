@@ -41,9 +41,13 @@ DEFAULTS: dict = {
     "memory_auto_extract": True,   # 每轮结束自动提炼偏好/决定/坑（关闭则只靠手动）
     "memory_budget_chars": 1500,   # 注入 system prompt 的记忆字符预算
     # ---- 联网搜索 ----
-    # 搜索后端：deepseek 用 DeepSeek 官方 Search API（key 复用 DeepSeek 模型配置），
+    # 搜索后端：deepseek 用 DeepSeek 官方 Search API（使用下面独立配置的
+    # deepseek_search_api_key，不再复用大模型配置里的 Key），
     # 其余走 Tavily / 博查 / Bing 兜底。与聊天模型无关，任何厂商的模型都能用。
     "search_provider": "deepseek",
+    # DeepSeek 联网专用 Key：web_search（Search API）与 fetch_url（Fetch API）共用；
+    # 留空则联网搜索不可用，不会回退到大模型配置的 Key
+    "deepseek_search_api_key": "",
     # ---- 运行日志 ----
     "log_enabled": True,           # 是否写本地文件日志（logs/ 下分类文件）
     "log_level": "INFO",           # DEBUG 才能看到 HTTP 访问日志
@@ -83,6 +87,8 @@ ENUM_KEYS: dict[str, tuple[str, ...]] = {
 }
 #: 字符串列表字段（元素必须是非空字符串，自动去空白）
 LIST_KEYS = ("sandbox_read_whitelist",)
+#: 普通字符串字段（去首尾空白、限制长度；空串合法）
+STR_KEYS = ("deepseek_search_api_key",)
 
 #: 环境变量兜底：没保存过、也没显式传参时，仍按老 .env 设置来
 ENV_KEYS = {
@@ -177,6 +183,11 @@ def coerce(key: str, value):
             if s and s not in out:
                 out.append(s)
         return out
+
+    if key in STR_KEYS:
+        if not isinstance(value, str):
+            raise ValueError(f"{key} 必须是字符串")
+        return value.strip()[:200]
 
     try:
         num = float(value)

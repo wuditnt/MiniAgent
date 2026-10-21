@@ -3,7 +3,7 @@
 
 覆盖：
   · 后端选择：默认 deepseek，可在系统配置里切换（立即生效）；
-  · DeepSeek Key 复用：优先取「模型配置」里 DeepSeek 那条的 api_key；
+  · DeepSeek 联网 Key 独立配置：只读 settings，不引用「模型配置」里的 Key；
   · _search_deepseek：请求体合法（query/count/need_content）、
     用 summary 作为摘要、结果条数受 max_results 约束。
 """
@@ -53,26 +53,22 @@ def test_backend_selection() -> None:
     assert ws._backend() == "deepseek"
 
 
-def test_deepseek_key_reuse() -> None:
+def test_deepseek_key_independent() -> None:
+    """联网 Key 与「模型配置」完全解耦：模型里有 DeepSeek Key 也不会被使用。"""
     _isolate()
     _seed_ollama()
-    mc.create_entry("deepseek", "d1", "https://api.deepseek.com/v1", "sk-first", "deepseek-flash")
-    # 当前生效的还不是 DeepSeek → 取该服务商第一条有 key 的记录
-    assert ws._deepseek_key() == "sk-first"
-    # 当前生效的那条优先
-    second = mc.create_entry(
-        "deepseek", "d2", "https://api.deepseek.com/v1", "sk-second", "deepseek-v4-pro"
-    )
-    mc.set_active(second["id"])
-    assert ws._deepseek_key() == "sk-second"
-    # 其他厂商的配置不会被误用
-    assert mc.provider_key("zhipu") == ""
+    mc.create_entry("deepseek", "d1", "https://api.deepseek.com/v1", "sk-model", "deepseek-flash")
+    assert ws._deepseek_key() == "", "不应引用模型配置里的 DeepSeek Key"
+
+    # 联网搜索页独立配置的 Key 生效（自动去首尾空白）
+    st.update({"deepseek_search_api_key": "  sk-search  "})
+    assert ws._deepseek_key() == "sk-search"
 
 
 def test_search_deepseek_request_and_parse() -> None:
     _isolate()
     _seed_ollama()
-    mc.create_entry("deepseek", "d", "https://api.deepseek.com/v1", "sk-test", "deepseek-flash")
+    st.update({"deepseek_search_api_key": "sk-test"})
 
     seen: dict = {}
 
@@ -93,7 +89,7 @@ def test_search_deepseek_request_and_parse() -> None:
         ws._http_json = orig
 
     assert seen["url"] == ws.DEEPSEEK_SEARCH_URL
-    assert seen["key"] == "sk-test", "联网鉴权应复用 DeepSeek 模型配置的 key"
+    assert seen["key"] == "sk-test", "联网鉴权应使用联网搜索页独立配置的 Key"
     assert seen["payload"] == {"query": "mini-agent", "count": 2, "need_content": False}
     assert out == [
         ("A", "https://a.example", "长摘要A"),   # 优先用 summary
@@ -103,7 +99,7 @@ def test_search_deepseek_request_and_parse() -> None:
 
 if __name__ == "__main__":
     test_backend_selection()
-    test_deepseek_key_reuse()
+    test_deepseek_key_independent()
     test_search_deepseek_request_and_parse()
     print("---")
     print("全部通过 ✅")

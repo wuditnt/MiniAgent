@@ -40,10 +40,11 @@ def _check_cancel() -> None:
 
 
 def _deepseek_key() -> str:
+    """DeepSeek Fetch 也用「系统配置 → 联网搜索」里独立配置的 Key。"""
     try:
-        from core import model_config
+        from core import settings
 
-        return model_config.deepseek_key()
+        return str(settings.get("deepseek_search_api_key") or "").strip()
     except Exception:  # noqa: BLE001
         return ""
 
@@ -53,7 +54,7 @@ def _cloud_fetch(url: str) -> str:
     _check_cancel()
     key = _deepseek_key()
     if not key:
-        raise RuntimeError("未配置 DeepSeek API Key")
+        raise RuntimeError("未配置 DeepSeek 联网 Key（系统配置 → 联网搜索）")
     req = urllib.request.Request(
         DEEPSEEK_FETCH_URL,
         data=json.dumps({"url": url}).encode("utf-8"),

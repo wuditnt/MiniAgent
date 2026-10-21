@@ -51,11 +51,14 @@ def _backend() -> str:
 
 
 def _deepseek_key() -> str:
-    """联网鉴权复用 DeepSeek 的 Key：优先模型配置，其次环境变量。"""
-    try:
-        from core import model_config
+    """DeepSeek 联网专用 Key：在「系统配置 → 联网搜索」独立配置。
 
-        return model_config.deepseek_key()
+    与大模型配置里的 DeepSeek Key 完全解耦（用户要求：互不引用）。
+    """
+    try:
+        from core import settings
+
+        return str(settings.get("deepseek_search_api_key") or "").strip()
     except Exception:  # noqa: BLE001
         return ""
 
@@ -98,14 +101,14 @@ def _strip_tags(markup: str) -> str:
 def _search_deepseek(query: str, n: int) -> list[tuple[str, str, str]]:
     """DeepSeek 官方 Search API（https://api-docs.deepseek.com/guides/search）。
 
-    与聊天模型无关：任何厂商的模型都可以用这套搜索能力，鉴权复用 DeepSeek Key。
+    与聊天模型无关：任何厂商的模型都可以用这套搜索能力；
+    鉴权使用「系统配置 → 联网搜索」里独立配置的 DeepSeek Key。
     summary 是官方为模型准备的长摘要（约 600-800 字），比 snippet 更适合喂给模型。
     """
     key = _deepseek_key()
     if not key:
         raise RuntimeError(
-            "未找到 DeepSeek API Key：请先在「模型配置」里添加一条 DeepSeek 配置，"
-            "或在 .env 设置 DEEPSEEK_API_KEY"
+            "未配置 DeepSeek 联网 Key：请到「系统配置 → 联网搜索」填写 DeepSeek 搜索 Key"
         )
     data = _http_json(
         DEEPSEEK_SEARCH_URL,

@@ -574,6 +574,26 @@ def _search_backend() -> str:
         return "unknown"
 
 
+#: 只写不读的敏感配置：GET 时脱敏回显，PUT 时传空串表示「保持原值」
+_SECRET_SETTINGS = ("deepseek_search_api_key",)
+
+
+def _mask_secret(raw: str) -> str:
+    return "****" + raw[-4:] if len(raw) > 4 else "****"
+
+
+def _settings_public() -> dict:
+    """配置回给前端的形态：敏感项清空原值，另用 secrets 给出脱敏提示。"""
+    values = settings.get_all()
+    secrets: dict[str, str] = {}
+    for key in _SECRET_SETTINGS:
+        raw = str(values.get(key) or "")
+        values[key] = ""
+        if raw:
+            secrets[key] = _mask_secret(raw)
+    return {"values": values, "defaults": settings.defaults(), "secrets": secrets}
+
+
 # ---------------------------------------------------------- 附件
 
 def _resolve_attachments(attachments: list[dict], ws_root: str) -> list[dict]:
@@ -1725,7 +1745,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def _handle_settings_get(self) -> None:
         """通用配置：当前有效值 + 内置默认值（前端用来做「恢复默认」）。"""
-        self._json({"values": settings.get_all(), "defaults": settings.defaults()})
+        self._json(_settings_public())
 
     def _handle_settings_put(self) -> None:
         """更新通用配置：{...字段} 或 {"reset": true}。
@@ -1737,6 +1757,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._fail(400, "请求体必须是 JSON")
             return
         reset = bool(body.pop("reset", False))
+        # 敏感项留空 = 前端没有改动（GET 不回传原值），直接丢弃避免清空
+        for key in _SECRET_SETTINGS:
+            if key in body and not str(body.get(key) or "").strip():
+                body.pop(key)
         try:
             if reset:
                 settings.reset()
@@ -1747,7 +1771,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             return
         settings.apply_to_runtime()
         self.web.reset_agents()
-        self._json({"values": settings.get_all(), "defaults": settings.defaults()})
+        self._json(_settings_public())
 
     # ------------------------------------------------------------ 记忆管理
 

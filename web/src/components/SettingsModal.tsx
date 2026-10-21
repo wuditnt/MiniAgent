@@ -125,7 +125,7 @@ const SEARCH_BACKENDS: { value: SearchProvider; label: string; desc: string }[] 
     value: "deepseek",
     label: "DeepSeek 官方搜索（推荐）",
     desc:
-      "调用 DeepSeek Search API（api.deepseek.com/v1/tools/search），鉴权复用「模型配置」里 DeepSeek 的 API Key；用其他厂商的模型也能联网搜索",
+      "调用 DeepSeek Search API（api.deepseek.com/v1/tools/search），使用下方独立配置的 DeepSeek 联网 Key（不复用「模型配置」里的 Key）；用其他厂商的模型也能联网搜索",
   },
   {
     value: "tavily",
@@ -153,6 +153,8 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [active, setActive] = useState<SettingsTab>(tab);
+  // DeepSeek 联网 Key 只写不读：输入框单独维护，为空表示「不修改」
+  const [searchKey, setSearchKey] = useState("");
 
   const load = useCallback(() => {
     setLoading(true);
@@ -161,6 +163,7 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
       .then((r) => {
         setInfo(r);
         setDraft(r.values);
+        setSearchKey("");
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
@@ -183,7 +186,8 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
   }, [open, tab, load, loadTools]);
 
   const dirty =
-    !!draft && !!info && JSON.stringify(draft) !== JSON.stringify(info.values);
+    (!!draft && !!info && JSON.stringify(draft) !== JSON.stringify(info.values)) ||
+    !!searchKey.trim();
 
   const patch = (
     key: keyof GeneralSettings,
@@ -196,9 +200,14 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
     setSaving(true);
     setError("");
     try {
-      const r = await updateSettings(draft);
+      // Key 留空时不随草稿提交（后端会保留原值）
+      const payload = searchKey.trim()
+        ? { ...draft, deepseek_search_api_key: searchKey.trim() }
+        : draft;
+      const r = await updateSettings(payload);
       setInfo(r);
       setDraft(r.values);
+      setSearchKey("");
       onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -214,6 +223,7 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
       const r = await updateSettings({ reset: true });
       setInfo(r);
       setDraft(r.values);
+      setSearchKey("");
       onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -362,6 +372,31 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
                   />
                 </div>
               )}
+              <div className="gs-group-title">DeepSeek 联网 Key</div>
+              <div className="gs-section">
+                <div className="gs-row" style={{ alignItems: "flex-start" }}>
+                  <div className="gs-label">
+                    <span className="gs-label-text">搜索 Key</span>
+                    <span className="gs-help">
+                      独立于「模型配置」：只用于 DeepSeek 搜索与网页抓取，留空表示不修改；
+                      未配置时联网搜索不可用
+                    </span>
+                  </div>
+                  <div className="gs-control">
+                    <Input.Password
+                      value={searchKey}
+                      style={{ width: 320 }}
+                      autoComplete="new-password"
+                      placeholder={
+                        info?.secrets?.deepseek_search_api_key
+                          ? `已配置 ${info.secrets.deepseek_search_api_key}，留空不修改`
+                          : "sk-..."
+                      }
+                      onChange={(e) => setSearchKey(e.target.value)}
+                    />
+                  </div>
+                </div>
+              </div>
               <div className="gs-group-title">使用方式</div>
               <div className="gs-section">
                 <div className="gs-note" style={{ marginTop: 0 }}>

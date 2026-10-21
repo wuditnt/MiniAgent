@@ -291,6 +291,8 @@ export interface GeneralSettings {
   max_workers: number;
   /** 联网搜索后端（与聊天模型无关，任何厂商的模型都能用） */
   search_provider: SearchProvider;
+  /** DeepSeek 联网专用 Key：只写不读（后端恒回空串，已有值时见 secrets） */
+  deepseek_search_api_key: string;
   /** 沙箱外读取策略；写操作在任何档位下都被硬禁 */
   sandbox_read: SandboxReadMode;
   /** 沙箱外只读白名单（绝对路径，sandbox_read=whitelist 时生效） */
@@ -333,6 +335,8 @@ export interface MemoryTopic {
 export interface SettingsInfo {
   values: GeneralSettings;
   defaults: GeneralSettings;
+  /** 只写不读的敏感项脱敏回显：key → "****后四位"（未配置则无此键） */
+  secrets?: Record<string, string>;
 }
 
 /** 工具信息（GET /api/tools 返回，插件管理界面用） */
