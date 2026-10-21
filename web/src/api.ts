@@ -335,15 +335,6 @@ export async function testModelRaw(base_url: string, api_key: string): Promise<T
   return res.json();
 }
 
-export async function activateModel(id: string): Promise<void> {
-  const res = await fetch(`/api/models/${encodeURIComponent(id)}/activate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: "{}",
-  });
-  if (!res.ok) throw new Error(await readError(res));
-}
-
 /** 设置全局推理等级（off/low/high/max），返回生效值 */
 export async function setModelReasoning(
   level: string

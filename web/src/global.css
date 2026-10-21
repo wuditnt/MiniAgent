@@ -1082,11 +1082,6 @@ body,
   background: #fff;
 }
 
-.ms-card.active {
-  border-color: #91caff;
-  background: #f0f8ff;
-}
-
 .ms-card-main {
   flex: 1;
   min-width: 0;

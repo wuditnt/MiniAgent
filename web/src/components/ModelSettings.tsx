@@ -1,6 +1,7 @@
 /**
- * 「模型配置」面板：多服务商 / 多模型配置，一键切换，内置国内主流模板，支持连接测试。
- * 外层是已配置列表，内层是「新增 / 编辑」表单。API Key 全程只存本机。
+ * 「模型配置」面板：维护「有哪些模型」（多服务商 / 多模型配置），内置国内主流模板，
+ * 支持连接测试。**不设置全局当前模型** —— 每个对话在输入框的模型菜单里独立选择，
+ * 新对话默认用列表中的第一份配置。API Key 全程只存本机。
  * 本身不是弹窗 —— 由「系统配置」弹窗的页签承载。
  */
 import { useEffect, useMemo, useState } from "react";
@@ -11,7 +12,6 @@ import {
   DeleteOutlined,
   EditOutlined,
   PlusOutlined,
-  ThunderboltOutlined,
 } from "@ant-design/icons";
 import {
   AutoComplete,
@@ -24,10 +24,8 @@ import {
   Select,
   Space,
   Spin,
-  Tag,
 } from "antd";
 import {
-  activateModel,
   createModel,
   deleteModel,
   fetchModels,
@@ -101,12 +99,6 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
     } catch (e) {
       setTests((t) => ({ ...t, [id]: { ok: false, error: String(e) } }));
     }
-  };
-
-  const doActivate = async (id: string) => {
-    await activateModel(id);
-    reload();
-    onChanged();
   };
 
   const doDelete = async (id: string) => {
@@ -253,16 +245,9 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
           ) : (
             <div className="ms-list">
               {providers.map((p) => (
-                <div key={p.id} className={`ms-card ${p.is_active ? "active" : ""}`}>
+                <div key={p.id} className="ms-card">
                   <div className="ms-card-main">
-                    <div className="ms-card-title">
-                      {p.name}
-                      {p.is_active && (
-                        <Tag color="blue" style={{ marginLeft: 8 }}>
-                          当前
-                        </Tag>
-                      )}
-                    </div>
+                    <div className="ms-card-title">{p.name}</div>
                     <div className="ms-card-sub">
                       {p.name === p.model ? p.base_url : `${p.model} · ${p.base_url}`}
                     </div>
@@ -280,16 +265,6 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
                     >
                       连接测试
                     </Button>
-                    {!p.is_active && (
-                      <Button
-                        size="small"
-                        type="primary"
-                        icon={<ThunderboltOutlined />}
-                        onClick={() => doActivate(p.id)}
-                      >
-                        设为当前
-                      </Button>
-                    )}
                     <Space size={4}>
                       <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(p)}>
                         编辑
