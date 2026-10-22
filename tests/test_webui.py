@@ -204,6 +204,16 @@ def scenario_registry_matrix() -> None:
     print("  [1] 会话工具表矩阵（chat±web / agent±web）通过")
 
 
+def scenario_health() -> None:
+    """健康检查：免登录可访问，且带桌面壳需要的最小字段。"""
+    code, body = api("GET", "/api/health")
+    assert code == 200, f"health 应免登录返回 200，实际 {code}"
+    for key in ("ready", "version", "pid", "port", "login_enabled", "data_dir", "uptime"):
+        assert key in body, f"health 缺少字段 {key}：{body}"
+    assert body["ready"] is True
+    print("  [0] 健康检查通过")
+
+
 def scenario_host_guard() -> None:
     """Host 头白名单：本机地址放行，外部域名拒绝（防 DNS rebinding）。"""
     from core.webui import _allowed_hosts, _host_of
@@ -883,6 +893,7 @@ def main() -> int:
     results: list[tuple[str, bool]] = []
     scenarios = [
         ("会话工具表矩阵", scenario_registry_matrix),
+        ("健康检查", scenario_health),
         ("Host 头白名单", scenario_host_guard),
         ("展示分组-注入不拆气泡", scenario_display_grouping),
         ("会话标题生成与锁定", scenario_session_title),

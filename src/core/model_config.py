@@ -18,9 +18,9 @@ import os
 import time
 import uuid
 
-from ._paths import ROOT
+from ._paths import data_dir
 
-_MODELS_FILE = os.path.join(ROOT, "web_data", "models.json")
+_MODELS_FILE = os.path.join(data_dir(), "models.json")
 
 #: 推理档位全集（low/high/max，三档都表示「开启思考 + 强度」）；
 #: 具体厂家支持哪几档由模板的 reasoning.levels 声明，未声明的厂家按通用 effort

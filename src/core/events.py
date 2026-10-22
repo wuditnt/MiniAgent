@@ -37,9 +37,9 @@ import os
 import time
 from typing import Any, Iterator
 
-from ._paths import ROOT
+from ._paths import data_dir
 
-_SESSIONS_DIR = os.path.join(ROOT, "web_data", "sessions")
+_SESSIONS_DIR = os.path.join(data_dir(), "sessions")
 
 #: 信封版本（便于未来演进）
 VERSION = 1

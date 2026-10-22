@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Python 侧跑在 Windows：本项目面向本机 Windows 环境开发，
+  # 沙箱、进程树、路径大小写等用例都依赖平台行为，换 Linux 会出现假失败。
+  python:
+    name: Python 测试
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest
+
+      - name: 运行测试
+        env:
+          PYTHONPATH: src
+        run: python -m pytest tests -q
+
+  web:
+    name: 前端构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 安装依赖
+        working-directory: web
+        run: npm ci
+
+      # build 脚本本身就是 `tsc --noEmit && vite build`，类型错误会直接让 CI 失败
+      - name: 类型检查 + 构建
+        working-directory: web
+        run: npm run build

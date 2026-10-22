@@ -18,6 +18,7 @@ import json
 import os
 import queue
 import re
+import signal
 import socket
 import threading
 import time
@@ -26,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from core._paths import ROOT
+from core._paths import ROOT, data_dir
 from core import auth
 from core import events
 from core import logging_setup
@@ -73,7 +74,16 @@ _LOCAL_USER = {
 }
 
 _DIST = os.path.join(ROOT, "web", "dist")
-_SESSIONS_DIR = os.path.join(ROOT, "web_data", "sessions")  # 会话持久化目录
+_SESSIONS_DIR = os.path.join(data_dir(), "sessions")  # 会话持久化目录
+
+#: 静态资源目录可以用环境变量覆盖 —— 桌面版打包后 dist 不在 ROOT/web 下
+_WEB_DIST_ENV = "MINI_AGENT_WEB_DIST"
+_explicit_dist = os.environ.get(_WEB_DIST_ENV, "").strip().strip('"')
+if _explicit_dist:
+    _DIST = os.path.abspath(os.path.expanduser(_explicit_dist))
+
+#: 进程启动时刻（/api/health 用它算 uptime）
+_STARTED_AT = time.time()
 
 # 原生文件夹选择框一次只允许弹一个（多个 Tk 实例并发会互相干扰）
 _PICK_LOCK = threading.Lock()
@@ -132,6 +142,7 @@ _CONTENT_TYPES = {
     ".mjs": "text/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".json": "application/json; charset=utf-8",
+    ".webmanifest": "application/manifest+json; charset=utf-8",
     ".map": "application/json; charset=utf-8",
     ".svg": "image/svg+xml",
     ".png": "image/png",
@@ -1012,6 +1023,15 @@ def _lan_addresses() -> list[str]:
     return out
 
 
+def _core_version() -> str:
+    try:
+        import core
+
+        return str(getattr(core, "__version__", ""))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _host_of(header: str) -> str:
     """从 Host 头取出主机部分：去掉端口，IPv6 去掉方括号。"""
     host = (header or "").strip().lower()
@@ -1124,11 +1144,30 @@ class WebServer:
         except KeyboardInterrupt:
             print("\n正在关闭 Web UI …")
         finally:
+            self._cancel_running()
             self._httpd.server_close()
+            print("Web UI 已停止。")
+
+    def _cancel_running(self) -> None:
+        """关停时通知仍在跑的任务收手，避免 daemon 线程被硬杀时留下半截子进程。"""
+        with self._lock:
+            items = list(self.sessions.values())
+        for s in items:
+            if not s.busy or s.agent is None:
+                continue
+            try:
+                s.agent.interrupt("服务正在关闭")
+            except Exception:  # noqa: BLE001 —— 收尾失败不能阻断退出
+                pass
 
     def shutdown(self) -> None:
         if self._httpd is not None:
             threading.Thread(target=self._httpd.shutdown, daemon=True).start()
+
+    def request_shutdown(self, reason: str = "") -> None:
+        """供 /api/shutdown 与信号处理调用：非阻塞地结束 serve_forever。"""
+        _log.info("web.shutdown reason=%s", reason or "-")
+        self.shutdown()
 
 
 class _RequestHandler(BaseHTTPRequestHandler):
@@ -1276,7 +1315,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if not self.web.login_enabled:
             self._user = dict(_LOCAL_USER)
             return True
-        if route == "/api/auth/login" or not route.startswith("/api/"):
+        # 健康检查必须免登录：桌面壳在用户登录前就要能探活
+        if route in ("/api/auth/login", "/api/health") or not route.startswith("/api/"):
             return True
         user = None
         token = self._session_token()
@@ -1324,6 +1364,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             return
         if route == "/api/auth/me":
             self._handle_auth_me()
+        elif route == "/api/health":
+            self._handle_health()
         elif route == "/api/users":
             self._handle_users_list()
         elif route == "/api/state":
@@ -1371,6 +1413,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_user_create()
         elif (m := re.match(r"^/api/users/(\d+)/logout-all$", route)):
             self._handle_user_logout_all(int(m.group(1)))
+        elif route == "/api/shutdown":
+            self._handle_shutdown()
         elif route == "/api/chat":
             self._handle_chat()
         elif route == "/api/upload":
@@ -1461,6 +1505,29 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def _handle_auth_me(self) -> None:
         self._json({"user": self._user, "login_enabled": self.web.login_enabled})
+
+    def _handle_health(self) -> None:
+        """免登录探活接口：桌面壳用它判断「后端起来了没有」。"""
+        self._json({
+            "ready": True,
+            "version": _core_version(),
+            "pid": os.getpid(),
+            "host": self.web.host,
+            "port": self.web.port,
+            "login_enabled": self.web.login_enabled,
+            "data_dir": data_dir(),
+            "web_dist": _DIST,
+            "uptime": round(time.time() - _STARTED_AT, 3),
+        })
+
+    def _handle_shutdown(self) -> None:
+        """优雅关闭：仅本机可用（远程/局域网一律拒绝）。"""
+        if self._is_remote():
+            self._fail(403, "仅允许本机关闭服务")
+            return
+        self._json({"ok": True})
+        # 先把响应发出去，再在后台停服务器（shutdown 会阻塞 serve_forever）
+        threading.Timer(0.15, self.web.request_shutdown, args=("api",)).start()
 
     def _handle_auth_login(self) -> None:
         body = self._read_body()
@@ -2737,7 +2804,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-cache" if ext in (".html", ".json") else "max-age=3600")
+        # index/manifest/sw 必须每次回源，否则前端发版后用户会卡在旧壳；
+        # 其余带内容 hash 的产物可以放心缓存一小时。
+        fresh = ext in (".html", ".json", ".webmanifest") or os.path.basename(path) == "sw.js"
+        self.send_header("Cache-Control", "no-cache" if fresh else "max-age=3600")
         self.end_headers()
         self.wfile.write(body)
 
@@ -2764,6 +2834,27 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def _install_signal_handlers(server: WebServer) -> None:
+    """把 SIGINT / SIGTERM / SIGBREAK 转成优雅关停。
+
+    为什么要接管：默认行为是抛 KeyboardInterrupt 或直接终止进程，
+    正在跑的工具子进程、MCP server 会变成孤儿。
+    Windows 只允许主线程注册信号，serve() 一定在主线程调用，所以安全。
+    """
+    def _handler(signum, _frame) -> None:
+        print(f"\n收到信号 {signum}，正在关闭 Web UI …")
+        server.request_shutdown(f"signal {signum}")
+
+    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError):
+            pass   # 非主线程 / 平台不支持：保持默认行为
+
+
 def serve(
     host: str = "127.0.0.1",
     port: int = 8000,
@@ -2784,8 +2875,11 @@ def serve(
         auth.cleanup_expired()
     else:
         print("警告：已禁用登录（--no-login），任何能访问该端口的人都能操作本机。")
-    WebServer(
+
+    server = WebServer(
         host=host, port=port, model=model,
         system_prompt=system_prompt, max_turns=max_turns,
         login_enabled=login_enabled,
-    ).serve_forever()
+    )
+    _install_signal_handlers(server)
+    server.serve_forever()

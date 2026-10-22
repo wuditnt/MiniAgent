@@ -44,7 +44,6 @@ mini-agent/
 ├── tests/                        测试套件 + 统一入口 run_tests.py
 ├── scripts/                      建环境 / 跑测试 / 造 demo 数据
 ├── docs/                         测试指南与历次专题报告
-├── logs/                         运行日志（按日期分目录：app / llm / tool / error）
 ├── demo_case/                    有标准答案的沙箱数据
 ├── pyproject.toml                src 布局 + console script
 └── requirements.txt
@@ -54,6 +53,31 @@ mini-agent/
 > 不是包内 —— 它们是你（用户）要改、要放东西的地方，不是只读资源。
 > `src/core/_paths.py` 负责把这件事说清楚：`ROOT` 从环境变量
 > `MINI_AGENT_ROOT` 或 `__file__` 上溯解析，所以**从任何目录启动都能找到它们**。
+
+---
+
+## 数据目录
+
+所有**可写**数据都放在 `~/.mini-agent/`（Windows 为 `C:\Users\<you>\.mini-agent`），
+不再写进项目目录 —— 这样换机器、重新 clone、打包成桌面应用都不影响已有数据：
+
+```text
+~/.mini-agent/
+├── settings.json        通用配置
+├── models.json          模型配置（含 API Key）
+├── workspaces.json      工作区表
+├── auth.db              账号库（SQLite，含 -wal / -shm）
+├── sessions/            会话 JSON + 事件流
+├── memory/              用户画像
+├── logs/                运行日志（按日期分目录）
+└── .migrated            老数据迁移标记（存在即不再重复迁移）
+```
+
+- 项目根只保留**只读资源**：`plugins/`、`skills/`、`mcp/`、`web/dist`
+- 自定义位置：`--data-dir PATH`，或环境变量 `MINI_AGENT_DATA_DIR`
+- **首次升级自动迁移**：若 `~/.mini-agent` 还不存在，而旧的 `<项目根>/web_data` 有数据，
+  启动时会**复制**过去并打印提示；原目录保留，确认无误后可自行删除
+- Agent 的工作区（沙箱根）仍是 `~/mini-agent`，与数据目录是两个不同的位置，不要混用
 
 **三条扩展路径，最终都变成同一个 `Tool` 对象、进同一个注册表、出现在同一个 tools 数组里。**
 
@@ -140,7 +164,7 @@ cd web; npm run dev                  # 终端 2：Vite :5173，/api 自动代理
 
 - 默认监听 `0.0.0.0`（本机 + 局域网均可访问，手机/同网段设备直连；传 `--host 127.0.0.1` 可收窄为仅本机）；新增 `--web` / `--port`（默认 8000） / `--host`（默认 `0.0.0.0`）开关
 - chat 模式 = 快速对话（**不做推理思考，只保留联网能力**：开关打开时 `web_search` + `fetch_url`，关闭时只有本地 `fetch_url`）；agent 模式 = 全量内置工具循环（当前 94 个，含 `remember`；`request_approval` 仅 auto 档暴露），开联网时额外加载 `web_search`
-- **联网的两套实现**（由输入框工具栏「快速对话 / 智能体」右侧的**智能搜索**胶囊逐轮决定，选中为蓝底、未选为白底；配置**按会话独立保存**，切到别的对话互不影响）：
+- **联网的两套实现**（由顶栏「⋯」菜单第一项的**智能搜索**开关逐轮决定，文字 + 开关样式；配置**按会话独立保存**，切到别的对话互不影响）：
   - **开**：`web_search` 走所选云端后端；`fetch_url` 优先走 **DeepSeek Fetch** `POST https://api.deepseek.com/v1/tools/fetch`（返回干净 Markdown，与 Chat 同一把 Key，按次计费），失败自动回退本地抓取
   - **关**：不提供搜索；`fetch_url` 只做本地直连抓取（免费，剥离 HTML 标签），适合读取你明确给出的链接
   - 搜索后端（系统配置 → 联网搜索，`search_provider`）：与聊天模型解耦，**任何厂商的模型都能用所选搜索能力** —— `deepseek`（默认）调 DeepSeek 官方 Search API、`tavily` / `bocha` 分别读 `TAVILY_API_KEY` / `BOCHA_API_KEY`、`bing` 抓结果页。改完即时生效（无缓存）
@@ -156,27 +180,34 @@ cd web; npm run dev                  # 终端 2：Vite :5173，/api 自动代理
 - **每轮消息下方工具栏**（常显）：复制按钮悬停展开「复制为 Markdown / 复制为纯文本」菜单；助手消息支持**重新生成**（回溯到对应提问重答）；用户消息支持**编辑重发**（原文回填输入框）与**删除此条及之后消息**；另有本轮 token 用量（悬停看输入/输出/模型调用/工具调用明细）与耗时。历史回放的消息没有用量与耗时，对应项自动隐藏
 - **轮数用尽自动收尾**：达到「通用配置」的最大轮数上限时，自动发起一次**不带工具**的收尾调用，让模型总结「任务目标 / 做到哪一步 / 为何没做完 / 建议下一步」，并把结论**并入本轮最后一条回复** —— 整轮任务在界面上始终只呈现**一个**气泡（ReAct 中途递图片等内部注入消息不计入历史、不拆分气泡）；收尾调用失败则回退本地合成的执行事实说明，会话不会中断；该次调用的用量同样计入本轮统计
 - **会话标题**：新建会话时标题先由首条消息**本地规则清洗**得到即时兜底 —— 剥掉「麻烦你帮我看一下」这类口语前缀与敬语、按停顿或词边界截断到 20 字、附件消息用文件名占位；首轮回答结束后，「记忆提炼」那次调用会**顺带**产出一个更贴切的模型标题（同一次调用，零额外 token），由后台线程写入并**锁定**（此后不再自动改写）；用户手动改过名的会话不会被覆盖，关掉记忆提炼或首轮过短时保留规则标题
-- **顶栏操作**（右侧「⋯」菜单）：用量统计面板（消息数 / token 汇总 / 平均每轮 / 总耗时 / LLM 与工具调用次数 + 逐条明细）、导出会话为 Markdown 文件下载、清空当前会话
+- **顶栏操作**（右侧「⋯」菜单）：第一项是**智能搜索**开关（文字 + 开关，控制本会话是否联网）；下面依次是用量统计面板（消息数 / token 汇总 / 平均每轮 / 总耗时 / LLM 与工具调用次数 + 逐条明细）、导出会话为 Markdown 文件下载、清空当前会话
 - **顶栏账号菜单**（最右侧用户图标）：当前账号与角色、账号管理（仅超管）、修改密码、退出登录
 - **上下文水位**：输入区上方实时显示上下文占用百分比（绿 → 黄 → 红渐变预警），上限取「通用配置」的上下文字符上限
 - **快捷键**：`Ctrl/⌘+N` 新建会话、`Ctrl/⌘+E` 导出 Markdown、`Ctrl/⌘+Shift+Delete` 清空会话、`Ctrl/⌘+/` 查看帮助
 - **窄屏适配**：≤768px 时侧栏自动收起为浮层（汉堡按钮展开），顶栏与输入区自动紧凑布局
+- **PWA（添加到主屏幕）**：内置 `manifest.webmanifest` 与图标，手机浏览器「添加到主屏幕」后
+  以独立窗口运行（无地址栏）；`viewport-fit=cover` + `env(safe-area-inset-*)` 让顶栏与输入区
+  避开刘海和底部横条。Service Worker 为手写极简版（只缓存静态资源、`/api/*` 一律走网络），
+  但浏览器要求安全上下文 —— **局域网 http 下不会注册，属于预期**；https 或 localhost 才启用离线缓存
 - **长会话分段渲染**：消息区默认只渲染最近 30 条，向上滚动到顶部自动再加载 30 条（按高度差补偿，阅读位置不跳）；内容不足以滚动时顶部显示「加载更早的 N 条消息」按钮兜底。历史气泡做了 memo（Markdown 解析 / 图表 / 工具轨迹），打字与流式输出不会重解析未变化的历史消息
 - 富渲染：GFM 表格、KaTeX 公式（`$...$`）、ECharts 图表（` ```echarts ` 代码块，柱/线/饼/散点）、内联 HTML（经白名单消毒）；配套技能 `skills/rich-render/` 教模型主动用图表达
 - **工作区管理**：左侧边栏按工作区分组管理对话，可新建 / 改名 / 移除；每个工作区的 `path` 就是 Agent 的文件操作边界（沙箱根），会话归属哪个工作区就在哪个目录里干活。默认工作区锚在**当前登录用户的数据目录**（如 `C:\Users\<you>\mini-agent`，启动时自动创建，不再拿源码目录当工作区），不可删除；组内还有对话时不允许删工作区
   - 输入框上方左侧有工作区胶囊：新对话可直接切换（不选就落在默认工作区），已开始的对话只读显示 —— 换沙箱根会让「之前写的文件在哪」变得难以理解
 - **系统配置**：左侧抽屉底部的「系统配置」按钮打开，内含「模型配置」「通用配置」「联网搜索」「记忆」「插件管理」五个页签（顶栏点模型名也能进，直接落在模型配置页）
-  - 模型配置：只维护「有哪些模型」（不设全局当前模型；具体用哪一份在对话输入框的模型菜单里按会话选择，新对话默认第一份）。任意 OpenAI 兼容接口 —— 内置 DeepSeek（默认，模型选项 `deepseek-flash` / `deepseek-v4-pro`）/ 智谱 / Kimi / 通义千问 / 豆包 / 千帆 / 硅基流动 / OpenAI / Ollama / vLLM 模板，可加多份「服务商 + 模型」配置；**显示名称默认等于模型名 ID**（输入模型名时自动带出，可手动改成更好读的名字，再次修改模型名会重新同步），对话输入框的模型胶囊以「显示名称 + 推理等级」呈现，模型子菜单按服务商分组、组内列出各配置的显示名称；带连接测试（`GET /models` 探测，不耗 token，401/403 与网络错误分开报）。配置存 `web_data/models.json`，**API Key 只在本机，不上传第三方**，接口列表回显时脱敏为 `****后四位`
-  - 通用配置：最大轮数、上下文字符上限、保留最近轮数、单次工具输出上限、温度、流式输出、并行工具、并发线程数，保存即生效（`web_data/settings.json`，可一键恢复默认）。取值优先级：命令行显式参数 > 这里保存的值 > 环境变量 > 内置默认；页面底部还有「运行日志」开关 / 级别 / 保留天数（详见下文「运行日志」一节）
+  - 模型配置：只维护「有哪些模型」（不设全局当前模型；具体用哪一份在对话输入框的模型菜单里按会话选择，新对话默认第一份）。任意 OpenAI 兼容接口 —— 内置 DeepSeek（默认，模型选项 `deepseek-flash` / `deepseek-v4-pro`）/ 智谱 / Kimi / 通义千问 / 豆包 / 千帆 / 硅基流动 / OpenAI / Ollama / vLLM 模板，可加多份「服务商 + 模型」配置；**显示名称默认等于模型名 ID**（输入模型名时自动带出，可手动改成更好读的名字，再次修改模型名会重新同步），对话输入框的模型胶囊以「显示名称 + 推理等级」呈现，模型子菜单按服务商分组、组内列出各配置的显示名称；带连接测试（`GET /models` 探测，不耗 token，401/403 与网络错误分开报）。配置存 `~/.mini-agent/models.json`，**API Key 只在本机，不上传第三方**，接口列表回显时脱敏为 `****后四位`
+  - 通用配置：最大轮数、上下文字符上限、保留最近轮数、单次工具输出上限、温度、流式输出、并行工具、并发线程数，保存即生效（`~/.mini-agent/settings.json`，可一键恢复默认）。取值优先级：命令行显式参数 > 这里保存的值 > 环境变量 > 内置默认；页面底部还有「运行日志」开关 / 级别 / 保留天数（详见下文「运行日志」一节）
   - 通用配置 → **沙箱读取范围**（`sandbox_read`，默认 `strict`）：控制 Agent 读工作区**之外**文件的口径 —— `strict` 越界读写全拦；`whitelist` 仅白名单绝对路径可读（TextArea 每行一条）；`open` 沙箱外全部只读放开。**任何档位下，沙箱外的写入 / 删除 / 移动一律硬禁**，没有放开开关；此外 `run_python` 注入写护栏、`run_shell` 检测越界写命令、zip/tar 解压防路径穿越（混淆写法无法 100% 拦截，详见下文「沙箱」一节）
-  - **联网搜索**页签：选择 `web_search` 的后端（DeepSeek 官方搜索 / Tavily / 博查 / Bing），与聊天模型解耦，任何厂商的模型都能用；**DeepSeek 联网 Key 在这里独立配置**（存 `web_data/settings.json` 的 `deepseek_search_api_key`，`web_search` 的 Search API 与 `fetch_url` 的 Fetch API 共用），与「模型配置」里的 DeepSeek Key 完全解耦、互不引用；已配置时只显示脱敏尾号，留空保存表示不修改。开关开启时 `fetch_url` 走 DeepSeek Fetch（Markdown、按次计费），未配置 Key 或调用失败时回退本地抓取
+  - **联网搜索**页签：选择 `web_search` 的后端（DeepSeek 官方搜索 / Tavily / 博查 / Bing），与聊天模型解耦，任何厂商的模型都能用；**DeepSeek 联网 Key 在这里独立配置**（存 `~/.mini-agent/settings.json` 的 `deepseek_search_api_key`，`web_search` 的 Search API 与 `fetch_url` 的 Fetch API 共用），与「模型配置」里的 DeepSeek Key 完全解耦、互不引用；已配置时只显示脱敏尾号，留空保存表示不修改。开关开启时 `fetch_url` 走 DeepSeek Fetch（Markdown、按次计费），未配置 Key 或调用失败时回退本地抓取
   - **记忆**页签：编辑用户画像、开关「启用记忆 / 自动提炼」与注入预算（详见下文「记忆系统」一节）
   - **工作区记忆**（不在系统配置里）：左侧抽屉每个工作区的快捷工具区（改名按钮左边）打开，按工作区查看/编辑**项目记忆**、查看/删除该工作区的**主题摘要**
   - 插件管理：展示当前全部工具（名称 / 来源 / 分组 / 签名），按来源标记为 core / builtin / user / mcp，支持查看 dangerous / exclusive 标记与分组汇总，便于快速了解 Agent 当前具备的能力
 - **右侧工作台抽屉**：顶栏最右侧图标展开/收起。初始为「开始」页，点击「工作区文件」进入目录列表；点文件新建标签页，支持代码/文本（行号+高亮）、Markdown（预览/源码）、HTML / MHTML（iframe 预览/源码，默认预览，脚本沙箱隔离）、图片预览；关闭全部标签后抽屉自动收起，再次打开回到开始页（只读，不修改文件）
 - **运行轨迹抽屉**：助手消息脚注区 / 侧栏会话项的时钟图标打开，按 `run_id → turn` 回放会话事件流（来源着色、可展开、单轮逐条回放、按类型过滤）。与会话 JSON 双写的事实层，详见下文「可追溯运行（事件流）」一节
-- **多会话与搜索**：对话本地持久化（`web_data/sessions/*.json`，原子写），搜索支持标题 + 全文、空格分隔的多词 AND、命中片段高亮，点结果直接滚动定位到那条消息并闪烁
+- **多会话与搜索**：对话本地持久化（`~/.mini-agent/sessions/*.json`，原子写），搜索支持标题 + 全文、空格分隔的多词 AND、命中片段高亮，点结果直接滚动定位到那条消息并闪烁
 - **上下文记忆**：超长对话三级收敛 —— 先裁较早的工具结果、再把较早整轮滚动摘要成一段（保留任务目标/决策/进度/待办）、最后滑动窗口硬截断（保留 system + 摘要 + 最近 8 轮）。裁剪以「轮」为单位，`tool_calls` 与 `tool` 结果要么一起留要么一起删，不会配对错位导致接口报错
+- **桌面化接口**：`GET /api/health` 免登录探活（返回版本 / pid / 端口 / 数据目录 / uptime）；
+  `POST /api/shutdown` 优雅关闭（仅本机可用，局域网 403），关停时会通知运行中的任务收手、
+  关闭 MCP 子进程；静态资源目录可用 `MINI_AGENT_WEB_DIST` 覆盖，供打包后的桌面版指向内置 dist
 - 后端为 `src/core/webui.py`：stdlib `ThreadingHTTPServer` + SSE，Python 侧零新依赖；协议与设计见 [docs/WEBUI_ANTDX_PLAN.md](docs/WEBUI_ANTDX_PLAN.md)
 
 ---
@@ -189,7 +220,7 @@ cd web; npm run dev                  # 终端 2：Vite :5173，/api 自动代理
 
 ### 存储与安全
 
-- 账号库 `web_data/auth.db`（SQLite，与 `settings.json` 同目录，不进版本控制）
+- 账号库 `~/.mini-agent/auth.db`（SQLite，与 `settings.json` 同目录，不进版本控制）
 - 密码用标准库 `hashlib.scrypt` 加盐哈希（`n=2^14, r=8, p=1`），参数写进记录里便于日后调参；
   比较用 `hmac.compare_digest`
 - 登录会话存服务端，**库里只存 token 的 sha256**，会话有效期 7 天、剩余不足 1 天自动续期；
@@ -251,7 +282,7 @@ python -m core --web --no-login
 
 | 层 | 位置 | 作用域 | 内容 |
 | --- | --- | --- | --- |
-| 用户画像 | `web_data/memory/user_profile.md` | 跨所有工作区 | 偏好、习惯、长期事实 |
+| 用户画像 | `~/.mini-agent/memory/user_profile.md` | 跨所有工作区 | 偏好、习惯、长期事实 |
 | 项目记忆 | `<工作区>/.memory/project.md` | 随项目文件夹走 | 规则、已做决定、踩过的坑 |
 | 主题摘要 | `<工作区>/.memory/topics/<会话id>.md` | 单个会话滚动摘要 | 最近聊了什么、进展与结论 |
 
@@ -330,7 +361,7 @@ python -m core --web --no-login
 后端日志只落本地文件，**按天一个目录**、按类别分文件，排查时不用在终端翻屏：
 
 ```text
-logs/
+~/.mini-agent/logs/
   2026-10-17/
     app.log     llm.log     tool.log     error.log
   2026-10-18/
@@ -348,7 +379,7 @@ logs/
 - 开关与策略在「设置 → 通用配置 → 运行日志」：启用 / 级别（默认 `INFO`）/ 保留天数
   （默认 7 天）。跨天自动切到新日期目录，超过保留天数的旧目录自动清理。
   `DEBUG` 会额外记录每条 HTTP 请求；`INFO` 下访问日志不落盘，避免刷屏。
-- 配置存 `web_data/settings.json`（`log_enabled` / `log_level` / `log_retention_days`），
+- 配置存 `~/.mini-agent/settings.json`（`log_enabled` / `log_level` / `log_retention_days`），
   保存即时生效，无需重启。
 
 ---
@@ -377,7 +408,7 @@ HTML / MHTML 预览说明：
 
 ## 可追溯运行（事件流）
 
-每一次 `run()` 的「事实」都会按发生顺序追加到 `web_data/sessions/<会话id>.events.jsonl`
+每一次 `run()` 的「事实」都会按发生顺序追加到 `~/.mini-agent/sessions/<会话id>.events.jsonl`
 （append-only，一行一个 JSON 信封），Web UI 的「运行轨迹」抽屉直接回放这份事实。
 
 - **入口**：助手消息脚注区的时钟图标（hover 提示「查看运行轨迹」）；侧栏会话项 hover 的同一图标（会先切到该会话）。抽屉与右侧工作台共用一套外壳/宽度记忆，二者互斥。
@@ -731,7 +762,7 @@ python -m core --selftest      # 自检
 
 ## 本地测试
 
-**十三个套件，全部不需要 API Key、不花任何费用，约一分半钟跑完。**  
+**十九个免费用例套件，全部不需要 API Key、不花任何费用**（另有 1 个真实用例默认跳过，加 `--real` 才跑）。  
 完整指南（虚拟环境、四个真实踩坑、环境变量）见 [docs/LOCAL\_TESTING.md](docs/LOCAL_TESTING.md)。
 
 ```bash
@@ -773,6 +804,12 @@ scripts\run_tests.bat --real           # 额外跑真实 API 用例（消耗 tok
 | `tests/test_web_search.py` | 联网搜索 3 项：后端选择 / DeepSeek Key 复用 / 请求与解析 |
 | `tests/test_net_tools.py` | 网络工具 4 项：云端/本地分派 / 失败回退 / 协议校验 / Fetch 请求解析 |
 | `tests/test_ask.py` | 内联提问 12 项：返回协议 / 选项规范化 / 工具契约 / 等待桥 |
+| `tests/test_auth.py` | 登录与账号 9 项：建库 / 默认超管 / scrypt 哈希 / 会话 / 失败限流 / 超管保护规则 / 改密 / 写入节流 |
+
+**CI**：仓库带 `.github/workflows/ci.yml`，push/PR 时自动跑两件事 ——
+Windows runner 上 `pytest tests -q`（平台行为依赖 Windows），Ubuntu 上 `npm run build`
+（含 `tsc --noEmit`）。测试通过 `tests/bootstrap.py` 把数据目录指向临时目录，
+不会读写真实的 `~/.mini-agent`。
 
 实测（`.venv` 内，Windows）：
 
@@ -857,7 +894,7 @@ mini-agent/
 │   ├── events.py             会话事件流（可追溯运行）：append-only JSONL、EventWriter、按事件重放消息
 │   ├── webui.py              Web UI 服务：stdlib ThreadingHTTPServer + SSE、工作台/会话/设置接口
 │   ├── workspace_config.py   工作区配置：注册表与路径解析（resolve_path）
-│   ├── model_config.py       模型配置：多服务商配置读写与连接测试（web_data/models.json）
+│   ├── model_config.py       模型配置：多服务商配置读写与连接测试（~/.mini-agent/models.json）
 │   ├── settings.py           通用配置：读写 settings.json 并应用到运行时
 │   ├── logging_setup.py      文件日志：按日目录分文件（app/llm/tool/error）、保留清理、幂等重配
 │   ├── mhtml.py              MHTML（.mht/.mhtml）解析：拆出主 HTML 与内嵌资源（data: URL）
@@ -903,13 +940,15 @@ mini-agent/
 │   ├── mcp_servers.json      MCP 配置
 │   └── mcp_demo_server.py    自带 MCP server（now / sha256 / env_info / sleep /
 │                             stubborn_sleep / cancel_log，后两个服务于取消通知测试）
-├── tests/                    十四套件（13 免费 + 1 真实）+ bootstrap.py（共用引导）+ run_tests.py
+├── tests/                    二十个套件（19 免费 + 1 真实）+ bootstrap.py（共用引导）+ run_tests.py
 ├── scripts/                  setup_venv.* / run_tests.* / make_demo_case.py
 ├── docs/                     测试指南与历次专题报告
-├── logs/                     运行日志（按日期分目录：app / llm / tool / error）
 ├── demo_case/                沙箱测试数据（有标准答案）
 └── pyproject.toml            src 布局 + console script
 ```
+
+> 可写数据（配置 / 会话 / 账号库 / 日志）不在仓库里，统一放在 `~/.mini-agent/`，
+> 详见「数据目录」一节。
 
 ---
 

@@ -13,6 +13,7 @@ mini-agent 入口。
 常用开关：
     --model NAME        覆盖模型名
     --workspace PATH    指定工作区（沙箱根目录）
+    --data-dir PATH     数据目录（配置 / 会话 / 账号库 / 日志；默认 ~/.mini-agent）
     --plugin-dir A,B    替换插件目录
     --no-mcp            不挂载 MCP server
     --no-plugins        不加载插件（调试用）
@@ -122,6 +123,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--selftest", action="store_true", help="工具层自检后退出")
     ap.add_argument("--model", default=None, help="覆盖模型名")
     ap.add_argument("--workspace", default=None, help="工作区（沙箱根目录）")
+    ap.add_argument(
+        "--data-dir", default=None,
+        help="数据目录（配置 / 会话 / 账号库 / 日志；默认 ~/.mini-agent）",
+    )
     ap.add_argument("--plugin-dir", default=None, help="插件目录，逗号分隔（替换默认目录）")
     ap.add_argument("--skill-dir", default=None, help="技能目录，逗号分隔（替换默认目录）")
     ap.add_argument("--max-turns", type=int, default=None,
@@ -426,6 +431,25 @@ def _run_web(
     return 0
 
 
+# ---------------------------------------------------------------- 数据目录
+
+def _apply_data_dir(explicit: str | None) -> None:
+    """确定可写数据目录，并在首次升级时迁移旧数据。
+
+    顺序很重要：settings / model_config / webui 等模块的路径常量都在**导入时**
+    计算，所以必须先写环境变量，再让那些模块被惰性导入。
+    """
+    from core._paths import DATA_DIR_ENV, data_dir, migrate_legacy_data
+
+    if explicit:
+        os.environ[DATA_DIR_ENV] = os.path.abspath(os.path.expanduser(explicit))
+    moved = migrate_legacy_data()
+    if moved:
+        print(
+            f"数据目录：{moved}（已从旧目录复制，原目录保留，确认无误后可自行删除）"
+        )
+
+
 # ---------------------------------------------------------------- 账号救援
 
 def _cmd_reset_password(username: str) -> int:
@@ -464,6 +488,9 @@ def _cmd_reset_password(username: str) -> int:
 
 def main() -> int:
     args = build_parser().parse_args()
+
+    # 数据目录必须最先确定：后续模块的路径常量都在导入时计算
+    _apply_data_dir(args.data_dir)
 
     # 账号救援不依赖模型与插件：先处理，避免被「没配 Key」挡在门外
     if args.reset_password:

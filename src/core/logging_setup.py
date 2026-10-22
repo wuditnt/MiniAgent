@@ -21,10 +21,10 @@ import shutil
 import threading
 import time
 
-from ._paths import ROOT
+from ._paths import data_dir
 
-#: 默认日志目录（项目根/logs，与 README 约定一致）
-LOG_DIR = os.path.join(ROOT, "logs")
+#: 默认日志目录（数据目录下的 logs/，与 README 约定一致）
+LOG_DIR = os.path.join(data_dir(), "logs")
 
 _ROOT_NAME = "mini-agent"
 #: 类别 → 文件名

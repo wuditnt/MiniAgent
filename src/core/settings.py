@@ -7,7 +7,7 @@
   · 取值优先级：显式参数 > 本文件保存的值 > 环境变量 > 内置默认值。
     这样老的 .env 用法和命令行开关都还能继续工作，不会因为上了 UI 就失效。
 
-存储：web_data/settings.json（只存用户改过的项，未改的项不落盘）
+存储：<数据目录>/settings.json（只存用户改过的项，未改的项不落盘）
 """
 
 from __future__ import annotations
@@ -16,9 +16,9 @@ import json
 import os
 import re
 
-from ._paths import ROOT
+from ._paths import data_dir
 
-_SETTINGS_FILE = os.path.join(ROOT, "web_data", "settings.json")
+_SETTINGS_FILE = os.path.join(data_dir(), "settings.json")
 
 #: 内置默认值
 DEFAULTS: dict = {

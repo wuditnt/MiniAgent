@@ -29,7 +29,7 @@ import re
 import threading
 from difflib import SequenceMatcher
 
-from ._paths import ROOT
+from ._paths import data_dir
 from .registry import Tool
 from .sandbox import workspace as _current_workspace
 
@@ -112,7 +112,7 @@ def topic_path(session_id: str, workspace: str | None = None) -> str:
 
 
 def user_profile_path() -> str:
-    return os.path.join(ROOT, "web_data", "memory", USER_PROFILE_FILE)
+    return os.path.join(data_dir(), "memory", USER_PROFILE_FILE)
 
 
 def is_memory_path(path: str, workspace: str | None = None) -> bool:

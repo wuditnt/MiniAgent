@@ -3,8 +3,8 @@
  * Chat / WelcomePane / ConfirmPanel / ToolChain 是纯展示组件。
  */
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, MoreOutlined, TeamOutlined, LockOutlined, LogoutOutlined, UserOutlined } from "@ant-design/icons";
-import { Dropdown, Input, message, Modal, Tooltip } from "antd";
+import { DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, MoreOutlined, TeamOutlined, LockOutlined, LogoutOutlined, UserOutlined, GlobalOutlined } from "@ant-design/icons";
+import { Dropdown, Input, message, Modal, Switch, Tooltip } from "antd";
 import {
   chatStream,
   createWorkspace,
@@ -911,6 +911,30 @@ export default function App({
                 menu={{
                   items: [
                     {
+                      key: "web",
+                      label: (
+                        <div
+                          className="menu-switch-row"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleSetWeb(!web);
+                          }}
+                        >
+                          <span className="menu-switch-label">
+                            <GlobalOutlined />
+                            <span>智能搜索</span>
+                          </span>
+                          <Switch
+                            size="small"
+                            checked={web}
+                            onClick={(_, e) => e.stopPropagation()}
+                            onChange={(v) => handleSetWeb(v)}
+                          />
+                        </div>
+                      ),
+                    },
+                    { type: "divider" as const },
+                    {
                       key: "stats",
                       icon: <BarChartOutlined />,
                       label: "用量统计",
@@ -1023,8 +1047,6 @@ export default function App({
           busy={busy}
           mode={mode}
           onMode={setMode}
-          web={web}
-          onWeb={handleSetWeb}
           approval={approval}
           onApproval={setApproval}
           onSend={send}

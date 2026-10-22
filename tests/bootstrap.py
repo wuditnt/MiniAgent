@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 
 #: tests/ 目录
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -46,6 +47,11 @@ for _p in (SRC_DIR, PKG_DIR, PACKAGE_ROOT, TESTS_DIR):
 # 沙箱根与环境标识 —— setdefault 让调用方仍可覆盖
 os.environ.setdefault("AGENT_WORKSPACE", PACKAGE_ROOT)
 os.environ.setdefault("MINI_AGENT_ROOT", PACKAGE_ROOT)
+# 数据目录默认指向一次性临时目录：测试绝不读写用户真实数据（~/.mini-agent）。
+# 需要固定路径的用例（settings / models / auth）仍会各自覆写模块内的路径常量。
+os.environ.setdefault(
+    "MINI_AGENT_DATA_DIR", tempfile.mkdtemp(prefix="miniagent-test-data-")
+)
 
 #: mcp_servers.json 的新位置（相对项目根）
 MCP_CONFIG = os.path.join(PACKAGE_ROOT, "mcp", "mcp_servers.json")

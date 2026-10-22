@@ -31,6 +31,8 @@ body,
   flex: none;
   width: 260px;
   height: 100%;
+  padding-top: env(safe-area-inset-top, 0px);
+  box-sizing: border-box;
   background: linear-gradient(180deg, #f5f6f8 0%, #eceef2 100%);
   border-right: 1px solid #e4e6eb;
   overflow: hidden;
@@ -64,8 +66,10 @@ body,
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  height: 56px;
-  padding: 0 24px;
+  /* 高度与内边距都为刘海/状态栏留出安全区（仅 viewport-fit=cover 时非 0） */
+  height: calc(56px + env(safe-area-inset-top, 0px));
+  padding: env(safe-area-inset-top, 0px) 24px 0;
+  box-sizing: border-box;
   background: #fff;
   border-bottom: 1px solid #f0f0f0;
 }
@@ -191,6 +195,8 @@ body,
 
 .composer {
   flex: none;
+  /* iPhone 底部横条：独立运行时输入区不能贴着屏幕边缘 */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 .composer-inner {
@@ -1495,35 +1501,44 @@ body,
   color: #1677ff;
 }
 
-/* ---- 智能搜索胶囊（每个对话独立）：选中蓝底白底对称，参考设计图 ---- */
-.tb-web {
+/* ---- 「+」附件入口：淡灰底圆形按钮，与其它纯图标按钮区分开 ---- */
+.tb-plus {
+  border-radius: 50%;
+  background: #f2f3f5;
+  color: #4e5969;
+}
+
+.tb-plus:hover {
+  background: #e6e8eb;
+  color: #1677ff;
+}
+
+/* ---- 「⋯」菜单里的开关行（智能搜索）：图标 + 文字在左、开关在右 ---- */
+.menu-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 32px;
+  min-width: 152px;
+  /* 抵消菜单项自身的内边距：整行可点，且文字基线与下面各项对齐 */
+  margin: -5px -12px;
+  padding: 5px 12px;
+  font-size: 14px;
+  line-height: 22px;
+  color: rgba(0, 0, 0, 0.88);
+  cursor: pointer;
+}
+
+.menu-switch-label {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 4px 12px;
-  border-radius: 999px;
-  border: 1px solid #e5e6eb;
-  background: #fff;
-  color: #595959;
-  font-size: 13px;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  gap: 8px;
 }
 
-.tb-web:hover {
-  border-color: #91caff;
-  color: #1677ff;
-}
-
-.tb-web.on {
-  background: #e8f0fe;
-  border-color: #a8c7fa;
-  color: #1677ff;
-}
-
-.tb-web.on:hover {
-  background: #dbe7fd;
+/* 与 antd 菜单项自带图标同规格（14px / 65% 黑） */
+.menu-switch-label .anticon {
+  font-size: 14px;
+  color: rgba(0, 0, 0, 0.65);
 }
 
 .tb-mode-caret {
@@ -2025,7 +2040,7 @@ body,
   }
 
   .app-header {
-    padding: 0 12px;
+    padding: env(safe-area-inset-top, 0px) 12px 0;
     gap: 8px;
   }
 
@@ -2064,11 +2079,6 @@ body,
 
   .tb-approval {
     padding: 4px 8px;
-  }
-
-  .tb-web {
-    padding: 4px 8px;
-    font-size: 12px;
   }
 
   .chat-inner {

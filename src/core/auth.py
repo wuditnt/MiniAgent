@@ -34,11 +34,11 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from ._paths import ROOT
+from ._paths import data_dir
 
 # ---------------------------------------------------------------- 常量
 
-DB_FILE = os.path.join(ROOT, "web_data", "auth.db")
+DB_FILE = os.path.join(data_dir(), "auth.db")
 
 ROLE_SUPERADMIN = "superadmin"
 ROLE_USER = "user"

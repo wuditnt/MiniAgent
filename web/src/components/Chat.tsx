@@ -13,7 +13,6 @@ import {
   DownOutlined,
   EditOutlined,
   FolderOpenOutlined,
-  GlobalOutlined,
   HistoryOutlined,
   MoreOutlined,
   PaperClipOutlined,
@@ -434,9 +433,6 @@ interface Props {
   busy: boolean;
   mode: Mode;
   onMode: (m: Mode) => void;
-  /** 本会话的联网搜索开关（每个对话独立保存） */
-  web: boolean;
-  onWeb: (w: boolean) => void;
   /** 三档确认模式（ask / auto / full），仅智能体模式下可切 */
   approval: ApprovalMode;
   onApproval: (m: ApprovalMode) => void;
@@ -650,8 +646,6 @@ export default function Chat({
   busy,
   mode,
   onMode,
-  web,
-  onWeb,
   approval,
   onApproval,
   onSend,
@@ -1078,7 +1072,7 @@ export default function Chat({
                           ],
                         }}
                       >
-                        <span className="tb-icon-btn" title="上传附件">
+                        <span className="tb-icon-btn tb-plus" title="上传附件">
                           <PlusOutlined />
                         </span>
                       </Dropdown>
@@ -1106,22 +1100,6 @@ export default function Chat({
                           <DownOutlined className="tb-mode-caret" />
                         </span>
                       </Dropdown>
-                      {/* 智能搜索：本对话独立联网开关（选中蓝底，未选白底） */}
-                      <Tooltip
-                        title={
-                          web
-                            ? "智能搜索已开启：本轮会调用联网搜索与网页抓取"
-                            : "智能搜索已关闭：不联网，仅在你给出链接时本地读取"
-                        }
-                      >
-                        <span
-                          className={`tb-web${web ? " on" : ""}`}
-                          onClick={() => onWeb(!web)}
-                        >
-                          <GlobalOutlined />
-                          <span className="tb-web-text">智能搜索</span>
-                        </span>
-                      </Tooltip>
                       {/* 确认模式：仅智能体模式有意义（chat 模式无危险本地工具） */}
                       {mode === "agent" && (
                         <ApprovalChip value={approval} onChange={onApproval} />

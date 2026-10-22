@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 
 _ENV_VAR = "MINI_AGENT_ROOT"
 
@@ -67,6 +68,69 @@ _HOME = os.path.expanduser("~")
 DEFAULT_WORKSPACE = (
     os.path.join(_HOME, "mini-agent") if _HOME and _HOME != "~" else ROOT
 )
+
+# ---------------------------------------------------------------- 数据目录
+
+#: 数据目录环境变量（命令行 --data-dir 会写进这里，保证同进程各处读到同一个值）
+DATA_DIR_ENV = "MINI_AGENT_DATA_DIR"
+
+#: 默认数据目录：~/.mini-agent。
+#: 为什么不放 ROOT 下的 web_data：桌面版打包后安装目录只读，数据必须落到用户目录；
+#: 而且「配置/会话/账号」属于使用者，不属于这份代码，换机器、重装都不该丢。
+DEFAULT_DATA_DIR = (
+    os.path.join(_HOME, ".mini-agent") if _HOME and _HOME != "~"
+    else os.path.join(ROOT, ".mini-agent")
+)
+
+_MIGRATE_MARKER = ".migrated"
+
+
+def data_dir() -> str:
+    """可写数据目录：MINI_AGENT_DATA_DIR 优先，否则 ~/.mini-agent。
+
+    每次调用都读环境变量（不缓存），这样 main() 里解析完 --data-dir 再设置，
+    后续所有惰性导入的模块都能拿到正确的路径。
+    """
+    explicit = os.environ.get(DATA_DIR_ENV, "").strip().strip('"')
+    if explicit:
+        return os.path.abspath(os.path.expanduser(explicit))
+    return DEFAULT_DATA_DIR
+
+
+def migrate_legacy_data(legacy_root: str | None = None) -> str | None:
+    """把旧版 `<root>/web_data` 与 `<root>/logs` 复制到新数据目录。
+
+    只在「新目录里既没有 settings.json 也没有 auth.db」时执行一次：
+      · 复制而不是移动 —— 原目录保留，出问题能立刻回滚；
+      · 写的 `.migrated` 标记防止下次启动用旧数据覆盖新数据。
+    返回迁移后的目录；没有迁移动作时返回 None。
+    """
+    target = data_dir()
+    src_root = os.path.abspath(legacy_root or ROOT)
+    if os.path.normcase(os.path.abspath(target)) == os.path.normcase(src_root):
+        return None
+    if os.path.exists(os.path.join(target, _MIGRATE_MARKER)):
+        return None
+    if any(
+        os.path.exists(os.path.join(target, name))
+        for name in ("settings.json", "auth.db", "models.json")
+    ):
+        return None                    # 新目录已在用，不做任何覆盖
+
+    pairs = [
+        (os.path.join(src_root, "web_data"), target),
+        (os.path.join(src_root, "logs"), os.path.join(target, "logs")),
+    ]
+    if not any(os.path.isdir(src) for src, _ in pairs):
+        return None
+
+    os.makedirs(target, exist_ok=True)
+    for src, dst in pairs:
+        if os.path.isdir(src):
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+    with open(os.path.join(target, _MIGRATE_MARKER), "w", encoding="utf-8") as f:
+        f.write(f"migrated from {src_root}\n")
+    return target
 
 
 def install_import_paths() -> str:

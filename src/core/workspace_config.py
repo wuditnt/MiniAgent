@@ -7,7 +7,7 @@
   · 会话归属工作区：每个会话文件里记一个 workspace_id，切到该会话时
     把 sandbox 的工作区切过去，工具产生的相对路径就落在对的目录下。
 
-存储：web_data/workspaces.json（本机文件，不进版本控制）。
+存储：<数据目录>/workspaces.json（本机文件，不进版本控制）。
 结构：{"workspaces": [{id, name, path, created_at}]}
 「默认工作区」始终存在且不可删除，path 由系统管理、固定指向用户数据目录
 （`DEFAULT_WORKSPACE`，如 ~/mini-agent），加载时会被校正回来。
@@ -20,9 +20,9 @@ import os
 import time
 import uuid
 
-from ._paths import DEFAULT_WORKSPACE, ROOT
+from ._paths import DEFAULT_WORKSPACE, ROOT, data_dir
 
-_WORKSPACES_FILE = os.path.join(ROOT, "web_data", "workspaces.json")
+_WORKSPACES_FILE = os.path.join(data_dir(), "workspaces.json")
 
 #: 默认工作区 id —— 老会话（没有 workspace_id 字段）都归到它名下
 DEFAULT_ID = "default"
