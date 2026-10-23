@@ -4,7 +4,7 @@
  *  · 原生 HTML（rehype-raw），经 rehype-sanitize 白名单消毒（禁 script/事件/js: 链接）
  *  · ```echarts 代码块 → 渲染为真实图表；JSON 不合法时退回代码块并提示
  */
-import { isValidElement, memo } from "react";
+import { isValidElement, lazy, memo, Suspense } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -12,8 +12,11 @@ import rehypeRaw from "rehype-raw";
 import rehypeKatex from "rehype-katex";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import "katex/dist/katex.min.css";
-import Chart from "./Chart";
 import CodeBlock from "./CodeBlock";
+
+// echarts 体积大（gzip 约 200KB），而绝大多数消息里没有图表：
+// 懒加载后只有真正出现 ```echarts 时才拉取，不占首屏。
+const Chart = lazy(() => import("./Chart"));
 
 // 消毒白名单：在 GitHub 默认 schema 之上，
 // 放行 mark 高亮标签、KaTeX 渲染所需的 class/span 样式与代码块的 language- 标记
@@ -43,7 +46,11 @@ function EchartsBlock({ source }: { source: string }) {
       </div>
     );
   }
-  return <Chart option={option} />;
+  return (
+    <Suspense fallback={<div className="echarts-box" />}>
+      <Chart option={option} />
+    </Suspense>
+  );
 }
 
 /** 递归从 React children 里提取纯文本（处理字符串/数字/数组/嵌套元素） */

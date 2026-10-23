@@ -2805,9 +2805,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         # index/manifest/sw 必须每次回源，否则前端发版后用户会卡在旧壳；
-        # 其余带内容 hash 的产物可以放心缓存一小时。
+        # 其余产物文件名带内容 hash，内容一变文件名就变，可以永久强缓存。
         fresh = ext in (".html", ".json", ".webmanifest") or os.path.basename(path) == "sw.js"
-        self.send_header("Cache-Control", "no-cache" if fresh else "max-age=3600")
+        self.send_header(
+            "Cache-Control",
+            "no-cache" if fresh else "public, max-age=31536000, immutable",
+        )
         self.end_headers()
         self.wfile.write(body)
 
