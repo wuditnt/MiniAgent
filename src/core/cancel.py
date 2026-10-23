@@ -39,26 +39,57 @@ class Cancelled(Exception):
     """任务被用户取消。Agent.run() 对外抛出的就是它。"""
 
 
-def kill_tree(p: subprocess.Popen) -> None:
+def _taskkill(pid: int) -> None:
+    """Windows 下按 pid 杀整棵树（子进程也一起走）。失败不外抛。"""
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True, timeout=5,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def kill_tree(p: subprocess.Popen, *, background: bool = False) -> None:
     """杀掉进程及其所有子进程。
 
     Windows 上 p.kill() 只杀直接子进程，shell=True 时真正的命令是 cmd.exe
     的孙进程 —— 所以必须用 taskkill /T 杀整棵树。
     POSIX 上配合 start_new_session=True，用进程组信号一次杀干净。
+
+    background=True 时 Windows 的 taskkill 丢到后台线程：实测某些机器上
+    单次 taskkill 就要 3s（Defender 实时扫描），同步调用会让「点停止」卡住。
+    调用方若随后 p.wait() / communicate()，仍会等到进程真正退出。
     """
     if p.poll() is not None:
         return
-    try:
-        if sys.platform == "win32":
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(p.pid)],
-                capture_output=True, timeout=5,
-            )
-        else:
+    if sys.platform == "win32":
+        if background:
+            def _bg() -> None:
+                _taskkill(p.pid)
+                # taskkill 失败（进程已被别人杀掉/权限不足）时补一刀
+                if p.poll() is None:
+                    try:
+                        p.kill()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            threading.Thread(target=_bg, daemon=True, name="kill-tree").start()
+            return
+        _taskkill(p.pid)
+        if p.poll() is None:      # taskkill 失败时兜底
             try:
-                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
                 p.kill()
+            except Exception:  # noqa: BLE001
+                pass
+        return
+    try:
+        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        try:
+            p.kill()
+        except Exception:  # noqa: BLE001
+            pass
     except Exception:  # noqa: BLE001 —— 杀进程失败不该让取消流程卡死
         try:
             p.kill()
@@ -123,8 +154,9 @@ class CancellationToken:
         """触发取消：置位 + 杀掉全部注册的子进程 + 逐个执行钩子。
 
         幂等：重复调用没有副作用（第二次直接返回）。
-        顺序刻意安排为「先杀进程、再跑钩子」—— 钩子里常用 client.close()
+        顺序刻意安排为「先发起杀进程、再跑钩子」—— 钩子里常用 client.close()
         来掐断网络读，先杀进程能保证本地副作用先清干净。
+        Windows 上 tree-kill 走后台线程，本方法不阻塞。
         reason 只在第一次生效，用来解释「为什么取消」。重复调用时不影响已有原因。
         """
         with self._lock:
@@ -136,7 +168,8 @@ class CancellationToken:
             procs = list(self._procs)
             hooks = list(self._hooks)
         for p in procs:
-            kill_tree(p)
+            # 后台杀：taskkill 在部分 Windows 机器上要 3s，不能让它拖住停止按钮
+            kill_tree(p, background=True)
         for h in hooks:
             try:
                 h()
@@ -161,7 +194,7 @@ class CancellationToken:
         with self._lock:
             if self._event.is_set():
                 # 注册前已经取消 —— 立刻杀，别让它活到 unregister
-                kill_tree(p)
+                kill_tree(p, background=True)
                 return
             self._procs.add(p)
 
