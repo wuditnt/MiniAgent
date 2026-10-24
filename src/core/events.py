@@ -109,7 +109,7 @@ def events_exist(sid: str) -> bool:
 
 def sha256_text(text: str) -> str:
     """文本哈希（utf-8，不转义）。"""
-    return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _canon(obj: Any) -> str:
@@ -124,7 +124,7 @@ def _canon_content(content: Any) -> Any:
     out: list[Any] = []
     for part in content:
         if isinstance(part, dict) and part.get("type") == "image_url":
-            url = str(((part.get("image_url") or {}).get("url")) or "")
+            url = ((part.get("image_url") or {}).get("url") or "").strip()
             out.append({"type": "image_url", "image_url": {"url": _img_marker(url)}})
         else:
             out.append(part)
@@ -161,7 +161,7 @@ def canonical_message(m: dict) -> dict:
     """把一条消息压成可重放、可哈希的规范形态：去掉私有字段，图片换成哈希占位。"""
     out: dict[str, Any] = {}
     for k, v in m.items():
-        if str(k).startswith("_"):
+        if k.startswith("_"): 
             continue
         out[k] = _canon_content(v) if k == "content" else v
     return out
@@ -272,8 +272,8 @@ class EventWriter:
         mirror=None,
     ) -> None:
         self.sid = sid
-        self.enabled = bool(enabled)
-        self.value_limit = int(value_limit or DEFAULT_VALUE_LIMIT)
+        self.enabled = enabled
+        self.value_limit = value_limit or DEFAULT_VALUE_LIMIT
         self.mirror = mirror
         self.run_id = ""
         self._seq = last_seq(sid) if self.enabled else 0

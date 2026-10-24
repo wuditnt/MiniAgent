@@ -506,8 +506,8 @@ class WebUI:
         with session.confirm_lock:
             session.pending_ask = (cid, event, holder)
         self._push({"type": "ask_request", "id": cid, "question": question,
-                    "options": list(options or []), "allow_free_text": bool(allow_free_text),
-                    "multi": bool(multi)})
+                    "options": list(options or []), "allow_free_text": allow_free_text,
+                    "multi": multi})
         got = event.wait(CONFIRM_TIMEOUT)
         with session.confirm_lock:
             session.pending_ask = None
@@ -676,7 +676,7 @@ def _workspace_path(workspace_id: str, rel: str) -> tuple[str, str]:
     root = os.path.realpath(
         workspace_config.resolve_path(workspace_id or workspace_config.DEFAULT_ID)
     )
-    raw = str(rel or "").replace("\\", "/").strip()
+    raw = (rel or "").replace("\\", "/").strip()
     if raw in ("", "."):
         ap = root
     else:
@@ -1355,7 +1355,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         return True
 
     def _client_ip(self) -> str:
-        return str(self.client_address[0] if self.client_address else "")
+        return self.client_address[0] if self.client_address else ""
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)

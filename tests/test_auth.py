@@ -139,7 +139,9 @@ def test_change_password_keeps_current_session() -> None:
 
     assert auth.resolve_session(token_a) is not None, "当前会话应保留"
     assert auth.resolve_session(token_b) is None, "其它会话应被踢下线"
-    assert auth.get_user(alice["id"])["must_change_password"] is False
+    user_after = auth.get_user(alice["id"])
+    assert user_after is not None, "修改密码后用户应仍存在"
+    assert user_after["must_change_password"] is False
 
     # 新密码可登录，旧密码不行
     token_c, _ = auth.login("alice", "alice456")

@@ -64,7 +64,7 @@ _KIND_ALIASES = {
 
 def resolve_kind(kind: str | None) -> str | None:
     """别名归一；空值或非法类型返回 None（调用方据此决定丢弃还是兜底）。"""
-    k = str(kind or "").strip().lower()
+    k = (kind or "").strip().lower()
     if not k:
         return None
     k = _KIND_ALIASES.get(k, k)
@@ -88,7 +88,7 @@ _lock = threading.RLock()
 # ---------------------------------------------------------------- 路径
 
 def _norm(path: str) -> str:
-    return os.path.normcase(os.path.abspath(str(path)))
+    return os.path.normcase(os.path.abspath(path))
 
 
 def memory_dir(workspace: str | None = None) -> str:
@@ -107,7 +107,7 @@ def project_path(workspace: str | None = None) -> str:
 
 def topic_path(session_id: str, workspace: str | None = None) -> str:
     # sid 只允许文件名安全字符，杜绝路径穿越
-    safe = re.sub(r"[^A-Za-z0-9_.\-]", "_", str(session_id))[:80] or "unknown"
+    safe = re.sub(r"[^A-Za-z0-9_.\-]", "_", session_id)[:80] or "unknown"
     return os.path.join(topics_dir(workspace), f"{safe}.md")
 
 
@@ -122,7 +122,7 @@ def is_memory_path(path: str, workspace: str | None = None) -> bool:
     不传 workspace 时按当前工作区判断（切工作区后判定随之切换，无全局表）。
     """
     try:
-        ap = _norm(os.path.expanduser(str(path)))
+        ap = _norm(os.path.expanduser(path))
     except (TypeError, ValueError):
         return False
     md = _norm(memory_dir(workspace))
@@ -137,7 +137,7 @@ def _hide_windows(path: str) -> None:
         return
     try:
         FILE_ATTRIBUTE_HIDDEN = 0x02
-        ctypes.windll.kernel32.SetFileAttributesW(str(path), FILE_ATTRIBUTE_HIDDEN)
+        ctypes.windll.kernel32.SetFileAttributesW(path, FILE_ATTRIBUTE_HIDDEN)
     except Exception:  # noqa: BLE001
         pass
 
@@ -323,7 +323,7 @@ def order_entries(text: str) -> str:
 
 def _bigrams(text: str) -> set[str]:
     """轻量相关度特征：去空白后的字符 2-gram（中英文通用，无需分词/依赖）。"""
-    s = re.sub(r"\s+", "", str(text or "").lower())
+    s = re.sub(r"\s+", "", text.lower())
     if not s:
         return set()
     return {s} if len(s) < 2 else {s[i:i + 2] for i in range(len(s) - 1)}
@@ -410,7 +410,7 @@ def append_note(path: str, note: str, source: str = "对话", kind: str = "fact"
 
     笔记压成单行（换行替换为空格），保持条目文件可按行解析。
     """
-    note = re.sub(r"\s+", " ", str(note or "")).strip()
+    note = re.sub(r"\s+", " ", note or "").strip()
     if not note:
         return False
     kind = normalize_kind(kind)
@@ -529,7 +529,7 @@ def parse_remember_command(text: str) -> str | None:
     支持：请帮我记住 / 帮我记住 / 请记住 / 以后都记住 / 以后请记住 /
          记住：/ 记一下：/ 记下来。没有指令或内容为空时返回 None。
     """
-    raw = str(text or "").lstrip()
+    raw = (text or "").lstrip()
     for p in _REMEMBER_PREFIXES:
         if raw.startswith(p):
             return _clean_remember_body(raw[len(p):])
@@ -545,7 +545,7 @@ def parse_remember_command(text: str) -> str | None:
 
 def infer_user_kind(note: str) -> str:
     """用户画像条目的类型粗判：偏好类措辞 → pref，其余 → fact。"""
-    text = str(note or "")
+    text = note or ""
     if any(w in text for w in (
         "我喜欢", "我偏好", "我习惯", "我不喜欢", "我讨厌", "我希望",
         "我倾向", "以后都", "请用", "不要用",
@@ -584,7 +584,7 @@ def remember(scope: str, note: str, kind: str | None = None) -> str:
     """
     if not _memory_enabled():
         return "[skipped] 记忆功能已关闭（通用配置里可打开），本次未写入。"
-    note = re.sub(r"\s+", " ", str(note or "")).strip()
+    note = re.sub(r"\s+", " ", note or "").strip()
     if not note:
         return "[error] note 为空，没有可记录的内容。"
     scope = (scope or "").strip().lower()
