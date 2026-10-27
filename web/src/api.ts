@@ -24,6 +24,7 @@ import type {
   WorkspaceDirData,
   WorkspaceFileData,
   WorkspaceItem,
+  WorkspaceTablePage,
 } from "./types";
 
 /** 从错误响应里尽量提取可读信息（后端错误统一为 {error: "..."}） */
@@ -265,6 +266,22 @@ export function workspaceRawUrl(workspaceId: string, path: string): string {
 export function workspaceDownloadUrl(workspaceId: string, path: string): string {
   const qs = new URLSearchParams({ workspace_id: workspaceId, path });
   return `/api/workspace/download?${qs}`;
+}
+
+/** CSV/TSV 表格分页：后端按行窗口 × 列窗口返回 */
+export async function fetchWorkspaceTable(
+  workspaceId: string,
+  path: string,
+  opts: { rowOffset?: number; rowLimit?: number; colOffset?: number; colLimit?: number } = {},
+): Promise<WorkspaceTablePage> {
+  const qs = new URLSearchParams({ workspace_id: workspaceId, path });
+  if (opts.rowOffset !== undefined) qs.set("row_offset", String(opts.rowOffset));
+  if (opts.rowLimit !== undefined) qs.set("row_limit", String(opts.rowLimit));
+  if (opts.colOffset !== undefined) qs.set("col_offset", String(opts.colOffset));
+  if (opts.colLimit !== undefined) qs.set("col_limit", String(opts.colLimit));
+  const res = await req(`/api/workspace/table?${qs}`);
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
 }
 
 export async function createWorkspace(

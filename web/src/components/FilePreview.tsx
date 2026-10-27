@@ -17,7 +17,7 @@ import type { WorkspaceFileData } from "../types";
 import CodeBlock, { langFromExt } from "./CodeBlock";
 import HtmlPreview from "./HtmlPreview";
 import Markdown from "./Markdown";
-import { BinaryPreview } from "./preview/registry";
+import { PreviewByKind } from "./preview/registry";
 
 interface Props {
   workspaceId: string;
@@ -174,7 +174,7 @@ export default function FilePreview({ workspaceId, path, name, ext }: Props) {
             )}
             {data.kind === "text" && data.truncated && (
               <div className="wb-note">
-                内容较大，仅显示前 {data.lines ?? 5000} 行 / 1MB
+                内容较大，已截断（最多 {data.lines ?? 5000} 行 / 20MB；单行上限 4000 字符）
               </div>
             )}
           </div>
@@ -191,15 +191,15 @@ export default function FilePreview({ workspaceId, path, name, ext }: Props) {
           </div>
         )}
 
-        {/* 二进制类预览（PDF 等）统一交给 registry 按 kind 分发 */}
-        {data?.kind === "pdf" && data.url && (
-          <BinaryPreview
+        {/* PDF / CSV 表格等结构化预览统一交给 registry 按 kind 分发 */}
+        {(data?.kind === "pdf" || data?.kind === "table") && (
+          <PreviewByKind
             kind={data.kind}
             workspaceId={workspaceId}
             path={path}
             name={name}
             size={data.size}
-            url={data.url}
+            data={data}
           />
         )}
 

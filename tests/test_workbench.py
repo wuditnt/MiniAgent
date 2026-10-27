@@ -13,6 +13,7 @@
   9. 缺失文件 / 非图片 raw —— 404 / 403
  10. PDF —— kind=pdf，raw 接口返回 application/pdf
  11. 下载 —— attachment 头、中文文件名、越界拦截
+ 12. CSV/TSV —— 表格分页、引号内逗号、10000 行上限
 """
 
 from __future__ import annotations
@@ -95,6 +96,16 @@ def _make_workspace() -> str:
         f.write(b"%PDF-1.4\n%test\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n")
     with open(os.path.join(ws, "中文 报告.txt"), "w", encoding="utf-8") as f:
         f.write("中文报告\n")
+    with open(os.path.join(ws, "data.csv"), "w", encoding="utf-8", newline="") as f:
+        f.write("名称,数量,备注\n")
+        f.write('甲,1,"含,逗号"\n')
+        f.write("乙,2,\n")
+    with open(os.path.join(ws, "data.tsv"), "w", encoding="utf-8", newline="") as f:
+        f.write("a\tb\n1\t2\n")
+    with open(os.path.join(ws, "big.csv"), "w", encoding="utf-8", newline="") as f:
+        f.write("c\n")
+        for i in range(12000):
+            f.write(f"{i}\n")
     with open(os.path.join(ws, "page.html"), "w", encoding="utf-8") as f:
         f.write(
             "<!doctype html><html><head>"
@@ -314,6 +325,36 @@ def test_download():
     print("✓ 下载：attachment 头、中文文件名、越界/保护区拦截")
 
 
+def test_csv_table():
+    code, data = _api_file("data.csv")
+    assert code == 200 and data["kind"] == "table", data
+    assert data["url"].startswith("/api/workspace/table?"), data
+    table = data["table"]
+    assert table["columns"] == ["名称", "数量", "备注"], table["columns"]
+    assert table["rows"][0] == ["甲", "1", "含,逗号"], table["rows"]
+    assert table["rows"][1] == ["乙", "2", ""], table["rows"]
+    assert table["total_rows"] == 2 and table["total_cols"] == 3, table
+
+    # TSV：按 Tab 切，不做逗号嗅探
+    code, data = _api_file("data.tsv")
+    assert code == 200 and data["kind"] == "table", data
+    assert data["table"]["columns"] == ["a", "b"], data["table"]
+    assert data["table"]["rows"] == [["1", "2"]], data["table"]
+
+    # 分页：10000 行上限 + 行窗口
+    base = "/api/workspace/table?workspace_id=default&path=" + quote("big.csv")
+    code, page = _json(base + "&row_offset=0&row_limit=5")
+    assert code == 200 and len(page["rows"]) == 5, page
+    assert page["total_rows"] == 10000 and page["truncated"] is True, page
+    code, page = _json(base + "&row_offset=9995&row_limit=200")
+    assert page["rows"][0][0] == "9995" and len(page["rows"]) == 5, page["rows"][:1]
+
+    # 非表格文件走这个接口要被拒绝
+    code, _ = _json("/api/workspace/table?workspace_id=default&path=" + quote("a.py"))
+    assert code == 400, code
+    print("✓ CSV/TSV：表头、引号内逗号、行分页、10000 行上限")
+
+
 def main() -> int:
     print("项目根:", HERE)
     print("---")
@@ -351,6 +392,7 @@ def main() -> int:
         test_errors()
         test_pdf_preview()
         test_download()
+        test_csv_table()
     finally:
         if srv._httpd is not None:
             srv._httpd.shutdown()

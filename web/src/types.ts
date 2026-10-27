@@ -211,9 +211,25 @@ export interface WorkspaceDirData {
   truncated: boolean;
 }
 
+/** CSV / TSV 表格的一个「行窗口 × 列窗口」 */
+export interface WorkspaceTablePage {
+  columns: string[];
+  rows: string[][];
+  row_offset: number;
+  row_limit: number;
+  col_offset: number;
+  col_limit: number;
+  total_rows: number;
+  total_cols: number;
+  encoding: string;
+  delimiter: string;
+  /** 命中 20MB / 10000 行 / 1000 列解析上限 */
+  truncated: boolean;
+}
+
 /** GET /api/workspace/file */
 export interface WorkspaceFileData {
-  kind: "text" | "image" | "pdf" | "binary" | "unsupported" | "mhtml";
+  kind: "text" | "image" | "pdf" | "table" | "binary" | "unsupported" | "mhtml";
   name: string;
   path: string;
   ext: string;
@@ -225,6 +241,8 @@ export interface WorkspaceFileData {
   truncated?: boolean;
   reason?: string;
   url?: string;
+  /** 表格：首屏窗口数据（后续翻页走 /api/workspace/table） */
+  table?: WorkspaceTablePage;
   /** MHTML：提取后的主 HTML */
   html?: string;
   /** MHTML：资源键 → data URL */

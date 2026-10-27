@@ -14,6 +14,8 @@ Web UI 后端：把 Agent 的 9 个 UI 回调翻译成 SSE 事件流，浏览器
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import queue
@@ -159,12 +161,24 @@ _CONTENT_TYPES = {
 }
 
 # 工作台文件浏览：只读、只允许工作区内
-_TEXT_PREVIEW_BYTES = 1 * 1024 * 1024   # 文本最多读 1MB
+_TEXT_PREVIEW_BYTES = 20 * 1024 * 1024  # 文本最多读 20MB
 _TEXT_PREVIEW_LINES = 5000              # 最多展示 5000 行
+_TEXT_PREVIEW_CHARS = 4 * 1024 * 1024   # 展示字符上限（保护前端高亮）
+_TEXT_LINE_MAX_CHARS = 4000             # 单行字符上限
 _DIR_MAX_ENTRIES = 500                  # 目录最多返回 500 项
 _RAW_MAX_BYTES = 20 * 1024 * 1024       # 原始字节预览（图片/PDF 等）上限 20MB
 _HIDDEN_DIRS = frozenset({".memory", ".attachments"})
 _IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"})
+
+# 表格预览（CSV / TSV）：解析上限 + 单页窗口。
+# 10M 个格子不可能一次性传给前端，所以按「行窗口 × 列窗口」分页返回，
+# 解析时也只保留当前窗口，内存占用与总行数无关。
+_TABLE_EXTS = frozenset({".csv", ".tsv"})
+_TABLE_MAX_BYTES = 20 * 1024 * 1024
+_TABLE_MAX_ROWS = 10000
+_TABLE_MAX_COLS = 1000
+_TABLE_PAGE_ROWS = 200
+_TABLE_PAGE_COLS = 50
 
 # 「按原始字节预览」的格式登记表：扩展名 → /api/workspace/file 返回的 kind。
 # 新增一种格式只需两步：这里加一行（必要时补 _CONTENT_TYPES），
@@ -703,6 +717,96 @@ def _content_disposition(name: str) -> str:
     """下载响应头：ASCII 兜底名 + RFC 5987 的 UTF-8 真名（中文名不乱码）。"""
     fallback = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "download"
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name)}"
+
+
+def _int_param(params: dict, key: str, default: int, lo: int, hi: int) -> int:
+    """取整型 query 参数并夹到 [lo, hi]，脏值一律退回默认值。"""
+    try:
+        value = int((params.get(key) or [default])[0])
+    except (TypeError, ValueError):
+        value = default
+    return max(lo, min(hi, value))
+
+
+def _read_table(
+    ap: str, row_offset: int, row_limit: int, col_offset: int, col_limit: int
+) -> dict:
+    """流式解析 CSV/TSV，只保留请求的行×列窗口。
+
+    为什么不用 pandas / openpyxl：标准库 csv 已能正确处理引号、字段内换行与
+    转义；这里按行迭代，跳过的行立刻被回收，10M 格的表也不会把内存打满。
+    """
+    from core.sandbox import decode_bytes
+
+    with open(ap, "rb") as f:
+        raw = f.read(_TABLE_MAX_BYTES + 1)
+    truncated = len(raw) > _TABLE_MAX_BYTES
+    if truncated:
+        raw = raw[:_TABLE_MAX_BYTES]
+    text, encoding = decode_bytes(raw)
+
+    # .tsv 直接按 Tab 切；.csv 先嗅探一次，识别分号/竖线等变体
+    delimiter = "\t"
+    if not ap.lower().endswith(".tsv"):
+        delimiter = ","
+        try:
+            sniffed = csv.Sniffer().sniff(text[:8192], delimiters=",;\t|")
+            delimiter = sniffed.delimiter or ","
+        except csv.Error:
+            pass
+
+    header: list[str] = []
+    window: list[list[str]] = []
+    total_rows = 0      # 数据行数（不含表头）
+    total_cols = 0
+
+    for idx, row in enumerate(csv.reader(io.StringIO(text), delimiter=delimiter)):
+        if idx == 0:
+            header = row[:_TABLE_MAX_COLS]
+            if len(row) > _TABLE_MAX_COLS:
+                truncated = True
+            total_cols = len(header)
+            continue
+        if total_rows >= _TABLE_MAX_ROWS:
+            truncated = True
+            break
+        total_rows += 1
+        cols = len(row)
+        if cols > _TABLE_MAX_COLS:
+            cols = _TABLE_MAX_COLS
+            truncated = True
+        if cols > total_cols:
+            total_cols = cols
+        # 数据行从 1 开始编号，窗口左闭右开
+        if row_offset < total_rows <= row_offset + row_limit:
+            window.append(row[col_offset:col_offset + col_limit])
+
+    width = max(0, min(col_limit, total_cols - col_offset))
+    columns: list[str] = []
+    used: dict[str, int] = {}
+    for i in range(col_offset, col_offset + width):
+        name = (header[i].strip() if i < len(header) else "") or f"列{i + 1}"
+        if name in used:            # 重名列加后缀，避免前端 key 冲突
+            used[name] += 1
+            name = f"{name} ({used[name]})"
+        else:
+            used[name] = 1
+        columns.append(name)
+
+    rows = [r[:width] + [""] * (width - len(r)) for r in window]
+    return {
+        "columns": columns,
+        "rows": rows,
+        "row_offset": row_offset,
+        "row_limit": row_limit,
+        "col_offset": col_offset,
+        "col_limit": col_limit,
+        "total_rows": total_rows,
+        "total_cols": total_cols,
+        "encoding": encoding,
+        "delimiter": delimiter,
+        "truncated": truncated,
+    }
 
 
 def _posix_rel(path: str, root: str) -> str:
@@ -1409,6 +1513,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_workspace_raw(parse_qs(parsed.query))
         elif route == "/api/workspace/download":
             self._handle_workspace_download(parse_qs(parsed.query))
+        elif route == "/api/workspace/table":
+            self._handle_workspace_table(parse_qs(parsed.query))
         elif (m := re.match(r"^/api/workspace/asset/([^/]+)/(.+)$", route)):
             self._handle_workspace_asset(m.group(1), unquote(m.group(2)))
         elif route == "/api/attachment":
@@ -2444,6 +2550,19 @@ class _RequestHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if ext in _TABLE_EXTS:
+            if st.st_size > _TABLE_MAX_BYTES:
+                self._json({**base, "kind": "unsupported",
+                            "reason": f"表格超过 {_TABLE_MAX_BYTES // (1024 * 1024)}MB，暂不预览"})
+                return
+            page = _read_table(ap, 0, _TABLE_PAGE_ROWS, 0, _TABLE_PAGE_COLS)
+            url = (
+                f"/api/workspace/table?workspace_id={quote(wid)}"
+                f"&path={quote(rel_path)}"
+            )
+            self._json({**base, "kind": "table", "url": url, "table": page})
+            return
+
         if st.st_size > _RAW_MAX_BYTES:
             self._json({**base, "kind": "unsupported",
                         "reason": f"文件超过 {_RAW_MAX_BYTES // (1024 * 1024)}MB，暂不预览"})
@@ -2476,12 +2595,22 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if len(lines) > _TEXT_PREVIEW_LINES:
             lines = lines[:_TEXT_PREVIEW_LINES]
             truncated = True
+        # 超长单行（压缩后的 JS、单行 JSON）会拖死前端高亮，先按行截断
+        if any(len(line) > _TEXT_LINE_MAX_CHARS for line in lines):
+            lines = [line[:_TEXT_LINE_MAX_CHARS] for line in lines]
+            truncated = True
+        content = "\n".join(lines)
+        # 再压一层总字符上限：5000 行 × 4000 字符仍可能让高亮卡住
+        if len(content) > _TEXT_PREVIEW_CHARS:
+            cut = content.rfind("\n", 0, _TEXT_PREVIEW_CHARS)
+            content = content[:cut if cut > 0 else _TEXT_PREVIEW_CHARS]
+            truncated = True
         self._json({
             **base,
             "kind": "text",
             "encoding": encoding,
-            "content": "\n".join(lines),
-            "lines": len(lines),
+            "content": content,
+            "lines": content.count("\n") + 1 if content else 0,
             "truncated": truncated,
         })
 
@@ -2556,6 +2685,41 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     self.wfile.write(chunk)
         except (BrokenPipeError, ConnectionResetError):
             pass   # 用户中途取消下载，无需报错
+
+    def _handle_workspace_table(self, params: dict) -> None:
+        """CSV/TSV 表格分页：按 row_offset/col_offset 返回一个窗口。"""
+        wid = (params.get("workspace_id") or [workspace_config.DEFAULT_ID])[0]
+        rel = (params.get("path") or [""])[0]
+        try:
+            _root, ap = _workspace_path(wid, rel)
+        except ValueError as e:
+            self._fail(400, str(e))
+            return
+        except PermissionError as e:
+            self._fail(403, str(e))
+            return
+        if not os.path.isfile(ap):
+            self._fail(404, "文件不存在")
+            return
+        if os.path.splitext(ap)[1].lower() not in _TABLE_EXTS:
+            self._fail(400, "只有 CSV / TSV 支持表格预览")
+            return
+        try:
+            size = os.path.getsize(ap)
+        except OSError:
+            self._fail(500, "读取失败")
+            return
+        if size > _TABLE_MAX_BYTES:
+            self._fail(413, "表格过大，暂不预览")
+            return
+        page = _read_table(
+            ap,
+            _int_param(params, "row_offset", 0, 0, _TABLE_MAX_ROWS),
+            _int_param(params, "row_limit", _TABLE_PAGE_ROWS, 1, _TABLE_PAGE_ROWS),
+            _int_param(params, "col_offset", 0, 0, _TABLE_MAX_COLS),
+            _int_param(params, "col_limit", _TABLE_PAGE_COLS, 1, _TABLE_PAGE_COLS),
+        )
+        self._json(page)
 
     def _handle_workspace_asset(self, workspace_id: str, rel: str) -> None:
         """HTML 预览的静态资源：按路径读取工作区内任意文件。

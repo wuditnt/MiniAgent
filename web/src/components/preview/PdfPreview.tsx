@@ -20,7 +20,8 @@ import type { PreviewProps } from "./registry";
 const MIN_SCALE = 0.3;
 const MAX_SCALE = 4;
 
-export default function PdfPreview({ url, name }: PreviewProps) {
+export default function PdfPreview({ data, name }: PreviewProps) {
+  const url = data.url || "";
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
@@ -34,6 +35,7 @@ export default function PdfPreview({ url, name }: PreviewProps) {
 
   // 加载文档：pdf.js 的 worker 与文档实例都要在卸载时销毁，否则切文件会漏内存
   useEffect(() => {
+    if (!url) return;
     let alive = true;
     let task: PDFDocumentLoadingTask | null = null;
     setLoading(true);
