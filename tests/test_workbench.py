@@ -11,6 +11,8 @@
   7. 二进制 —— kind=binary
   8. 大文件 —— 行数截断标记
   9. 缺失文件 / 非图片 raw —— 404 / 403
+ 10. PDF —— kind=pdf，raw 接口返回 application/pdf
+ 11. 下载 —— attachment 头、中文文件名、越界拦截
 """
 
 from __future__ import annotations
@@ -59,6 +61,14 @@ def _json(path: str):
     return code, json.loads(body.decode("utf-8"))
 
 
+def _get_headers(path: str) -> tuple[int, dict, bytes]:
+    try:
+        with urllib.request.urlopen(BASE + path, timeout=5) as r:
+            return r.status, dict(r.headers), r.read()
+    except HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
 def _api_dir(wid: str = "default", path: str = ""):
     return _json(f"/api/workspace/dir?workspace_id={wid}&path={quote(path)}")
 
@@ -81,6 +91,10 @@ def _make_workspace() -> str:
         f.write("\n".join(f"line {i}" for i in range(6000)))
     with open(os.path.join(ws, "pic.png"), "wb") as f:
         f.write(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    with open(os.path.join(ws, "doc.pdf"), "wb") as f:
+        f.write(b"%PDF-1.4\n%test\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n")
+    with open(os.path.join(ws, "中文 报告.txt"), "w", encoding="utf-8") as f:
+        f.write("中文报告\n")
     with open(os.path.join(ws, "page.html"), "w", encoding="utf-8") as f:
         f.write(
             "<!doctype html><html><head>"
@@ -263,6 +277,43 @@ def test_errors():
     print("✓ 缺失文件 404；非图片 raw 403")
 
 
+def test_pdf_preview():
+    code, data = _api_file("doc.pdf")
+    assert code == 200 and data["kind"] == "pdf", data
+    assert data["url"].startswith("/api/workspace/raw?"), data
+    code, ctype, body = _get(data["url"])
+    assert code == 200 and ctype == "application/pdf", (code, ctype)
+    assert body.startswith(b"%PDF"), body[:8]
+    print("✓ PDF：kind=pdf；raw 接口返回 application/pdf 原始字节")
+
+
+def test_download():
+    path = f"/api/workspace/download?workspace_id=default&path={quote('a.py')}"
+    code, headers, body = _get_headers(path)
+    assert code == 200 and body.strip() == b"print('hello')", (code, body)
+    disp = headers.get("Content-Disposition", "")
+    assert disp.startswith("attachment;"), disp
+
+    # 中文文件名：RFC 5987 的 filename* 要能还原，ASCII 兜底名不能是空的
+    path = f"/api/workspace/download?workspace_id=default&path={quote('中文 报告.txt')}"
+    code, headers, body = _get_headers(path)
+    assert code == 200 and body.decode("utf-8").strip() == "中文报告", (code, body)
+    disp = headers.get("Content-Disposition", "")
+    assert "filename*=UTF-8''" in disp and "filename=\"" in disp, disp
+
+    # 越界与保护区同样拦得住
+    for bad in ("../ma-wb-secret.txt", ".memory/project.md"):
+        code, _h, _b = _get_headers(
+            f"/api/workspace/download?workspace_id=default&path={quote(bad)}"
+        )
+        assert code == 403, (bad, code)
+    code, _h, _b = _get_headers(
+        f"/api/workspace/download?workspace_id=default&path={quote('nope.txt')}"
+    )
+    assert code == 404, code
+    print("✓ 下载：attachment 头、中文文件名、越界/保护区拦截")
+
+
 def main() -> int:
     print("项目根:", HERE)
     print("---")
@@ -298,6 +349,8 @@ def main() -> int:
         test_html_and_assets()
         test_mhtml()
         test_errors()
+        test_pdf_preview()
+        test_download()
     finally:
         if srv._httpd is not None:
             srv._httpd.shutdown()

@@ -17,6 +17,7 @@ import type { WorkspaceFileData } from "../types";
 import CodeBlock, { langFromExt } from "./CodeBlock";
 import HtmlPreview from "./HtmlPreview";
 import Markdown from "./Markdown";
+import { BinaryPreview } from "./preview/registry";
 
 interface Props {
   workspaceId: string;
@@ -188,6 +189,18 @@ export default function FilePreview({ workspaceId, path, name, ext }: Props) {
               preview={{ mask: "点击全屏查看" }}
             />
           </div>
+        )}
+
+        {/* 二进制类预览（PDF 等）统一交给 registry 按 kind 分发 */}
+        {data?.kind === "pdf" && data.url && (
+          <BinaryPreview
+            kind={data.kind}
+            workspaceId={workspaceId}
+            path={path}
+            name={name}
+            size={data.size}
+            url={data.url}
+          />
         )}
 
         {(data?.kind === "binary" || data?.kind === "unsupported") && (

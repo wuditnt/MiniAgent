@@ -213,7 +213,7 @@ export interface WorkspaceDirData {
 
 /** GET /api/workspace/file */
 export interface WorkspaceFileData {
-  kind: "text" | "image" | "binary" | "unsupported" | "mhtml";
+  kind: "text" | "image" | "pdf" | "binary" | "unsupported" | "mhtml";
   name: string;
   path: string;
   ext: string;

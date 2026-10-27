@@ -201,7 +201,7 @@ cd web; npm run dev                  # 终端 2：Vite :5173，/api 自动代理
   - **记忆**页签：编辑用户画像、开关「启用记忆 / 自动提炼」与注入预算（详见下文「记忆系统」一节）
   - **工作区记忆**（不在系统配置里）：左侧抽屉每个工作区的快捷工具区（改名按钮左边）打开，按工作区查看/编辑**项目记忆**、查看/删除该工作区的**主题摘要**
   - 插件管理：展示当前全部工具（名称 / 来源 / 分组 / 签名），按来源标记为 core / builtin / user / mcp，支持查看 dangerous / exclusive 标记与分组汇总，便于快速了解 Agent 当前具备的能力
-- **右侧工作台抽屉**：顶栏最右侧图标展开/收起。初始为「开始」页，点击「工作区文件」进入目录列表；点文件新建标签页，支持代码/文本（行号+高亮）、Markdown（预览/源码）、HTML / MHTML（iframe 预览/源码，默认预览，脚本沙箱隔离）、图片预览；关闭全部标签后抽屉自动收起，再次打开回到开始页（只读，不修改文件）
+- **右侧工作台抽屉**：顶栏最右侧图标展开/收起。初始为「开始」页，点击「工作区文件」进入目录列表；点文件新建标签页，支持代码/文本（行号+高亮）、Markdown（预览/源码）、HTML / MHTML（iframe 预览/源码，默认预览，脚本沙箱隔离）、图片、PDF（翻页/缩放）预览，文件行 hover 可下载；关闭全部标签后抽屉自动收起，再次打开回到开始页（只读，不修改文件）
 - **运行轨迹抽屉**：助手消息脚注区 / 侧栏会话项的时钟图标打开，按 `run_id → turn` 回放会话事件流（来源着色、可展开、单轮逐条回放、按类型过滤）。与会话 JSON 双写的事实层，详见下文「可追溯运行（事件流）」一节
 - **多会话与搜索**：对话本地持久化（`~/.mini-agent/sessions/*.json`，原子写），搜索支持标题 + 全文、空格分隔的多词 AND、命中片段高亮，点结果直接滚动定位到那条消息并闪烁
 - **上下文记忆**：超长对话三级收敛 —— 先裁较早的工具结果、再把较早整轮滚动摘要成一段（保留任务目标/决策/进度/待办）、最后滑动窗口硬截断（保留 system + 摘要 + 最近 8 轮）。裁剪以「轮」为单位，`tool_calls` 与 `tool` 结果要么一起留要么一起删，不会配对错位导致接口报错
@@ -391,18 +391,24 @@ python -m core --web --no-login
 - 入口：主界面顶栏最右侧的布局图标；桌面端默认 420px，可拖拽左边缘调整宽度并记住；右上角「全屏」让抽屉占满主区（保留左侧导航栏），再次点击还原。窄屏（≤1000px）为右侧浮层。
 - 顶部标签页：`文件` 列表页 + 每个已打开文件一个标签；同一文件不会重复开标签。
 - 文件列表：单层目录 + 面包屑，目录在前、文件在后；隐藏 `.memory` 与 `.attachments`。
-- 预览格式：代码/纯文本（Prism 高亮 + 行号）、Markdown（预览/源码切换）、HTML / MHTML（sandbox iframe 预览，可切源码）、图片（png/jpg/gif/webp/bmp/svg）；文件工具栏支持一键复制内容与重新加载。
-- 其他二进制/超大文件显示占位说明；文本最多展示 1MB / 5000 行。
+- 预览格式：代码/纯文本（Prism 高亮 + 行号）、Markdown（预览/源码切换）、HTML / MHTML（sandbox iframe 预览，可切源码）、图片（png/jpg/gif/webp/bmp/svg）、PDF（pdf.js，翻页 / 缩放 / 适应宽度）；文件工具栏支持一键复制内容与重新加载。
+- 文件列表每行 hover 出现下载按钮（触屏常显），后端以 attachment 形式返回原文件。
+- 其他二进制/超大文件显示占位说明；文本最多展示 1MB / 5000 行，PDF 等原始字节预览上限 20MB。
 - 关闭全部标签 → 抽屉自动收起；再次打开回到「开始」页。
 - 安全边界：接口严格限制在当前工作区内，`../`、绝对路径与 `.memory` 均被拒绝。
 
-对应后端接口：`/api/workspace/dir`、`/api/workspace/file`、`/api/workspace/raw`、`/api/workspace/asset`。
+对应后端接口：`/api/workspace/dir`、`/api/workspace/file`、`/api/workspace/raw`、`/api/workspace/download`、`/api/workspace/asset`。
 
 HTML / MHTML 预览说明：
 
 - `.html` / `.htm` 在 sandbox iframe 中渲染，默认预览，可切源码；相对 CSS / 图片 / JS 通过 `/api/workspace/asset` 加载。
 - `.mht` / `.mhtml` 由后端解析（Python 标准库 `email`），提取主 HTML 与内嵌资源，资源以 `data:` URL 注入预览。
 - iframe 使用 `sandbox="allow-scripts"`：脚本可运行，但没有同源权限，无法访问父页面 DOM / localStorage / cookie。
+
+PDF 预览说明：
+
+- 由前端 `pdfjs-dist` 在浏览器内解析渲染，原始字节走 `/api/workspace/raw`（同源 Cookie 鉴权）；超过 20MB 不预览，提示改用下载。
+- 扩展新格式只需两处：后端 `_BINARY_PREVIEWS`（扩展名 → kind）与前端 `components/preview/registry.tsx`（kind → 懒加载组件）。
 
 ---
 
@@ -798,7 +804,7 @@ scripts\run_tests.bat --real           # 额外跑真实 API 用例（消耗 tok
 | `tests/test_sys_monitor.py` | 系统监控插件 8 项：CPU / 内存 / 磁盘 / 网络 / 开机时长 / 端口占用 |
 | `tests/test_memory.py` | 记忆系统 15 项：存储 / 保护区 / 工具不可见 / prelude / shell / 注入 / 分级淘汰 / 提炼过滤 / 检索合并 / 显式指令 |
 | `tests/test_logging.py` | 文件日志 6 项：按日目录 / 错误聚合 / 幂等重配 / 关闭 / 配置 / 清理 |
-| `tests/test_workbench.py` | 工作台文件接口 9 项：目录 / 安全 / 编码 / 图片 / HTML / MHTML |
+| `tests/test_workbench.py` | 工作台文件接口 11 项：目录 / 安全 / 编码 / 图片 / HTML / MHTML / PDF / 下载 |
 | `tests/test_events.py` | 事件流 8 项：只追加 / 请求可重建 / 裁剪留痕 / 开关 / 兜底 |
 | `tests/test_model_config.py` | 推理等级通用化 8 项：厂家 spec（low/high/max）/ 三种参数风格与 values 重映射 / 迁移 / 会话解析 |
 | `tests/test_web_search.py` | 联网搜索 3 项：后端选择 / DeepSeek Key 复用 / 请求与解析 |

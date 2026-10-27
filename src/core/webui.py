@@ -155,15 +155,24 @@ _CONTENT_TYPES = {
     ".woff": "font/woff",
     ".woff2": "font/woff2",
     ".txt": "text/plain; charset=utf-8",
+    ".pdf": "application/pdf",
 }
 
 # 工作台文件浏览：只读、只允许工作区内
 _TEXT_PREVIEW_BYTES = 1 * 1024 * 1024   # 文本最多读 1MB
 _TEXT_PREVIEW_LINES = 5000              # 最多展示 5000 行
 _DIR_MAX_ENTRIES = 500                  # 目录最多返回 500 项
-_RAW_MAX_BYTES = 20 * 1024 * 1024       # 图片/原始文件上限 20MB
+_RAW_MAX_BYTES = 20 * 1024 * 1024       # 原始字节预览（图片/PDF 等）上限 20MB
 _HIDDEN_DIRS = frozenset({".memory", ".attachments"})
 _IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"})
+
+# 「按原始字节预览」的格式登记表：扩展名 → /api/workspace/file 返回的 kind。
+# 新增一种格式只需两步：这里加一行（必要时补 _CONTENT_TYPES），
+# 前端 components/preview/registry.tsx 里注册一个渲染组件；其余逻辑不用动。
+_BINARY_PREVIEWS = {
+    **{ext: "image" for ext in _IMAGE_EXTS},
+    ".pdf": "pdf",
+}
 
 # 常见文本扩展名：统一按 text/plain 返回，具体高亮交给前端
 for _ext in (
@@ -688,6 +697,12 @@ def _workspace_path(workspace_id: str, rel: str) -> tuple[str, str]:
     if memory.is_memory_path(ap, root):
         raise PermissionError(".memory 是系统记忆目录，禁止访问")
     return root, ap
+
+
+def _content_disposition(name: str) -> str:
+    """下载响应头：ASCII 兜底名 + RFC 5987 的 UTF-8 真名（中文名不乱码）。"""
+    fallback = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "download"
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name)}"
 
 
 def _posix_rel(path: str, root: str) -> str:
@@ -1392,6 +1407,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_workspace_file(parse_qs(parsed.query))
         elif route == "/api/workspace/raw":
             self._handle_workspace_raw(parse_qs(parsed.query))
+        elif route == "/api/workspace/download":
+            self._handle_workspace_download(parse_qs(parsed.query))
         elif (m := re.match(r"^/api/workspace/asset/([^/]+)/(.+)$", route)):
             self._handle_workspace_asset(m.group(1), unquote(m.group(2)))
         elif route == "/api/attachment":
@@ -2391,16 +2408,17 @@ class _RequestHandler(BaseHTTPRequestHandler):
             "mtime": st.st_mtime,
         }
 
-        if ext in _IMAGE_EXTS:
+        kind = _BINARY_PREVIEWS.get(ext)
+        if kind:
             if st.st_size > _RAW_MAX_BYTES:
                 self._json({**base, "kind": "unsupported",
-                            "reason": f"图片超过 {_RAW_MAX_BYTES // (1024 * 1024)}MB，暂不预览"})
+                            "reason": f"文件超过 {_RAW_MAX_BYTES // (1024 * 1024)}MB，暂不预览"})
                 return
             url = (
                 f"/api/workspace/raw?workspace_id={quote(wid)}"
                 f"&path={quote(rel_path)}"
             )
-            self._json({**base, "kind": "image", "url": url})
+            self._json({**base, "kind": kind, "url": url})
             return
 
         if ext in (".mht", ".mhtml"):
@@ -2479,8 +2497,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._fail(403, str(e))
             return
         ext = os.path.splitext(ap)[1].lower()
-        if ext not in _IMAGE_EXTS:
-            self._fail(403, "raw 接口只用于图片预览")
+        if ext not in _BINARY_PREVIEWS:
+            self._fail(403, "该文件不支持原始字节读取")
             return
         if not os.path.isfile(ap):
             self._fail(404, "文件不存在")
@@ -2488,7 +2506,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         try:
             size = os.path.getsize(ap)
             if size > _RAW_MAX_BYTES:
-                self._fail(413, "图片过大，暂不预览")
+                self._fail(413, "文件过大，暂不预览")
                 return
             with open(ap, "rb") as f:
                 data = f.read()
@@ -2499,8 +2517,45 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", _CONTENT_TYPES.get(ext, "application/octet-stream"))
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)
+
+    def _handle_workspace_download(self, params: dict) -> None:
+        """下载工作区内的单个文件：任意类型、任意大小，按附件落盘。"""
+        wid = (params.get("workspace_id") or [workspace_config.DEFAULT_ID])[0]
+        rel = (params.get("path") or [""])[0]
+        try:
+            _root, ap = _workspace_path(wid, rel)
+        except ValueError as e:
+            self._fail(400, str(e))
+            return
+        except PermissionError as e:
+            self._fail(403, str(e))
+            return
+        if not os.path.isfile(ap):
+            self._fail(404, "文件不存在")
+            return
+        name = os.path.basename(ap)
+        ext = os.path.splitext(name)[1].lower()
+        try:
+            size = os.path.getsize(ap)
+            f = open(ap, "rb")
+        except OSError:
+            self._fail(500, "读取失败")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", _CONTENT_TYPES.get(ext, "application/octet-stream"))
+        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Disposition", _content_disposition(name))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            with f:
+                while chunk := f.read(64 * 1024):
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass   # 用户中途取消下载，无需报错
 
     def _handle_workspace_asset(self, workspace_id: str, rel: str) -> None:
         """HTML 预览的静态资源：按路径读取工作区内任意文件。

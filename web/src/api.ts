@@ -255,10 +255,16 @@ export async function fetchWorkspaceFile(
   return res.json();
 }
 
-/** 图片预览地址（raw 接口只服务图片） */
+/** 原始字节预览地址（图片 / PDF 等二进制预览共用） */
 export function workspaceRawUrl(workspaceId: string, path: string): string {
   const qs = new URLSearchParams({ workspace_id: workspaceId, path });
   return `/api/workspace/raw?${qs}`;
+}
+
+/** 文件下载地址：后端以 attachment 形式返回，浏览器直接落盘 */
+export function workspaceDownloadUrl(workspaceId: string, path: string): string {
+  const qs = new URLSearchParams({ workspace_id: workspaceId, path });
+  return `/api/workspace/download?${qs}`;
 }
 
 export async function createWorkspace(

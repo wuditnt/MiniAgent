@@ -2525,6 +2525,30 @@ body,
   font-size: 11px;
 }
 
+/* 行尾下载按钮：桌面端 hover 才出现，触屏常显 */
+.wb-row-dl {
+  flex: none;
+  color: #bbb;
+  font-size: 13px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.wb-row:hover .wb-row-dl,
+.wb-row:focus-within .wb-row-dl {
+  opacity: 1;
+}
+
+.wb-row-dl:hover {
+  color: #1677ff;
+}
+
+@media (hover: none) {
+  .wb-row-dl {
+    opacity: 1;
+  }
+}
+
 .wb-error {
   margin: 12px;
   padding: 10px;
@@ -2671,6 +2695,71 @@ body,
 .wb-placeholder-meta {
   font-size: 11px;
   color: #bbb;
+}
+
+/* ---- PDF 预览 ---- */
+.wb-pdf {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.wb-pdf-toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #f5f5f5;
+  font-size: 11.5px;
+  color: #888;
+}
+
+.wb-pdf-page {
+  min-width: 52px;
+  text-align: center;
+  color: #666;
+}
+
+.wb-pdf-sep {
+  width: 1px;
+  height: 14px;
+  margin: 0 4px;
+  background: #eee;
+}
+
+.wb-pdf-zoom {
+  min-width: 52px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.wb-pdf-zoom:hover {
+  color: #1677ff;
+}
+
+.wb-pdf-stage {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  background: #f5f6f8;
+  text-align: center;
+}
+
+.wb-pdf-canvas {
+  border-radius: 4px;
+  background: #fff;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.12);
+}
+
+.wb-preview-loading {
+  padding: 24px;
+  text-align: center;
+  color: #aaa;
+  font-size: 12px;
 }
 
 @media (max-width: 1000px) {

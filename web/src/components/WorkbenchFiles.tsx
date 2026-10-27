@@ -5,6 +5,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import {
+  DownloadOutlined,
   FileImageOutlined,
   FileMarkdownOutlined,
   FileTextOutlined,
@@ -12,7 +13,7 @@ import {
   ReloadOutlined,
 } from "@ant-design/icons";
 import { Empty, Spin, Tooltip } from "antd";
-import { fetchWorkspaceDir } from "../api";
+import { fetchWorkspaceDir, workspaceDownloadUrl } from "../api";
 import type { WorkspaceDirData, WorkspaceEntry } from "../types";
 
 interface Props {
@@ -109,7 +110,19 @@ export default function WorkbenchFiles({ workspaceId, path, onPathChange, onOpen
                   {entry.name}
                 </span>
                 {entry.type === "file" && (
-                  <span className="wb-row-meta">{formatSize(entry.size)}</span>
+                  <>
+                    <Tooltip title="下载">
+                      <a
+                        className="wb-row-dl"
+                        href={workspaceDownloadUrl(workspaceId, entry.path)}
+                        download={entry.name}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <DownloadOutlined />
+                      </a>
+                    </Tooltip>
+                    <span className="wb-row-meta">{formatSize(entry.size)}</span>
+                  </>
                 )}
               </div>
             ))}
