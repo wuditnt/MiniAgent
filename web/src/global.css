@@ -1646,7 +1646,7 @@ body,
   font-size: 13px;
 }
 
-.skill-pop-item.active .skill-pop-name {
+.skill-pop-item.selected .skill-pop-name {
   color: #1677ff;
 }
 

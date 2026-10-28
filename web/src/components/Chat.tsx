@@ -49,6 +49,7 @@ import WelcomePane from "./WelcomePane";
 import SkillInput from "./composer/SkillInput";
 import SkillPicker from "./composer/SkillPicker";
 import { hasSkillToken, parseComposer, skillToken } from "./composer/skillMarks";
+import { detectSlashCommand, stripTrigger } from "./composer/slashCommands";
 import ConfirmPanel from "./ConfirmPanel";
 
 /** token 数缩写：59300 → 59.3K（与参考图一致） */
@@ -687,6 +688,8 @@ export default function Chat({
   const [skills, setSkills] = useState<SkillItem[] | null>(null);
   const [skillName, setSkillName] = useState<string | null>(null);
   const [skillOpen, setSkillOpen] = useState(false);
+  // 触发本次面板的 "/" 在输入串里的位置（选中技能后要把它删掉）
+  const [slashAt, setSlashAt] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevLen = useRef(0);
   // 上一轮的决策卡片：用于在卡片出现的瞬间强制滚到底部
@@ -712,16 +715,20 @@ export default function Chat({
 
   /**
    * 输入变化：
-   *  · 开头敲 "/" → 弹出技能选择器，"/" 本身保留在输入框；
-   *  · 之后继续输入（或删掉 "/"）→ 选择器立即收起，不打扰正常打字。
+   *  · 命中斜杠指令（行首或空格后的 "/"）→ 弹出对应选择器，触发符本身保留；
+   *  · 之后继续输入（或删掉触发符）→ 选择器立即收起，不打扰正常打字。
+   * 触发判定统一走 composer/slashCommands，以后加新指令只改那个注册表。
    */
   const handleInputChange = (v: string) => {
     if (!hasSkillToken(v)) setSkillName(null);
-    if (v === "/" && !busy) {
+    const hit = detectSlashCommand(input, v);
+    if (hit && hit.command.id === "skill" && !busy) {
       ensureSkills();
       setSkillOpen(true);
+      setSlashAt(hit.index);
     } else if (skillOpen) {
       setSkillOpen(false);
+      setSlashAt(null);
     }
     setInput(v);
   };
@@ -729,19 +736,19 @@ export default function Chat({
   /**
    * 选中技能：输入框为空时技能块在开头，已有文字时接在文字后面；
    * 技能块与正文之间自动补一个空格，避免粘在一起。
-   * 若是 "/" 开头的命令式输入，选中技能后吃掉那个 "/"，技能块放在最前面。
+   * 斜杠触发的情况下先删掉那个 "/"：行首的把它变成「技能块 + 后续文字」。
    */
   const applySkill = (name: string) => {
-    const { text } = parseComposer(input);
+    const raw = slashAt === null ? input : stripTrigger(input, slashAt);
+    const leading = slashAt === 0;
+    const { text } = parseComposer(raw);
+    const body = text.trim();
     const token = skillToken(name);
-    if (text.startsWith("/")) {
-      const rest = text.slice(1).replace(/^\s+/, "");
-      setInput(rest ? `${token} ${rest}` : `${token} `);
-    } else {
-      setInput(text ? `${text} ${token}` : `${token} `);
-    }
+    const next = !body ? `${token} ` : leading ? `${token} ${body}` : `${body} ${token}`;
+    setInput(next);
     setSkillName(name);
     setSkillOpen(false);
+    setSlashAt(null);
     // 等 DOM 重建完再聚焦，否则光标落在旧节点上
     requestAnimationFrame(() => senderRef.current?.focus?.());
   };
@@ -1165,6 +1172,7 @@ export default function Chat({
                         open={skillOpen}
                         onOpenChange={(o) => {
                           if (o) ensureSkills();
+                          else setSlashAt(null);
                           setSkillOpen(o);
                         }}
                         onPick={applySkill}
