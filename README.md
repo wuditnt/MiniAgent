@@ -518,6 +518,19 @@ Web UI 里还可以**显式指定**：输入区第三个按钮（或输入 `/`�
 几十个技能也不会吃掉上下文 —— 这是「清单 + 按需加载」相比「全部塞进
 system prompt」的决定性差异。
 
+**自带技能（`skills/`）：**
+
+| 名称 | 用途 | 默认产出 |
+| --- | --- | --- |
+| `csv-analysis` | CSV 数据分析，结论可复核 | 对话内 |
+| `rich-render` | 富渲染输出约定（ECharts / 公式 / 表格） | 对话内 |
+| `文档写作` | 需求说明、方案、手册等成篇文档 | `docs/` |
+| `会议纪要` | 记录整理成结论、待办、责任人 | `docs/` |
+| `调研简报` | 检索 + 交叉验证，一页式简报 | `reports/` |
+| `日志排错` | 从日志定位根因，给修复与验证 | `reports/`（按需） |
+| `翻译润色` | 中英互译与润色，术语统一 | 对话内 |
+| `演示大纲` | 逐页 PPT 大纲 + 讲稿要点 | `docs/` |
+
 frontmatter 的 `name` / `description` 都可省略：`name` 省略时用目录名，
 `description` 省略时取正文首行。约定与进阶说明见
 [`skills_user/README.md`](skills_user/README.md)。
@@ -954,7 +967,7 @@ mini-agent/
 │   ├── sys_extra_tools.py    系统增强
 │   └── sys_monitor.py        系统监控：CPU / 内存 / 磁盘 / 网络 / 开机时长 / 端口占用
 ├── plugins_user/             你的插件（含示例 text_tools.py 与开发指南）
-├── skills/                   自带技能（csv-analysis 示例）
+├── skills/                   自带技能（8 个，清单见「加一个技能」）
 ├── skills_user/              你的技能（含约定说明，一个目录 + SKILL.md）
 ├── mcp/
 │   ├── mcp_servers.json      MCP 配置
