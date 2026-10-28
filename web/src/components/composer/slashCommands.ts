@@ -74,3 +74,24 @@ export function stripTrigger(value: string, index: number, trigger = "/"): strin
   if (value[index] !== trigger) return value;
   return value.slice(0, index) + value.slice(index + 1);
 }
+
+/** 取触发符之后、当前行结束前的查询词（用于技能模糊搜索） */
+export function skillQuery(value: string, index: number): string {
+  if (value[index] !== "/") return "";
+  const nl = value.indexOf("\n", index);
+  const end = nl < 0 ? value.length : nl;
+  return value.slice(index + 1, end).trim();
+}
+
+/**
+ * 删掉「触发符 + 本行查询词」，保留行尾空白与后续行。
+ * 选中技能后用它替换，避免只删 "/" 而把查询词留在输入框里。
+ */
+export function stripSkillCommand(value: string, index: number): string {
+  if (value[index] !== "/") return value;
+  const nl = value.indexOf("\n", index);
+  const end = nl < 0 ? value.length : nl;
+  let cut = end;
+  while (cut > index + 1 && /\s/.test(value[cut - 1])) cut--;
+  return value.slice(0, index) + value.slice(cut);
+}

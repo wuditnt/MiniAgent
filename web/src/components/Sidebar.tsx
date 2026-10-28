@@ -10,6 +10,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   AppstoreOutlined,
+  BookOutlined,
   BulbOutlined,
   DeleteOutlined,
   EditOutlined,
@@ -54,6 +55,8 @@ interface Props {
   onSearch: (q: string) => void;
   /** 打开「系统配置」弹窗（模型 / 通用） */
   onOpenSettings: () => void;
+  /** 打开技能管理页（仅本机可用；远程访问时不渲染入口） */
+  onOpenSkills: () => void;
 }
 
 /** 把命中的词用 <mark> 包起来（多词 AND，命中片段全部高亮） */
@@ -125,6 +128,7 @@ export default function Sidebar({
   remote = false,
   onSearch,
   onOpenSettings,
+  onOpenSkills,
 }: Props) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -213,6 +217,12 @@ export default function Sidebar({
       {/* ③④ 可滚动区：功能菜单 + 工作区 */}
       <div className="sidebar-scroll">
         <div className="sidebar-menu">
+          {!remote && (
+            <div className="menu-item" onClick={onOpenSkills}>
+              <BookOutlined className="menu-item-icon" />
+              <span>技能</span>
+            </div>
+          )}
           <div className="menu-item" onClick={() => message.info("「插件」功能开发中")}>
             <AppstoreOutlined className="menu-item-icon" />
             <span>插件</span>

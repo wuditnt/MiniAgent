@@ -15,6 +15,7 @@ import type {
   ModelsInfo,
   SessionItem,
   SettingsInfo,
+  SkillDetail,
   SkillItem,
   SSEEvent,
   TestResult,
@@ -290,6 +291,50 @@ export async function fetchSkills(): Promise<SkillItem[]> {
   const res = await req("/api/skills");
   if (!res.ok) throw new Error(await readError(res));
   return (await res.json()).skills;
+}
+
+/** GET /api/skills/detail：技能元信息 + SKILL.md 原文（仅本机） */
+export async function fetchSkillDetail(id: string): Promise<SkillDetail> {
+  const res = await req(`/api/skills/detail?id=${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/** PUT /api/skills/content：保存自定义技能的 SKILL.md（仅本机） */
+export async function saveSkillContent(
+  id: string,
+  content: string
+): Promise<{ skill: SkillItem; path: string }> {
+  const res = await req("/api/skills/content", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, content }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/** POST /api/skills/enabled：启停某个技能（仅本机） */
+export async function setSkillEnabled(
+  id: string,
+  enabled: boolean
+): Promise<SkillItem> {
+  const res = await req("/api/skills/enabled", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, enabled }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()).skill;
+}
+
+/** DELETE /api/skills：软删除自定义技能（移动到 .trash，仅本机） */
+export async function deleteSkill(id: string): Promise<{ trash: string }> {
+  const res = await req(`/api/skills?id=${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
 }
 
 export async function createWorkspace(

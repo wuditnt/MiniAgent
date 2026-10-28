@@ -194,6 +194,47 @@ def test_skill_source():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_enabled_state_and_editability():
+    """启用状态：默认启用、停用后不进清单与注入、落盘后重新加载仍生效。"""
+    from webui import _skill_context, _skills_from_message
+
+    root = tempfile.mkdtemp()
+    try:
+        _write(os.path.join(root, "skills", "alpha", "SKILL.md"),
+               "---\nname: alpha\ndescription: 内置技能\n---\n\n内置正文")
+        _write(os.path.join(root, "skills_user", "my-one", "SKILL.md"),
+               "---\nname: my-one\ndescription: 自定义技能\n---\n\n自定义正文")
+        state = os.path.join(root, "skills_state.json")
+        loader = SkillLoader(root, dirs=["skills", "skills_user"], state_path=state)
+        loader.load_all()
+
+        builtin, custom = loader.get("alpha"), loader.get("my-one")
+        assert builtin.id == "builtin:alpha" and not builtin.editable
+        assert custom.id == "custom:my-one" and custom.editable
+        assert builtin.enabled and custom.enabled
+
+        loader.set_enabled(builtin.id, False)
+        assert not loader.get("alpha").enabled
+        assert "alpha" not in loader.render_index()
+        assert "my-one" in loader.render_index()
+        assert _skill_context(loader, ["alpha"])[1] == []
+        assert _skills_from_message(loader, "\x01alpha\x01 你好")[0] == []
+        assert os.path.isfile(state), "停用状态应落盘"
+
+        # 重新加载（模拟重启）：停用状态还在
+        again = SkillLoader(root, dirs=["skills", "skills_user"], state_path=state)
+        again.load_all()
+        assert not again.get("alpha").enabled
+        assert again.get("alpha").body, "停用不影响正文可读"
+
+        again.set_enabled(builtin.id, True)
+        assert again.get("alpha").enabled
+        assert "alpha" in again.render_index()
+        print("✓ 启用状态：默认启用、停用后不进清单/注入、重启后保持")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_skills_from_message():
     """从消息里的不可见包裹字符中解析技能：顺序、去重、3 次上限、未知忽略。"""
     from webui import _skills_from_message

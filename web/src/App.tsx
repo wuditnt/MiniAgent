@@ -35,6 +35,7 @@ import type {
   ReasoningLevel,
   SessionItem,
   SSEEvent,
+  SkillItem,
   TraceEvent,
   User,
   WorkspaceItem,
@@ -50,6 +51,7 @@ import AccountSettingsModal from "./components/AccountSettingsModal";
 import ChangePasswordModal from "./components/ChangePasswordModal";
 import Workbench from "./components/Workbench";
 import Trajectory from "./components/Trajectory";
+import SkillManager from "./components/SkillManager";
 
 const SESSION_KEY = "miniagent.session";
 const MODE_KEY = "miniagent.mode";
@@ -150,6 +152,14 @@ export default function App({
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [wbFullscreen, setWbFullscreen] = useState(false);
+  // 技能管理页：占满主区（对话保持挂载，输入内容不丢）
+  const [skillsPage, setSkillsPage] = useState(false);
+  // 从技能管理页点「在对话框中试用」的一次性请求（nonce 保证只消费一次）
+  const [trialSkill, setTrialSkill] = useState<{
+    name: string;
+    source: "builtin" | "custom";
+    nonce: number;
+  } | null>(null);
   // 运行轨迹抽屉（P0 事实层）：与工作台抽屉互斥，同一位置只开一个
   const [trajectoryOpen, setTrajectoryOpen] = useState(false);
   const [tjSession, setTjSession] = useState("");
@@ -863,10 +873,15 @@ export default function App({
             setSettingsTab("general");
             setSettingsOpen(true);
           }}
+          onOpenSkills={() => {
+            setSkillsPage(true);
+            setWorkbenchOpen(false);
+            setTrajectoryOpen(false);
+          }}
         />
       </aside>
 
-      <div className="main">
+      <div className={`main ${skillsPage ? "skill-view" : ""}`}>
         <header className="app-header">
           <div className="header-left">
             {collapsed && (
@@ -1083,7 +1098,20 @@ export default function App({
           onActivateModel={handleActivateModel}
           onSetReasoning={handleSetReasoning}
           onManageModels={handleManageModels}
+          trialSkill={trialSkill}
         />
+
+        {skillsPage && (
+          <SkillManager
+            workspaceId={ws}
+            onClose={() => setSkillsPage(false)}
+            onTrial={(skill: SkillItem) => {
+              setSkillsPage(false);
+              setMode("agent");     // 试用技能必须处于智能体模式
+              setTrialSkill({ name: skill.name, source: skill.source, nonce: Date.now() });
+            }}
+          />
+        )}
 
         <WorkspaceModal
           open={wsModal !== null}

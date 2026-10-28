@@ -725,6 +725,29 @@ _SKILL_CONTEXT_MAX_CHARS = 20000
 _MAX_SKILLS_PER_RUN = 3
 # 消息里的技能名用不可见控制字符包裹：\x01名字\x01
 _SKILL_MARK_RE = re.compile(r"\x01([^\x01\n]{1,64})\x01")
+# 编辑 SKILL.md 的内容上限：技能正文按需注入，过大的文件只会拖慢上下文
+_SKILL_CONTENT_MAX = 128 * 1024
+
+
+def _skill_payload(skill) -> dict:
+    """技能管理/选择器共用的公开字段（不含正文，避免列表接口过大）。"""
+    return {
+        "id": skill.id,
+        "name": skill.name,
+        "description": skill.description,
+        "source": skill.source,
+        "enabled": skill.enabled,
+        "editable": skill.editable,
+    }
+
+
+def _display_path(path: str) -> str:
+    """展示用路径：项目内显示相对路径，项目外保留绝对路径。"""
+    try:
+        rel = os.path.relpath(path, ROOT)
+    except ValueError:
+        return path
+    return path if rel.startswith("..") else rel.replace("\\", "/")
 
 
 def _skills_from_message(loader, message: str) -> tuple[list[str], str]:
@@ -746,7 +769,8 @@ def _skills_from_message(loader, message: str) -> tuple[list[str], str]:
     for name in picked:
         if name in used:
             continue
-        if loader.get(name) is not None:
+        skill = loader.get(name)
+        if skill is not None and skill.enabled:
             used.append(name)
     return used, cleaned
 
@@ -774,7 +798,7 @@ def _skill_context(loader, names: list[str]) -> tuple[str, list[str]]:
         if name in used:            # 去重：同一技能只注入一次
             continue
         skill = loader.get(name)
-        if skill is None:
+        if skill is None or not skill.enabled:
             continue
         block = f"## 技能：{skill.name}\n\n{skill.body}"
         if len(block) > budget:
@@ -1591,6 +1615,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_tools_list()
         elif route == "/api/skills":
             self._handle_skills_list()
+        elif route == "/api/skills/detail":
+            self._handle_skill_detail(parse_qs(parsed.query))
         elif route == "/api/workspace/dir":
             self._handle_workspace_dir(parse_qs(parsed.query))
         elif route == "/api/workspace/file":
@@ -1650,6 +1676,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_model_test_raw()
         elif route == "/api/models/reasoning":
             self._handle_model_reasoning()
+        elif route == "/api/skills/enabled":
+            self._handle_skill_enabled()
         else:
             m = re.match(r"^/api/models/([^/]+)/(test|activate)$", route)
             if m:
@@ -1670,6 +1698,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if route == "/api/memory":
             self._handle_memory_put()
             return
+        if route == "/api/skills/content":
+            self._handle_skill_save()
+            return
         m = re.match(r"^/api/sessions/([^/]+)$", route)
         if m:
             self._handle_session_update(m.group(1))
@@ -1685,11 +1716,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self._fail(404, f"未知接口：{route}")
 
     def do_DELETE(self) -> None:  # noqa: N802
-        route = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        route = parsed.path
         if not self._guard(route):
             return
         if (m := re.match(r"^/api/users/(\d+)$", route)):
             self._handle_user_delete(int(m.group(1)))
+            return
+        if route == "/api/skills":
+            self._handle_skill_delete(parse_qs(parsed.query))
             return
         if route == "/api/memory/topic":
             self._handle_memory_topic_delete()
@@ -2311,17 +2346,160 @@ class _RequestHandler(BaseHTTPRequestHandler):
         })
 
     def _handle_skills_list(self) -> None:
-        """可用技能清单（输入框的技能选择器用）。
+        """可用技能清单（输入框选择器 / 技能管理页共用）。
 
         source：builtin = 内置 skills/；custom = 用户自己创建（skills_user/ 等，
         未来由对话自动生成的技能也归入这一类）。
         """
         loader = self.web.skill_loader
         skills = [] if loader is None else [
-            {"name": s.name, "description": s.description, "source": s.source}
-            for s in loader.all()
+            _skill_payload(s) for s in loader.all()
         ]
         self._json({"skills": skills})
+
+    # ------------------------------------------------ 技能管理（仅本机）
+
+    def _require_local_skill_admin(self) -> bool:
+        """技能编辑/删除/启停只允许本机操作 —— 这些动作改的是服务器自己的文件。"""
+        if self._is_remote():
+            self._fail(403, "技能管理仅支持在本机操作")
+            return False
+        return True
+
+    def _skill_from_params(self, params: dict):
+        loader = self.web.skill_loader
+        if loader is None:
+            self._fail(400, "技能功能未启用")
+            return None
+        skill_id = (params.get("id") or [""])[0]
+        skill = loader.by_id(skill_id) if skill_id else None
+        if skill is None:
+            self._fail(404, "技能不存在")
+            return None
+        return skill
+
+    def _handle_skill_detail(self, params: dict) -> None:
+        if not self._require_local_skill_admin():
+            return
+        skill = self._skill_from_params(params)
+        if skill is None:
+            return
+        try:
+            with open(skill.path, encoding="utf-8") as f:
+                content = f.read()
+        except (OSError, UnicodeDecodeError) as e:
+            self._fail(500, f"读取 SKILL.md 失败：{type(e).__name__}")
+            return
+        from core.skills import parse_frontmatter
+
+        _meta, body = parse_frontmatter(content)
+        self._json({
+            "skill": _skill_payload(skill),
+            # content = 原文（编辑器用）；body = 去掉 frontmatter 的正文（Markdown 渲染用）
+            "content": content,
+            "body": body,
+            "path": _display_path(skill.dir),
+        })
+
+    def _handle_skill_save(self) -> None:
+        if not self._require_local_skill_admin():
+            return
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON")
+            return
+        loader = self.web.skill_loader
+        skill = loader.by_id(str(body.get("id") or "")) if loader else None
+        if skill is None:
+            self._fail(404, "技能不存在")
+            return
+        if not skill.editable:
+            self._fail(403, "系统内置技能不支持编辑")
+            return
+        content = body.get("content")
+        if not isinstance(content, str) or not content.strip():
+            self._fail(400, "content 不能为空")
+            return
+        if len(content) > _SKILL_CONTENT_MAX:
+            self._fail(400, f"技能内容不能超过 {_SKILL_CONTENT_MAX // 1024} KB")
+            return
+
+        from core.skills import parse_frontmatter
+
+        meta, _body = parse_frontmatter(content)
+        dir_name = os.path.basename(skill.dir)
+        new_name = ((meta.get("name") or "").strip() or dir_name).strip()
+        if not new_name:
+            self._fail(400, "技能名不能为空")
+            return
+        for other in loader.all():
+            if other.id != skill.id and other.name == new_name:
+                self._fail(400, f"技能名冲突：已有同名技能「{new_name}」")
+                return
+
+        tmp = skill.path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                f.write(content)
+            os.replace(tmp, skill.path)
+        except OSError as e:
+            self._fail(500, f"保存失败：{type(e).__name__}: {e}")
+            return
+        loader.reload()
+        updated = loader.by_id(skill.id)
+        if updated is None:
+            self._fail(500, "保存后未能重新加载该技能")
+            return
+        self._json({"skill": _skill_payload(updated), "path": _display_path(updated.dir)})
+
+    def _handle_skill_enabled(self) -> None:
+        if not self._require_local_skill_admin():
+            return
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON")
+            return
+        loader = self.web.skill_loader
+        if loader is None:
+            self._fail(400, "技能功能未启用")
+            return
+        skill = loader.set_enabled(str(body.get("id") or ""), bool(body.get("enabled")))
+        if skill is None:
+            self._fail(404, "技能不存在")
+            return
+        self._json({"ok": True, "skill": _skill_payload(skill)})
+
+    def _handle_skill_delete(self, params: dict) -> None:
+        """软删除：把技能目录移到同级的 .trash/ 下，保留将来恢复的可能。"""
+        if not self._require_local_skill_admin():
+            return
+        skill = self._skill_from_params(params)
+        if skill is None:
+            return
+        if not skill.editable:
+            self._fail(403, "系统内置技能不支持删除")
+            return
+
+        loader = self.web.skill_loader
+        base = os.path.dirname(skill.dir)
+        trash_root = os.path.join(base, ".trash")
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        target = os.path.join(trash_root, f"{os.path.basename(skill.dir)}-{stamp}")
+        n = 2
+        while os.path.exists(target):
+            target = os.path.join(
+                trash_root, f"{os.path.basename(skill.dir)}-{stamp}-{n}"
+            )
+            n += 1
+        try:
+            os.makedirs(trash_root, exist_ok=True)
+            os.rename(skill.dir, target)
+        except OSError as e:
+            self._fail(500, f"删除失败：{type(e).__name__}: {e}")
+            return
+        loader.forget(skill.id)
+        loader.reload()
+        self._json({"ok": True, "trash": _display_path(target)})
 
     # ------------------------------------------------ 通用配置 API
 

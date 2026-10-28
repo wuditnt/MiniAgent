@@ -21,13 +21,48 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 
+from core._paths import data_dir
 from core.registry import Tool, ToolRegistry
 from core.schema import schema_from_callable
 
 DEFAULT_SKILL_DIRS = ("skills", "skills_user")
+
+
+# ------------------------------------------------------------------ 启用状态
+#
+# 停用是「用户偏好」而不是技能内容，所以不写进 SKILL.md，单独落一份 JSON：
+#   {"disabled": ["builtin:csv-analysis", ...]}
+# 默认全部启用，只记停用的 —— 新加的技能天然是启用状态，不需要迁移。
+
+def default_state_path() -> str:
+    """启用状态文件：<数据目录>/skills_state.json（不随技能目录走）。"""
+    return os.path.join(data_dir(), "skills_state.json")
+
+
+def load_disabled(path: str) -> set[str]:
+    """读停用集合；文件不存在或损坏时当作「全部启用」。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return set()
+    items = data.get("disabled") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return set()
+    return {str(x) for x in items if str(x).strip()}
+
+
+def save_disabled(path: str, disabled: set[str]) -> None:
+    """原子写：先写临时文件再 rename，避免半截 JSON。"""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"disabled": sorted(disabled)}, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
 
 def default_dirs() -> list[str]:
@@ -86,6 +121,12 @@ class Skill:
     # 来源分类：builtin = 项目内置 skills/；custom = 用户自己创建（skills_user/ 等）。
     # 未来「由对话自动生成」的技能也归入 custom —— 它们同样属于用户创建的内容。
     source: str = "builtin"
+    #: 稳定标识：`<source>:<目录名>`，如 custom:my-skill。用于启停状态与增删改接口，
+    #: 不随 frontmatter 里的中文名变化，也不含路径分隔符（无需担心目录穿越）。
+    id: str = ""
+    enabled: bool = True
+    #: 只有自定义技能可编辑 / 删除（系统内置随代码发布，改了就丢）
+    editable: bool = False
 
 
 @dataclass
@@ -109,10 +150,18 @@ class SkillLoadReport:
 class SkillLoader:
     """管理若干个技能目录，产出可用技能清单与正文。"""
 
-    def __init__(self, project_root: str, dirs: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        project_root: str,
+        dirs: list[str] | None = None,
+        state_path: str | None = None,
+    ) -> None:
         self.root = os.path.abspath(project_root)
         self.dirs = list(dirs) if dirs is not None else default_dirs()
         self._skills: dict[str, Skill] = {}
+        # 启用状态：默认落在数据目录；测试可以传临时文件，避免污染真实配置
+        self.state_path = state_path or default_state_path()
+        self._disabled = load_disabled(self.state_path)
 
     # ------------------------------------------------------------ 发现
 
@@ -173,6 +222,7 @@ class SkillLoader:
 
         # 默认目录 skills/ 视为内置，其余（skills_user 等）视为用户自定义
         source = "builtin" if base_dir == DEFAULT_SKILL_DIRS[0] else "custom"
+        skill_id = f"{source}:{dir_name}"
 
         self._skills[name] = Skill(
             name=name,
@@ -181,6 +231,9 @@ class SkillLoader:
             path=path,
             body=body,
             source=source,
+            id=skill_id,
+            enabled=skill_id not in self._disabled,
+            editable=source == "custom",
         )
         report.loaded.append(name)
 
@@ -192,12 +245,45 @@ class SkillLoader:
     def get(self, name: str) -> Skill | None:
         return self._skills.get(name)
 
+    def by_id(self, skill_id: str) -> Skill | None:
+        """按稳定 id 查找（管理接口用；找不到返回 None）。"""
+        for s in self._skills.values():
+            if s.id == skill_id:
+                return s
+        return None
+
     def names(self) -> list[str]:
         return sorted(self._skills)
 
+    def enabled(self) -> list[Skill]:
+        """启用的技能（注入清单、输入框选择器都只看这一份）。"""
+        return [s for s in self.all() if s.enabled]
+
+    # ------------------------------------------------------------ 启用状态
+
+    def set_enabled(self, skill_id: str, enabled: bool) -> Skill | None:
+        """切换启用状态并落盘；返回更新后的技能。"""
+        s = self.by_id(skill_id)
+        if s is None:
+            return None
+        if enabled:
+            self._disabled.discard(skill_id)
+        else:
+            self._disabled.add(skill_id)
+        save_disabled(self.state_path, self._disabled)
+        s.enabled = enabled
+        return s
+
+    def forget(self, skill_id: str) -> None:
+        """技能被删除后清掉它的停用记录，避免配置里留垃圾。"""
+        if skill_id in self._disabled:
+            self._disabled.discard(skill_id)
+            save_disabled(self.state_path, self._disabled)
+
     def render_index(self) -> str:
-        """生成注入 system prompt 的「可用技能清单」。没有技能时返回空串。"""
-        if not self._skills:
+        """生成注入 system prompt 的「可用技能清单」。没有启用的技能时返回空串。"""
+        skills = self.enabled()
+        if not skills:
             return ""
         lines = [
             "## 可用技能（Skills）",
@@ -206,7 +292,7 @@ class SkillLoader:
             "当任务与某个技能的描述匹配时，先调用 use_skill 工具加载它的完整指引，再照着执行。",
             "",
         ]
-        for s in self.all():
+        for s in skills:
             lines.append(f"- {s.name}：{s.description}")
         return "\n".join(lines)
 
@@ -230,6 +316,8 @@ def register_use_skill_tool(registry: ToolRegistry, loader: SkillLoader) -> Tool
         if s is None:
             available = ", ".join(loader.names()) or "（当前没有任何技能）"
             return f"[error] 未知技能：{name}。可用技能：{available}"
+        if not s.enabled:
+            return f"[error] 技能「{name}」已停用，请在技能管理中启用后再使用。"
         return s.body
 
     use_skill.__name__ = "use_skill"

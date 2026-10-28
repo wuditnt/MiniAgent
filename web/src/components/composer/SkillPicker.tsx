@@ -34,11 +34,14 @@ const SOURCE_COLOR: Record<SkillItem["source"], string> = {
 export default function SkillPicker({
   skills,
   open,
+  searching = false,
   onOpenChange,
   onSelect,
 }: {
   skills: SkillItem[] | null;
   open: boolean;
+  /** 正在按 "/查询词" 过滤：不显示「暂无自定义技能」这类空态 */
+  searching?: boolean;
   onOpenChange: (open: boolean) => void;
   onSelect: (item: SkillItem) => void;
 }) {
@@ -138,7 +141,8 @@ export default function SkillPicker({
             <div className="skill-pop-hint">加载中…</div>
           ) : (
             groups.map((group) => {
-              if (!group.items.length && group.source !== "custom") return null;
+              // 搜索时隐藏空分组；平时保留「暂无自定义技能」提示
+              if (!group.items.length && (searching || group.source !== "custom")) return null;
               return (
                 <div className="skill-pop-group" key={group.source}>
                   <div className="skill-pop-label">

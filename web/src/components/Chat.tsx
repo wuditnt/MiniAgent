@@ -55,7 +55,8 @@ import {
   serializeForSend,
   skillToken,
 } from "./composer/skillMarks";
-import { detectSlashCommand, stripTrigger } from "./composer/slashCommands";
+import { detectSlashCommand, skillQuery, stripSkillCommand } from "./composer/slashCommands";
+import { matchSkills } from "./composer/skillSearch";
 import ConfirmPanel from "./ConfirmPanel";
 
 /** token 数缩写：59300 → 59.3K（与参考图一致） */
@@ -489,6 +490,8 @@ interface Props {
   onSetReasoning: (level: ReasoningLevel) => void;
   /** 打开「模型」设置页 */
   onManageModels: () => void;
+  /** 技能管理页点「在对话框中试用」：nonce 变化时把技能插进输入框 */
+  trialSkill?: { name: string; source: "builtin" | "custom"; nonce: number } | null;
 }
 
 /** 推理等级的展示文案（三档：low / high / max） */
@@ -690,14 +693,17 @@ export default function Chat({
   onActivateModel,
   onSetReasoning,
   onManageModels,
+  trialSkill,
 }: Props) {
   const [input, setInput] = useState("");
   const senderRef = useRef<ElementRef<typeof Sender>>(null);
   // 技能选择：清单懒加载（首次点开或输入 "/" 时才请求）
   const [skills, setSkills] = useState<SkillItem[] | null>(null);
   const [skillOpen, setSkillOpen] = useState(false);
-  // 触发本次面板的 "/" 在输入串里的位置（选中技能后要把它删掉）
+  // 触发本次面板的 "/" 在输入串里的位置（选中技能后要把它和查询词一起删掉）
   const [slashAt, setSlashAt] = useState<number | null>(null);
+  // "/" 之后、本行的查询词：继续打字会实时缩小候选
+  const [skillQueryText, setSkillQueryText] = useState("");
   // 已选技能直接从输入串解析，避免「状态与输入框不同步」这类问题
   const pickedSkills = useMemo(() => parseComposer(input).skills, [input]);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -715,29 +721,52 @@ export default function Chat({
   const anchor = useRef<{ height: number; top: number } | null>(null);
   const hiddenCount = Math.max(0, items.length - visibleCount);
 
-  /** 技能清单只在真正需要时拉一次（点开选择器 / 输入 "/"） */
+  /** 技能清单：每次打开选择器都重新拉，保证管理页的启停立即生效 */
   const ensureSkills = () => {
-    if (skills !== null) return;
     fetchSkills()
       .then(setSkills)
       .catch(() => setSkills([]));
   };
 
+  /** 面板当前候选：按查询词过滤并排序；null = 清单还没加载完 */
+  const visibleSkills = useMemo(() => {
+    if (skills === null) return null;
+    return matchSkills(skills.filter((s) => s.enabled), skillQueryText);
+  }, [skills, skillQueryText]);
+
+  /** 结束搜索会话：关闭面板，清掉触发位置与查询词 */
+  const endSkillSearch = () => {
+    setSkillOpen(false);
+    setSlashAt(null);
+    setSkillQueryText("");
+  };
+
   /**
    * 输入变化：
-   *  · 命中斜杠指令（行首或空格后的 "/"）→ 弹出对应选择器，触发符本身保留；
-   *  · 之后继续输入（或删掉触发符）→ 选择器立即收起，不打扰正常打字。
-   * 触发判定统一走 composer/slashCommands，以后加新指令只改那个注册表。
+   *  · 命中斜杠指令（行首或空格后的 "/"）→ 弹出选择器，触发符保留；
+   *  · 已在搜索会话中 → 继续输入只更新查询词，候选实时缩小；
+   *  · 删掉触发符、按 Esc、发送消息 → 结束会话。
+   * 查询词没有匹配时只是不渲染面板（skillOpen 仍为 true），删字可立即恢复。
    */
   const handleInputChange = (v: string) => {
+    if (slashAt !== null) {
+      if (v[slashAt] === "/") {
+        setSkillQueryText(skillQuery(v, slashAt));
+        setSkillOpen(true);
+        setInput(v);
+        return;
+      }
+      endSkillSearch();   // "/" 被删掉，退出搜索会话
+    }
+
     const hit = detectSlashCommand(input, v);
     if (hit && hit.command.id === "skill" && mode === "agent" && !busy) {
       ensureSkills();
       setSkillOpen(true);
       setSlashAt(hit.index);
+      setSkillQueryText(skillQuery(v, hit.index));
     } else if (skillOpen) {
-      setSkillOpen(false);
-      setSlashAt(null);
+      endSkillSearch();
     }
     setInput(v);
   };
@@ -746,7 +775,8 @@ export default function Chat({
    * 选择一个技能（选择器是单选动作，插完即关闭）。
    *  · 上限 3 个，重复也计数；
    *  · 前端不做重复性判断，去重交给后端运行时处理；
-   *  · 输入框为空放最前，已有文字接在后面，已有技能块则紧跟最后一个技能块。
+   *  · 输入框为空放最前，已有文字接在后面，已有技能块则紧跟最后一个技能块；
+   *  · 由 "/查询词" 打开时，把触发符与查询词一起删掉再插入。
    */
   const selectSkill = (item: SkillItem) => {
     if (pickedSkills.length >= MAX_SKILLS) {
@@ -754,10 +784,9 @@ export default function Chat({
       return;
     }
     const leading = slashAt === 0;
-    const base = slashAt === null ? input : stripTrigger(input, slashAt);
+    const base = slashAt === null ? input : stripSkillCommand(input, slashAt);
     setInput(insertSkillToken(base, skillToken(item.name, item.source), leading));
-    setSkillOpen(false);
-    setSlashAt(null);   // 触发符已消费，避免下次插入重复删字符
+    endSkillSearch();
     // 等 DOM 重建完再聚焦，否则光标落在旧节点上
     requestAnimationFrame(() => senderRef.current?.focus?.());
   };
@@ -765,14 +794,35 @@ export default function Chat({
   // 切到快速对话：技能不参与，清掉输入框里的技能块（保留正文）
   useEffect(() => {
     if (mode !== "chat") return;
+    endSkillSearch();
     if (!parseComposer(input).skills.length) return;
     setInput(removeAllSkillTokens(input));
-    setSkillOpen(false);
-    setSlashAt(null);
     message.info("快速对话模式不使用技能，已移除已选技能");
     // 只在模式切换时触发一次；input 用当前值即可
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
+
+  // 从技能管理页点「在对话框中试用」：nonce 变化才算一次新请求，避免重渲染重复插入
+  const lastTrialNonce = useRef(0);
+  useEffect(() => {
+    if (!trialSkill || trialSkill.nonce === lastTrialNonce.current) return;
+    lastTrialNonce.current = trialSkill.nonce;
+    if (mode !== "agent") return;
+    const picked = parseComposer(input).skills;
+    if (picked.length >= MAX_SKILLS) {
+      message.warning(`最多选择 ${MAX_SKILLS} 个技能`);
+      return;
+    }
+    setInput(
+      insertSkillToken(
+        input,
+        skillToken(trialSkill.name, trialSkill.source),
+        picked.length === 0
+      )
+    );
+    requestAnimationFrame(() => senderRef.current?.focus?.());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trialSkill]);
 
   // 切会话时 App 会先清空 items：窗口恢复到默认值
   useEffect(() => {
@@ -1116,7 +1166,7 @@ export default function Chat({
                 onSend(message, pending.length ? pending : undefined);
                 setInput("");
                 setPending([]);
-                setSlashAt(null);
+                endSkillSearch();
               }}
               loading={busy}
               onCancel={onStop}
@@ -1191,12 +1241,18 @@ export default function Chat({
                       {/* 技能选择（第三个交互按钮）：树形列表，插完即关闭；快速对话模式不提供 */}
                       {mode === "agent" && (
                         <SkillPicker
-                          skills={skills}
-                          open={skillOpen}
+                          skills={visibleSkills}
+                          open={skillOpen && (visibleSkills === null || visibleSkills.length > 0)}
+                          searching={skillQueryText !== ""}
                           onOpenChange={(o) => {
-                            if (o) ensureSkills();
-                            else setSlashAt(null);
-                            setSkillOpen(o);
+                            if (o) {
+                              // 从工具栏按钮打开：清掉可能残留的 "/查询" 会话，按「浏览全部」展示
+                              endSkillSearch();
+                              ensureSkills();
+                              setSkillOpen(true);
+                            } else {
+                              endSkillSearch();
+                            }
                           }}
                           onSelect={selectSkill}
                         />

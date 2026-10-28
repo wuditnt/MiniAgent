@@ -251,10 +251,27 @@ export interface WorkspaceFileData {
 
 /** GET /api/skills：一个可用技能 */
 export interface SkillItem {
+  /** 稳定标识：`<source>:<目录名>`，如 custom:my-skill（启停、编辑、删除都用它） */
+  id: string;
   name: string;
   description: string;
   /** builtin=系统内置（skills/）；custom=用户自己创建（skills_user/ 等） */
   source: "builtin" | "custom";
+  /** 停用后不进 system prompt 清单、不出现在输入框选择器 */
+  enabled: boolean;
+  /** 仅自定义技能可编辑 / 删除 */
+  editable: boolean;
+}
+
+/** GET /api/skills/detail：技能元信息 + SKILL.md 原文 */
+export interface SkillDetail {
+  skill: SkillItem;
+  /** 原文（编辑器用，含 frontmatter） */
+  content: string;
+  /** 去掉 frontmatter 的正文（Markdown 渲染用） */
+  body: string;
+  /** 展示用目录路径（项目内为相对路径） */
+  path: string;
 }
 
 /** 一份「服务商 + 模型」配置（GET /api/models 返回，API Key 已脱敏） */
