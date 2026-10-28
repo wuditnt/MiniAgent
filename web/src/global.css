@@ -3614,30 +3614,11 @@ body,
   color: #8c8c8c;
 }
 
-/* 一行最多 4 个；窗口变窄依次降到 3 / 2 / 1 */
+/* 列数随页面宽度自适应：每列至少 280px，能放几列放几列 */
 .skill-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
   gap: 12px;
-  max-width: 1320px;
-}
-
-@media (max-width: 1280px) {
-  .skill-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 1000px) {
-  .skill-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 680px) {
-  .skill-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
 .skill-card {
