@@ -5,14 +5,16 @@
  * 这里用绝对定位挂在 .composer-slot 上（该容器已是 position: relative），
  * left/right 同时为 0 → 宽度天然跟随输入框，浏览器缩放时自动适应。
  *
- * 键盘：打开时默认高亮第一项，↑/↓ 移动，回车选中，Esc 关闭。按键在 document
+ * 键盘：打开时默认高亮第一项，↑/↓ 移动，回车切换勾选，Esc 关闭。按键在 document
  * 捕获阶段拦截 —— 焦点始终在输入框里，必须抢在 Sender 的「回车发送」之前处理。
+ *
+ * 多选：点条目或回车都是「切换勾选」，面板不自动关闭；已选顺序即优先级。
  *
  * 两类来源：内置（skills/）与自定义（skills_user/ 等）；`auto` 是给「未来由对话
  * 自动创建技能」预留的分类，现在不会有数据，但分组逻辑已经就位。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { DownOutlined, ReadOutlined } from "@ant-design/icons";
+import { CheckOutlined, DownOutlined, ReadOutlined } from "@ant-design/icons";
 import type { SkillItem } from "../../types";
 
 const SOURCE_ORDER: SkillItem["source"][] = ["builtin", "custom", "auto"];
@@ -28,13 +30,14 @@ export default function SkillPicker({
   value,
   open,
   onOpenChange,
-  onPick,
+  onToggle,
 }: {
   skills: SkillItem[] | null;
-  value: string | null;
+  /** 已选技能名，按选择顺序（顺序即优先级） */
+  value: string[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onPick: (name: string) => void;
+  onToggle: (name: string) => void;
 }) {
   const rootRef = useRef<HTMLSpanElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -93,7 +96,7 @@ export default function SkillPicker({
         if (!flat.length) return;
         e.preventDefault();
         e.stopPropagation();
-        onPick(flat[Math.min(active, flat.length - 1)].name);
+        onToggle(flat[Math.min(active, flat.length - 1)].name);
         return;
       }
       if (e.key === "Escape") {
@@ -104,7 +107,7 @@ export default function SkillPicker({
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [open, flat, active, onPick, onOpenChange]);
+  }, [open, flat, active, onToggle, onOpenChange]);
 
   // 高亮项保持在可视区内
   useEffect(() => {
@@ -118,11 +121,13 @@ export default function SkillPicker({
     <span className="skill-picker" ref={rootRef}>
       <span
         className={`tb-mode tb-skill${open ? " active" : ""}`}
-        title={value ? `技能：${value}` : "选择技能"}
+        title={value.length ? `已选技能：${value.join("、")}` : "选择技能"}
         onClick={() => onOpenChange(!open)}
       >
         <ReadOutlined />
-        <span className="tb-mode-text">{value || "技能"}</span>
+        <span className="tb-mode-text">
+          {value.length > 1 ? `技能 ${value.length}` : value[0] || "技能"}
+        </span>
         <DownOutlined className="tb-mode-caret" />
       </span>
 
@@ -143,21 +148,25 @@ export default function SkillPicker({
                   {group.items.length ? (
                     group.items.map((s) => {
                       const idx = orderOf.get(s.name) ?? -1;
+                      const selected = value.includes(s.name);
                       return (
                         <div
                           key={s.name}
                           className={[
                             "skill-pop-item",
                             idx === active ? "active" : "",
-                            value === s.name ? "selected" : "",
+                            selected ? "selected" : "",
                           ]
                             .filter(Boolean)
                             .join(" ")}
                           role="option"
-                          aria-selected={value === s.name}
+                          aria-selected={selected}
                           onMouseEnter={() => setActive(idx)}
-                          onClick={() => onPick(s.name)}
+                          onClick={() => onToggle(s.name)}
                         >
+                          <span className={`skill-pop-check${selected ? " on" : ""}`}>
+                            <CheckOutlined />
+                          </span>
                           <span className="skill-pop-name">{s.name}</span>
                           <span className="skill-pop-desc" title={s.description}>
                             {s.description}

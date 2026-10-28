@@ -719,6 +719,10 @@ def _content_disposition(name: str) -> str:
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name)}"
 
 
+# 本轮技能正文的总预算：system prompt 每次模型调用都会重发，多选不能无限堆。
+_SKILL_CONTEXT_MAX_CHARS = 20000
+
+
 def _skill_context(loader, names: list[str]) -> tuple[str, list[str]]:
     """把用户选中的技能正文拼成本轮 system prompt 的附加段。
 
@@ -726,21 +730,45 @@ def _skill_context(loader, names: list[str]) -> tuple[str, list[str]]:
     不该依赖模型是否愿意多走一次工具调用。正文只在本轮 run 内有效（见 Agent.run
     的 extra_system），不写进消息历史，对话气泡保持干净。
 
+    多选规则：去重、保持选择顺序（顺序即优先级）；正文总量超过预算时截断，
+    并在开头明确告知模型「后面的技能未加载」，避免它假装遵循了没看到的内容。
+
     返回 (附加文本, 实际命中的技能名)；未知技能名直接忽略。
     """
     if loader is None or not names:
         return "", []
+
     blocks: list[str] = []
     used: list[str] = []
+    budget = _SKILL_CONTEXT_MAX_CHARS
+    clipped: list[str] = []
     for name in names:
+        if name in used:            # 去重：同一技能只注入一次
+            continue
         skill = loader.get(name)
         if skill is None:
             continue
+        block = f"## 技能：{skill.name}\n\n{skill.body}"
+        if len(block) > budget:
+            # 一个技能都放不下时至少保留前 20k 字符，避免完全失效
+            block = block[:budget] + "\n\n（技能正文过长，已截断）"
+            blocks.append(block)
+            used.append(skill.name)
+            clipped.append(skill.name)
+            break
+        budget -= len(block)
+        blocks.append(block)
         used.append(skill.name)
-        blocks.append(f"## 技能：{skill.name}\n\n{skill.body}")
+
     if not blocks:
         return "", []
-    head = "用户在本轮任务中显式选择了以下技能，请严格按其中的步骤与约束执行："
+
+    head = "用户在本轮任务中显式选择了以下技能，请严格按其中的步骤与约束执行。"
+    if len(used) > 1:
+        head += "多个技能按选择顺序排列，前面的优先级更高；步骤冲突时以靠前的为准。"
+    if clipped:
+        head += f"（正文预算 {_SKILL_CONTEXT_MAX_CHARS} 字符已用尽，"
+        head += f"技能 {clipped[0]} 只加载了开头的部分。）"
     return head + "\n\n" + "\n\n---\n\n".join(blocks), used
 
 

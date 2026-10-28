@@ -48,7 +48,7 @@ import ToolChain from "./ToolChain";
 import WelcomePane from "./WelcomePane";
 import SkillInput from "./composer/SkillInput";
 import SkillPicker from "./composer/SkillPicker";
-import { hasSkillToken, parseComposer, skillToken } from "./composer/skillMarks";
+import { insertSkillToken, parseComposer, removeSkillToken, skillToken } from "./composer/skillMarks";
 import { detectSlashCommand, stripTrigger } from "./composer/slashCommands";
 import ConfirmPanel from "./ConfirmPanel";
 
@@ -499,6 +499,9 @@ const LEVEL_LABEL: Record<ReasoningLevel, string> = {
 const INITIAL_VISIBLE = 30;
 const LOAD_STEP = 30;
 
+/** 一轮最多同时选几个技能：system prompt 每次模型调用都会重发，选太多会挤爆上下文 */
+const MAX_SKILLS = 3;
+
 /**
  * 输入框上方左侧的工作区胶囊：告诉用户「这条对话的文件操作边界在哪」。
  * 新对话可点开切换（未选择时落在默认工作区）；已开始的对话只读展示。
@@ -686,10 +689,11 @@ export default function Chat({
   const senderRef = useRef<ElementRef<typeof Sender>>(null);
   // 技能选择：清单懒加载（首次点开或输入 "/" 时才请求）
   const [skills, setSkills] = useState<SkillItem[] | null>(null);
-  const [skillName, setSkillName] = useState<string | null>(null);
   const [skillOpen, setSkillOpen] = useState(false);
   // 触发本次面板的 "/" 在输入串里的位置（选中技能后要把它删掉）
   const [slashAt, setSlashAt] = useState<number | null>(null);
+  // 已选技能直接从输入串解析，避免「状态与输入框不同步」这类问题
+  const pickedSkills = useMemo(() => parseComposer(input).skills, [input]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevLen = useRef(0);
   // 上一轮的决策卡片：用于在卡片出现的瞬间强制滚到底部
@@ -720,7 +724,6 @@ export default function Chat({
    * 触发判定统一走 composer/slashCommands，以后加新指令只改那个注册表。
    */
   const handleInputChange = (v: string) => {
-    if (!hasSkillToken(v)) setSkillName(null);
     const hit = detectSlashCommand(input, v);
     if (hit && hit.command.id === "skill" && !busy) {
       ensureSkills();
@@ -734,21 +737,24 @@ export default function Chat({
   };
 
   /**
-   * 选中技能：输入框为空时技能块在开头，已有文字时接在文字后面；
-   * 技能块与正文之间自动补一个空格，避免粘在一起。
-   * 斜杠触发的情况下先删掉那个 "/"：行首的把它变成「技能块 + 后续文字」。
+   * 切换一个技能的勾选状态（多选，面板不自动关闭）。
+   *  · 已选 → 删掉对应的技能块；
+   *  · 未选且未超上限 → 插入技能块（"/" 触发时先删掉那个 "/"）；
+   *  · 输入框为空放最前，已有文字接在后面，已有技能块则紧跟最后一个技能块。
    */
-  const applySkill = (name: string) => {
-    const raw = slashAt === null ? input : stripTrigger(input, slashAt);
+  const toggleSkill = (name: string) => {
+    if (pickedSkills.includes(name)) {
+      setInput((prev) => removeSkillToken(prev, name));
+      return;
+    }
+    if (pickedSkills.length >= MAX_SKILLS) {
+      message.warning(`最多同时选择 ${MAX_SKILLS} 个技能`);
+      return;
+    }
     const leading = slashAt === 0;
-    const { text } = parseComposer(raw);
-    const body = text.trim();
-    const token = skillToken(name);
-    const next = !body ? `${token} ` : leading ? `${token} ${body}` : `${body} ${token}`;
-    setInput(next);
-    setSkillName(name);
-    setSkillOpen(false);
-    setSlashAt(null);
+    const base = slashAt === null ? input : stripTrigger(input, slashAt);
+    setInput(insertSkillToken(base, skillToken(name), leading));
+    setSlashAt(null);   // 触发符已消费，避免下次插入重复删字符
     // 等 DOM 重建完再聚焦，否则光标落在旧节点上
     requestAnimationFrame(() => senderRef.current?.focus?.());
   };
@@ -1093,7 +1099,7 @@ export default function Chat({
                 onSend(text.trim(), pending.length ? pending : undefined, picked);
                 setInput("");
                 setPending([]);
-                setSkillName(null);
+                setSlashAt(null);
               }}
               loading={busy}
               onCancel={onStop}
@@ -1165,17 +1171,17 @@ export default function Chat({
                           <DownOutlined className="tb-mode-caret" />
                         </span>
                       </Dropdown>
-                      {/* 技能选择（第三个交互按钮）：内置 / 自定义，单选 */}
+                      {/* 技能选择（第三个交互按钮）：内置 / 自定义，多选（最多 3 个） */}
                       <SkillPicker
                         skills={skills}
-                        value={skillName}
+                        value={pickedSkills}
                         open={skillOpen}
                         onOpenChange={(o) => {
                           if (o) ensureSkills();
                           else setSlashAt(null);
                           setSkillOpen(o);
                         }}
-                        onPick={applySkill}
+                        onToggle={toggleSkill}
                       />
                       {/* 确认模式：仅智能体模式有意义（chat 模式无危险本地工具） */}
                       {mode === "agent" && (

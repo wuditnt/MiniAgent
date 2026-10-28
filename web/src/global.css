@@ -1640,6 +1640,18 @@ body,
   background: #f5f8ff;
 }
 
+.skill-pop-check {
+  flex: none;
+  width: 14px;
+  color: #1677ff;
+  font-size: 12px;
+  opacity: 0;
+}
+
+.skill-pop-check.on {
+  opacity: 1;
+}
+
 .skill-pop-name {
   flex: none;
   color: #262626;

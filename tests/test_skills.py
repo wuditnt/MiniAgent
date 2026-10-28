@@ -194,25 +194,42 @@ def test_skill_source():
 
 
 def test_skill_context_injection():
-    """Web 端「本轮选中技能」→ system prompt 附加段：命中注入、未知忽略。"""
-    from webui import _skill_context
+    """Web 端「本轮选中技能」→ system prompt 附加段：多选、去重、保序、预算截断。"""
+    from webui import _SKILL_CONTEXT_MAX_CHARS, _skill_context
 
     root = tempfile.mkdtemp()
     try:
         _write(os.path.join(root, "skills", "demo", "SKILL.md"),
                "---\nname: demo\n---\n\n# 演示正文\n第一步")
+        _write(os.path.join(root, "skills", "second", "SKILL.md"),
+               "---\nname: second\n---\n\n# 第二个技能\n第二步")
         loader = SkillLoader(root, dirs=["skills"])
         loader.load_all()
 
-        ctx, used = _skill_context(loader, ["demo"])
-        assert used == ["demo"], used
-        assert "## 技能：demo" in ctx and "第一步" in ctx, ctx
+        # 单选：不出现优先级说明
+        ctx1, used1 = _skill_context(loader, ["demo"])
+        assert used1 == ["demo"] and "## 技能：demo" in ctx1, (ctx1, used1)
+        assert "优先级更高" not in ctx1
 
-        ctx2, used2 = _skill_context(loader, ["不存在"])
-        assert ctx2 == "" and used2 == [], (ctx2, used2)
+        # 多选：去重、保持选择顺序、忽略未知技能
+        ctx, used = _skill_context(loader, ["demo", "second", "demo", "不存在"])
+        assert used == ["demo", "second"], used
+        assert ctx.index("## 技能：demo") < ctx.index("## 技能：second"), ctx
+        assert "前面的优先级更高" in ctx, ctx
 
+        # 未知技能 / 未启用技能加载
+        assert _skill_context(loader, ["不存在"]) == ("", [])
         assert _skill_context(None, ["demo"]) == ("", [])
-        print("✓ 技能注入：命中技能正文进 system prompt 附加段，未知技能名忽略")
+
+        # 单个技能超过总预算：截断并明确告知模型
+        _write(os.path.join(root, "skills", "huge", "SKILL.md"),
+               "---\nname: huge\n---\n\n" + "很长的步骤说明。\n" * 4000)
+        loader.reload()
+        ctx2, used2 = _skill_context(loader, ["huge"])
+        assert used2 == ["huge"], used2
+        assert "已截断" in ctx2, ctx2[-80:]
+        assert len(ctx2) < _SKILL_CONTEXT_MAX_CHARS + 2000, len(ctx2)
+        print("✓ 技能注入：多选去重保序、优先级说明、预算截断、未知技能忽略")
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
