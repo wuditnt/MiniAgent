@@ -1,5 +1,5 @@
 ---
-name: csv-analysis
+name: CSV 分析
 description: 分析 CSV 数据并产出可复核的数字结论
 ---
 

@@ -1,5 +1,5 @@
 ---
-name: rich-render
+name: UI 渲染
 description: Web UI 富渲染输出约定：ECharts 图表代码块、LaTeX 数学公式、GFM 表格与内联 HTML 的正确用法
 ---
 
