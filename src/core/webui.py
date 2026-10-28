@@ -719,6 +719,31 @@ def _content_disposition(name: str) -> str:
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name)}"
 
 
+def _skill_context(loader, names: list[str]) -> tuple[str, list[str]]:
+    """把用户选中的技能正文拼成本轮 system prompt 的附加段。
+
+    为什么直接注入正文、而不是让模型去调 use_skill：用户显式选了技能，就必须生效，
+    不该依赖模型是否愿意多走一次工具调用。正文只在本轮 run 内有效（见 Agent.run
+    的 extra_system），不写进消息历史，对话气泡保持干净。
+
+    返回 (附加文本, 实际命中的技能名)；未知技能名直接忽略。
+    """
+    if loader is None or not names:
+        return "", []
+    blocks: list[str] = []
+    used: list[str] = []
+    for name in names:
+        skill = loader.get(name)
+        if skill is None:
+            continue
+        used.append(skill.name)
+        blocks.append(f"## 技能：{skill.name}\n\n{skill.body}")
+    if not blocks:
+        return "", []
+    head = "用户在本轮任务中显式选择了以下技能，请严格按其中的步骤与约束执行："
+    return head + "\n\n" + "\n\n---\n\n".join(blocks), used
+
+
 def _int_param(params: dict, key: str, default: int, lo: int, hi: int) -> int:
     """取整型 query 参数并夹到 [lo, hi]，脏值一律退回默认值。"""
     try:
@@ -1202,6 +1227,7 @@ class WebServer:
         system_prompt: str = "",
         max_turns: int | None = None,
         login_enabled: bool = True,
+        skill_loader=None,
     ) -> None:
         self.host = host
         self.port = port
@@ -1209,6 +1235,8 @@ class WebServer:
         self.system_prompt = system_prompt
         self.max_turns = max_turns      # None = 交给通用配置决定
         self.login_enabled = login_enabled
+        # 技能加载器：/api/skills 与「本轮显式选择的技能」都从它取；None = 未启用技能
+        self.skill_loader = skill_loader
         self.sessions: dict[str, _Session] = {}
         self._lock = threading.Lock()
         self._httpd: ThreadingHTTPServer | None = None
@@ -1505,6 +1533,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_memory_get(parse_qs(parsed.query))
         elif route == "/api/tools":
             self._handle_tools_list()
+        elif route == "/api/skills":
+            self._handle_skills_list()
         elif route == "/api/workspace/dir":
             self._handle_workspace_dir(parse_qs(parsed.query))
         elif route == "/api/workspace/file":
@@ -2224,6 +2254,19 @@ class _RequestHandler(BaseHTTPRequestHandler):
             "sources": REGISTRY.sources(),
         })
 
+    def _handle_skills_list(self) -> None:
+        """可用技能清单（输入框的技能选择器用）。
+
+        source：builtin = 内置 skills/；custom = skills_user/ 等自定义目录；
+        auto = 预留给「由对话自动创建」的技能（创建能力尚未实现）。
+        """
+        loader = self.web.skill_loader
+        skills = [] if loader is None else [
+            {"name": s.name, "description": s.description, "source": s.source}
+            for s in loader.all()
+        ]
+        self._json({"skills": skills})
+
     # ------------------------------------------------ 通用配置 API
 
     def _handle_settings_get(self) -> None:
@@ -2766,7 +2809,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
         # 附件列表：[{name, path, mime, size}]，path 相对工作区（.attachments/ 下）
         raw_atts = body.get("attachments")
         attachments = [a for a in (raw_atts or []) if isinstance(a, dict)]
-        if not message and not attachments:
+        # 用户在输入框里显式选择的技能：名字 → 本轮 system prompt 附加段
+        raw_skills = body.get("skills")
+        skill_names = [s for s in (raw_skills or []) if isinstance(s, str)][:8]
+        skill_context, used_skills = _skill_context(self.web.skill_loader, skill_names)
+        if not message and not attachments and not used_skills:
             self._fail(400, "message 不能为空")
             return
         mode = body.get("mode") if body.get("mode") in ("chat", "agent") else "agent"
@@ -2824,7 +2871,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
         worker = threading.Thread(
             target=self._run_worker,
-            args=(session, agent, message, mode, q, attachments, approval, web),
+            args=(session, agent, message, mode, q, attachments, approval, web, skill_context),
             daemon=True,
             name=f"web-chat-{sid}",
         )
@@ -2871,7 +2918,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def _run_worker(
         session: _Session, agent, message: str, mode: str, q: queue.Queue,
         attachments: list[dict] | None = None, approval: str = "ask",
-        web: bool = False,
+        web: bool = False, skill_context: str = "",
     ) -> None:
         """工作线程：换工具表 → agent.run() → 终态事件。
 
@@ -2912,7 +2959,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
             agent.registry = _session_registry(mode, approval, web)
             agent.chat_mode = mode == "chat"   # 快速对话：显式关闭思考（推理等级只在智能体模式生效）
             answer = agent.run(
-                message, attachments=_resolve_attachments(attachments or [], ws_root)
+                message,
+                attachments=_resolve_attachments(attachments or [], ws_root),
+                extra_system=skill_context,
             )
             sec = round(time.time() - t0, 1)
             usage = _usage_delta(before, agent.usage)
@@ -3084,6 +3133,7 @@ def serve(
     system_prompt: str = "",
     max_turns: int | None = None,
     login_enabled: bool = True,
+    skill_loader=None,
 ) -> None:
     """便捷入口：构建服务并阻塞运行（main.py 的 --web 走这里）。"""
     settings.apply_to_runtime()      # 通用配置里的运行时项（工具输出上限、日志）先落地
@@ -3101,7 +3151,7 @@ def serve(
     server = WebServer(
         host=host, port=port, model=model,
         system_prompt=system_prompt, max_turns=max_turns,
-        login_enabled=login_enabled,
+        login_enabled=login_enabled, skill_loader=skill_loader,
     )
     _install_signal_handlers(server)
     server.serve_forever()

@@ -273,6 +273,9 @@ class Agent:
         # 本轮联网模式（Web 层逐轮设置）：cloud=云端搜索/抓取，local=本地抓取；None=CLI 不注入提示
         self.net_mode: str | None = None
         self.system_prompt = system_prompt
+        # 本轮附加指引（如 Web UI 里用户显式选择的技能正文）：只在这一次 run 生效，
+        # 不写进消息历史，避免污染用户可见的对话内容。
+        self._extra_system = ""
         # 显式参数 > 通用配置（Web UI 可改）> 内置默认
         self.max_turns = int(_pick(max_turns, "max_turns", 10))
         self.temperature = float(_pick(temperature, "temperature", 0.0))
@@ -568,11 +571,19 @@ class Agent:
 
     # ------------------------------------------------------------ 主循环
 
-    def run(self, user_input: str, attachments: list[dict] | None = None) -> str:
+    def run(
+        self,
+        user_input: str,
+        attachments: list[dict] | None = None,
+        extra_system: str = "",
+    ) -> str:
         """运行一个任务。被取消时抛 core.cancel.Cancelled（不抛 KeyboardInterrupt）。
 
         attachments：WebUI 上传的附件（[{name, path, mime, size, data_url?, excerpt?}]），
         由 _build_user_message 组装进用户消息 —— 图片走多模态分片，文本注入节选。
+
+        extra_system：本轮临时附加到 system prompt 的内容（Web UI 用户显式选中的技能
+        正文等）。只影响本次 run，结束后清空，不进入消息历史。
 
         取消的三条触发路径，最后都归一化成 Cancelled：
           1. 协作式：任何检查点（轮首 / 流式分片间 / 工具执行前 / MCP 等待中）
@@ -590,6 +601,7 @@ class Agent:
         """
         token = CancellationToken()
         self.cancel_token = token
+        self._extra_system = (extra_system or "").strip()
         self.last_cancel_notice_shown = False
         _run_t0 = time.time()
         _usage_before = dict(self.usage)
@@ -669,6 +681,7 @@ class Agent:
             approval.set_asker(None)
             ask.set_asker(None)
             self.cancel_token = None
+            self._extra_system = ""
             set_current_token(prev)
 
     def _ask_approval(self, reason: str) -> bool:
@@ -795,7 +808,14 @@ class Agent:
         auto = approval.AUTO_RESPONSIBILITY_PROMPT if self.approval_mode == approval.AUTO else ""
         net = self._net_hint()
         mem = self._memory_block(user_input)
-        content = base + (("\n\n" + auto) if auto else "") + net + mem
+        extra = self._extra_system
+        content = (
+            base
+            + (("\n\n" + auto) if auto else "")
+            + net
+            + mem
+            + (("\n\n" + extra) if extra else "")
+        )
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0]["content"] = content
         # 事件流：只有内容真的变了才写一条 system_prompt（记忆块常变，base 不变）
@@ -808,6 +828,7 @@ class Agent:
                 parts={
                     "base_chars": len(base), "auto_chars": len(auto),
                     "net_chars": len(net), "memory_chars": len(mem),
+                    "extra_chars": len(extra),
                 },
             )
             if mem:

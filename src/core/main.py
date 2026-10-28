@@ -420,6 +420,7 @@ def _run_web(
             system_prompt=system_prompt,
             max_turns=args.max_turns,
             login_enabled=not args.no_login,
+            skill_loader=skill_loader,
         )
     except OSError as e:
         logging.getLogger("mini-agent.app").exception("Web UI 启动失败：%s", e)

@@ -361,17 +361,19 @@ export default function App({
   const send = (
     text: string,
     attachments?: import("./types").Attachment[],
+    skills?: string[],
     skipUserItem?: boolean
   ) => {
     const msg = text.trim();
-    if (!msg && !(attachments && attachments.length)) return;
+    if (!msg && !(attachments && attachments.length) && !(skills && skills.length)) return;
     if (busy) return;
     const asstId = `a-${Date.now()}`;
     curAsstRef.current = asstId;
     const userItem: ChatItem = {
       id: `u-${Date.now()}`,
       role: "user",
-      content: msg,
+      // 只选了技能、没写正文时，用技能名兜底，气泡不至于空着
+      content: msg || (skills?.length ? `使用技能：${skills.join("、")}` : ""),
       status: "done",
       attachments,
     };
@@ -395,7 +397,7 @@ export default function App({
 
     chatStream(
       {
-        message: msg, mode, web, approval, session, workspace: ws, attachments,
+        message: msg, mode, web, approval, session, workspace: ws, attachments, skills,
         // 会话级模型配置：新会话（草稿）在首条消息时随请求落盘
         model_id: effModelId,
         reasoning: effReasoning,
@@ -529,7 +531,7 @@ export default function App({
     truncateSession(session, keep)
       .then(() => {
         setItems((prev) => prev.slice(0, userIdx + 1));
-        send(userMsg.content, userMsg.attachments, true);
+        send(userMsg.content, userMsg.attachments, undefined, true);
       })
       .catch((e: unknown) => message.error(e instanceof Error ? e.message : "重新生成失败"));
   };

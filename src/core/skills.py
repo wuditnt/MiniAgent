@@ -83,6 +83,9 @@ class Skill:
     dir: str            # 目录绝对路径
     path: str           # SKILL.md 绝对路径
     body: str           # frontmatter 之后的正文（use_skill 返回它）
+    # 来源分类：builtin = 项目内置 skills/；custom = skills_user/ 等自定义目录；
+    # auto = 未来由对话自动生成的技能（frontmatter 写 origin: auto 预留，暂不实现创建）
+    source: str = "builtin"
 
 
 @dataclass
@@ -136,15 +139,17 @@ class SkillLoader:
     def load_all(self) -> SkillLoadReport:
         report = SkillLoadReport()
         self._skills = {}
-        for _d, name, path in self.discover():
-            self._load_one(name, path, report)
+        for base, name, path in self.discover():
+            self._load_one(base, name, path, report)
         return report
 
     def reload(self) -> SkillLoadReport:
         """重新扫描（覆盖式，最简单也最可预测 —— 删掉的 skill 自然消失）。"""
         return self.load_all()
 
-    def _load_one(self, dir_name: str, path: str, report: SkillLoadReport) -> None:
+    def _load_one(
+        self, base_dir: str, dir_name: str, path: str, report: SkillLoadReport
+    ) -> None:
         try:
             with open(path, encoding="utf-8") as f:
                 text = f.read()
@@ -166,12 +171,19 @@ class SkillLoader:
             report.failed[dir_name] = f"技能名冲突：{name}（已被 {self._skills[name].dir} 占用）"
             return
 
+        # 默认目录 skills/ 视为内置，其余（skills_user 等）视为自定义；
+        # frontmatter 写 origin: auto 的是「自动生成」技能（创建能力尚未实现，先留分类）
+        source = "builtin" if base_dir == DEFAULT_SKILL_DIRS[0] else "custom"
+        if (meta.get("origin") or "").strip().lower() == "auto":
+            source = "auto"
+
         self._skills[name] = Skill(
             name=name,
             description=description or name,
             dir=os.path.dirname(path),
             path=path,
             body=body,
+            source=source,
         )
         report.loaded.append(name)
 

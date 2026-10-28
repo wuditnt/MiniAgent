@@ -57,7 +57,7 @@ PKG = os.path.join(SRC, "core")
 SUITES: list[tuple[str, str, bool]] = [
     ("test_loop.py", "循环层 6 项：假客户端，不碰网络", False),
     ("test_plugins.py", "插件层 + MCP 层 11 项", False),
-    ("test_skills.py", "技能层 5 项：frontmatter / 加载 / 冲突 / 热重载 / use_skill", False),
+    ("test_skills.py", "技能层 8 项：frontmatter / 加载 / 冲突 / 热重载 / use_skill / 来源分类 / 本轮注入", False),
     ("test_vision.py", "图片输入 5 项：嗅探 / 附件通道 / 拒绝 / 循环集成", False),
     ("test_stream_parallel.py", "流式聚合 + 并行执行 + MCP 并发 19 项", False),
     ("test_cancel.py", "取消机制 10 项：令牌 / 杀进程 / 流中断 / 消息补齐 / 原因送达", False),

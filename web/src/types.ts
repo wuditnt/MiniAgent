@@ -249,6 +249,14 @@ export interface WorkspaceFileData {
   resources?: Record<string, string>;
 }
 
+/** GET /api/skills：一个可用技能 */
+export interface SkillItem {
+  name: string;
+  description: string;
+  /** builtin=系统内置（skills/）；custom=自定义（skills_user/ 等）；auto=预留：由对话自动创建 */
+  source: "builtin" | "custom" | "auto";
+}
+
 /** 一份「服务商 + 模型」配置（GET /api/models 返回，API Key 已脱敏） */
 export interface ModelProvider {
   id: string;

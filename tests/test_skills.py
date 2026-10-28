@@ -173,6 +173,50 @@ def test_use_skill_not_truncated():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_skill_source():
+    """来源分类：内置 / 自定义 / 预留的自动创建。"""
+    root = tempfile.mkdtemp()
+    try:
+        _write(os.path.join(root, "skills", "builtin-one", "SKILL.md"),
+               "---\nname: builtin-one\n---\n\n内置正文")
+        _write(os.path.join(root, "skills_user", "my-one", "SKILL.md"),
+               "---\nname: my-one\n---\n\n自定义正文")
+        _write(os.path.join(root, "skills_user", "auto-one", "SKILL.md"),
+               "---\nname: auto-one\norigin: auto\n---\n\n自动生成正文")
+        loader = SkillLoader(root, dirs=["skills", "skills_user"])
+        loader.load_all()
+        assert loader.get("builtin-one").source == "builtin"
+        assert loader.get("my-one").source == "custom"
+        assert loader.get("auto-one").source == "auto"
+        print("✓ 来源分类：skills/ → builtin，skills_user/ → custom，origin:auto → auto（预留）")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_skill_context_injection():
+    """Web 端「本轮选中技能」→ system prompt 附加段：命中注入、未知忽略。"""
+    from webui import _skill_context
+
+    root = tempfile.mkdtemp()
+    try:
+        _write(os.path.join(root, "skills", "demo", "SKILL.md"),
+               "---\nname: demo\n---\n\n# 演示正文\n第一步")
+        loader = SkillLoader(root, dirs=["skills"])
+        loader.load_all()
+
+        ctx, used = _skill_context(loader, ["demo"])
+        assert used == ["demo"], used
+        assert "## 技能：demo" in ctx and "第一步" in ctx, ctx
+
+        ctx2, used2 = _skill_context(loader, ["不存在"])
+        assert ctx2 == "" and used2 == [], (ctx2, used2)
+
+        assert _skill_context(None, ["demo"]) == ("", [])
+        print("✓ 技能注入：命中技能正文进 system prompt 附加段，未知技能名忽略")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 if __name__ == "__main__":
     print("项目根:", HERE)
     print("---")
@@ -182,5 +226,7 @@ if __name__ == "__main__":
     test_reload()
     test_use_skill_tool()
     test_use_skill_not_truncated()
+    test_skill_source()
+    test_skill_context_injection()
     print("---")
     print("全部通过 ✅")

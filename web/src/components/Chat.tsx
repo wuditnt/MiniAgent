@@ -5,6 +5,7 @@
  *  · Sender 的 loading 态自动把发送按钮变成「停止」
  */
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ElementRef } from "react";
 import {
   CheckOutlined,
   CopyOutlined,
@@ -38,12 +39,16 @@ import type {
   ModelProvider,
   PendingAsk,
   ReasoningLevel,
+  SkillItem,
   WorkspaceItem,
 } from "../types";
-import { uploadFile } from "../api";
+import { fetchSkills, uploadFile } from "../api";
 import Markdown from "./Markdown";
 import ToolChain from "./ToolChain";
 import WelcomePane from "./WelcomePane";
+import SkillInput from "./composer/SkillInput";
+import SkillPicker from "./composer/SkillPicker";
+import { hasSkillToken, parseComposer, skillToken } from "./composer/skillMarks";
 import ConfirmPanel from "./ConfirmPanel";
 
 /** token 数缩写：59300 → 59.3K（与参考图一致） */
@@ -436,7 +441,7 @@ interface Props {
   /** 三档确认模式（ask / auto / full），仅智能体模式下可切 */
   approval: ApprovalMode;
   onApproval: (m: ApprovalMode) => void;
-  onSend: (text: string, attachments?: Attachment[]) => void;
+  onSend: (text: string, attachments?: Attachment[], skills?: string[]) => void;
   onStop: () => void;
   /** 搜索命中后要定位闪烁的消息 id（形如 h-3）；为 null 表示无定位请求 */
   focusId?: string | null;
@@ -677,6 +682,11 @@ export default function Chat({
   onManageModels,
 }: Props) {
   const [input, setInput] = useState("");
+  const senderRef = useRef<ElementRef<typeof Sender>>(null);
+  // 技能选择：清单懒加载（首次点开或输入 "/" 时才请求）
+  const [skills, setSkills] = useState<SkillItem[] | null>(null);
+  const [skillName, setSkillName] = useState<string | null>(null);
+  const [skillOpen, setSkillOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevLen = useRef(0);
   // 上一轮的决策卡片：用于在卡片出现的瞬间强制滚到底部
@@ -691,6 +701,50 @@ export default function Chat({
   // 加载更早消息时记录滚动位置，渲染后按高度差补偿，避免视口跳动
   const anchor = useRef<{ height: number; top: number } | null>(null);
   const hiddenCount = Math.max(0, items.length - visibleCount);
+
+  /** 技能清单只在真正需要时拉一次（点开选择器 / 输入 "/"） */
+  const ensureSkills = () => {
+    if (skills !== null) return;
+    fetchSkills()
+      .then(setSkills)
+      .catch(() => setSkills([]));
+  };
+
+  /**
+   * 输入变化：
+   *  · 开头敲 "/" → 弹出技能选择器，"/" 本身保留在输入框；
+   *  · 之后继续输入（或删掉 "/"）→ 选择器立即收起，不打扰正常打字。
+   */
+  const handleInputChange = (v: string) => {
+    if (!hasSkillToken(v)) setSkillName(null);
+    if (v === "/" && !busy) {
+      ensureSkills();
+      setSkillOpen(true);
+    } else if (skillOpen) {
+      setSkillOpen(false);
+    }
+    setInput(v);
+  };
+
+  /**
+   * 选中技能：输入框为空时技能块在开头，已有文字时接在文字后面；
+   * 技能块与正文之间自动补一个空格，避免粘在一起。
+   * 若是 "/" 开头的命令式输入，选中技能后吃掉那个 "/"，技能块放在最前面。
+   */
+  const applySkill = (name: string) => {
+    const { text } = parseComposer(input);
+    const token = skillToken(name);
+    if (text.startsWith("/")) {
+      const rest = text.slice(1).replace(/^\s+/, "");
+      setInput(rest ? `${token} ${rest}` : `${token} `);
+    } else {
+      setInput(text ? `${text} ${token}` : `${token} `);
+    }
+    setSkillName(name);
+    setSkillOpen(false);
+    // 等 DOM 重建完再聚焦，否则光标落在旧节点上
+    requestAnimationFrame(() => senderRef.current?.focus?.());
+  };
 
   // 切会话时 App 会先清空 items：窗口恢复到默认值
   useEffect(() => {
@@ -1023,12 +1077,16 @@ export default function Chat({
               展开「查看详细」时锚定底部向上撑开 */}
           <div className={`composer-slot${confirm ? " blocked" : ""}`}>
             <Sender
+              ref={senderRef}
               value={input}
-              onChange={setInput}
+              onChange={handleInputChange}
+              components={{ input: SkillInput }}
               onSubmit={(v: string) => {
-                onSend(v, pending.length ? pending : undefined);
+                const { skills: picked, text } = parseComposer(v);
+                onSend(text.trim(), pending.length ? pending : undefined, picked);
                 setInput("");
                 setPending([]);
+                setSkillName(null);
               }}
               loading={busy}
               onCancel={onStop}
@@ -1100,6 +1158,17 @@ export default function Chat({
                           <DownOutlined className="tb-mode-caret" />
                         </span>
                       </Dropdown>
+                      {/* 技能选择（第三个交互按钮）：内置 / 自定义，单选 */}
+                      <SkillPicker
+                        skills={skills}
+                        value={skillName}
+                        open={skillOpen}
+                        onOpenChange={(o) => {
+                          if (o) ensureSkills();
+                          setSkillOpen(o);
+                        }}
+                        onPick={applySkill}
+                      />
                       {/* 确认模式：仅智能体模式有意义（chat 模式无危险本地工具） */}
                       {mode === "agent" && (
                         <ApprovalChip value={approval} onChange={onApproval} />

@@ -15,6 +15,7 @@ import type {
   ModelsInfo,
   SessionItem,
   SettingsInfo,
+  SkillItem,
   SSEEvent,
   TestResult,
   ToolInfo,
@@ -282,6 +283,13 @@ export async function fetchWorkspaceTable(
   const res = await req(`/api/workspace/table?${qs}`);
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
+}
+
+/** GET /api/skills：可用技能清单（内置 / 自定义） */
+export async function fetchSkills(): Promise<SkillItem[]> {
+  const res = await req("/api/skills");
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()).skills;
 }
 
 export async function createWorkspace(
@@ -556,6 +564,8 @@ export async function chatStream(
     session: string;
     workspace?: string;
     attachments?: Attachment[];
+    /** 用户在输入框里显式选择的技能名（后端注入本轮 system prompt） */
+    skills?: string[];
     approval?: ApprovalMode;
     /** 会话级模型配置：新会话（磁盘上还没有文件）首条消息时随请求落盘 */
     model_id?: string;
