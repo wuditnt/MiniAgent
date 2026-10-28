@@ -1587,30 +1587,84 @@ body,
   cursor: default;
 }
 
-/* ---- 技能选择菜单 ---- */
-.skill-menu {
-  min-width: 260px;
+/* ---- 技能选择面板：贴着输入框顶部向上弹出，宽度与输入框一致 ---- */
+.skill-picker {
+  display: inline-flex;
+  align-items: center;
 }
 
-.skill-menu-item {
+.tb-skill.active {
+  background: #f0f0f0;
+  color: #1677ff;
+}
+
+.skill-pop {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 40;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid #ebeef5;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.skill-pop-group + .skill-pop-group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid #f5f5f5;
+}
+
+.skill-pop-label {
+  padding: 4px 8px;
+  font-size: 11.5px;
+  color: #999;
+}
+
+/* 一行两项：名称左对齐（黑），描述右对齐（灰），描述超长省略 */
+.skill-pop-item {
   display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: 2px 0;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
 }
 
-.skill-menu-name {
-  font-size: 13px;
+.skill-pop-item:hover,
+.skill-pop-item.active {
+  background: #f5f8ff;
+}
+
+.skill-pop-name {
+  flex: none;
   color: #262626;
+  font-size: 13px;
 }
 
-.skill-menu-desc {
-  max-width: 320px;
+.skill-pop-item.active .skill-pop-name {
+  color: #1677ff;
+}
+
+.skill-pop-desc {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11.5px;
+  text-align: right;
   color: #8c8c8c;
+  font-size: 12px;
+}
+
+.skill-pop-hint {
+  padding: 8px 10px;
+  color: #aaa;
+  font-size: 12px;
 }
 
 /* ---- 确认模式盾牌胶囊：ask 蓝 / auto 青 / full 琥珀，颜色随风险递增 ---- */
