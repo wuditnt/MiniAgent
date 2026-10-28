@@ -174,21 +174,54 @@ def test_use_skill_not_truncated():
 
 
 def test_skill_source():
-    """来源分类：内置 / 自定义 / 预留的自动创建。"""
+    """来源分类：内置 / 用户自定义（两类）。"""
     root = tempfile.mkdtemp()
     try:
         _write(os.path.join(root, "skills", "builtin-one", "SKILL.md"),
                "---\nname: builtin-one\n---\n\n内置正文")
         _write(os.path.join(root, "skills_user", "my-one", "SKILL.md"),
                "---\nname: my-one\n---\n\n自定义正文")
-        _write(os.path.join(root, "skills_user", "auto-one", "SKILL.md"),
-               "---\nname: auto-one\norigin: auto\n---\n\n自动生成正文")
+        _write(os.path.join(root, "skills_user", "origin-auto", "SKILL.md"),
+               "---\nname: origin-auto\norigin: auto\n---\n\n自动生成正文")
         loader = SkillLoader(root, dirs=["skills", "skills_user"])
         loader.load_all()
         assert loader.get("builtin-one").source == "builtin"
         assert loader.get("my-one").source == "custom"
-        assert loader.get("auto-one").source == "auto"
-        print("✓ 来源分类：skills/ → builtin，skills_user/ → custom，origin:auto → auto（预留）")
+        # 不再有 auto 分类：未来自动生成的技能也属于用户自定义
+        assert loader.get("origin-auto").source == "custom"
+        print("✓ 来源分类：skills/ → builtin，其余（含 origin:auto）→ custom")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_skills_from_message():
+    """从消息里的不可见包裹字符中解析技能：顺序、去重、3 次上限、未知忽略。"""
+    from webui import _skills_from_message
+
+    root = tempfile.mkdtemp()
+    try:
+        _write(os.path.join(root, "skills", "alpha", "SKILL.md"),
+               "---\nname: alpha\n---\n\nA")
+        _write(os.path.join(root, "skills", "beta", "SKILL.md"),
+               "---\nname: beta\n---\n\nB")
+        loader = SkillLoader(root, dirs=["skills"])
+        loader.load_all()
+
+        # 正常：按出现顺序、重复去重、未知名字被忽略但保留正文
+        msg = "\x01alpha\x01 \x01beta\x01 \x01alpha\x01 分析这个文件"
+        names, cleaned = _skills_from_message(loader, msg)
+        assert names == ["alpha", "beta"], names
+        assert cleaned == "alpha beta alpha 分析这个文件", cleaned
+
+        # 超过 3 次出现：只认前 3 个（重复也计数），注不存在的多次占位
+        msg = "\x01alpha\x01\x01beta\x01\x01nope\x01\x01beta\x01"
+        names, _ = _skills_from_message(loader, msg)
+        assert names == ["alpha", "beta"], names
+
+        # 快速对话：loader=None 时只清理包裹符，不识别技能
+        names, cleaned = _skills_from_message(None, "\x01alpha\x01 你好")
+        assert names == [] and cleaned == "alpha 你好", (names, cleaned)
+        print("✓ 消息解析技能：顺序、去重、3 次上限、未知忽略、清理包裹符")
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -244,6 +277,7 @@ if __name__ == "__main__":
     test_use_skill_tool()
     test_use_skill_not_truncated()
     test_skill_source()
+    test_skills_from_message()
     test_skill_context_injection()
     print("---")
     print("全部通过 ✅")

@@ -253,8 +253,8 @@ export interface WorkspaceFileData {
 export interface SkillItem {
   name: string;
   description: string;
-  /** builtin=系统内置（skills/）；custom=自定义（skills_user/ 等）；auto=预留：由对话自动创建 */
-  source: "builtin" | "custom" | "auto";
+  /** builtin=系统内置（skills/）；custom=用户自己创建（skills_user/ 等） */
+  source: "builtin" | "custom";
 }
 
 /** 一份「服务商 + 模型」配置（GET /api/models 返回，API Key 已脱敏） */

@@ -721,6 +721,34 @@ def _content_disposition(name: str) -> str:
 
 # 本轮技能正文的总预算：system prompt 每次模型调用都会重发，多选不能无限堆。
 _SKILL_CONTEXT_MAX_CHARS = 20000
+# 一次任务最多认几个技能（重复选择也计数）
+_MAX_SKILLS_PER_RUN = 3
+# 消息里的技能名用不可见控制字符包裹：\x01名字\x01
+_SKILL_MARK_RE = re.compile(r"\x01([^\x01\n]{1,64})\x01")
+
+
+def _skills_from_message(loader, message: str) -> tuple[list[str], str]:
+    """从消息里找出被 \\x01 包裹的技能名，返回 (去重后的技能名, 去掉包裹符的正文)。
+
+    技能不单独随请求传递：输入框里的技能块在发送时被序列化成「裸名字 + 不可见
+    包裹字符」，Agent 运行时从输入内容里自己查找。重复选择照常计数（上限 3 次
+    出现），但注入 system prompt 前按名字去重、保留首次出现顺序（顺序即优先级）。
+
+    loader 为 None（快速对话模式 / 未启用技能）时只清理包裹符，不识别技能。
+    """
+    picked = [
+        m.group(1).strip() for m in _SKILL_MARK_RE.finditer(message)
+    ][:_MAX_SKILLS_PER_RUN]
+    cleaned = _SKILL_MARK_RE.sub(lambda m: m.group(1).strip(), message)
+    if loader is None:
+        return [], cleaned
+    used: list[str] = []
+    for name in picked:
+        if name in used:
+            continue
+        if loader.get(name) is not None:
+            used.append(name)
+    return used, cleaned
 
 
 def _skill_context(loader, names: list[str]) -> tuple[str, list[str]]:
@@ -2285,8 +2313,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def _handle_skills_list(self) -> None:
         """可用技能清单（输入框的技能选择器用）。
 
-        source：builtin = 内置 skills/；custom = skills_user/ 等自定义目录；
-        auto = 预留给「由对话自动创建」的技能（创建能力尚未实现）。
+        source：builtin = 内置 skills/；custom = 用户自己创建（skills_user/ 等，
+        未来由对话自动生成的技能也归入这一类）。
         """
         loader = self.web.skill_loader
         skills = [] if loader is None else [
@@ -2837,14 +2865,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
         # 附件列表：[{name, path, mime, size}]，path 相对工作区（.attachments/ 下）
         raw_atts = body.get("attachments")
         attachments = [a for a in (raw_atts or []) if isinstance(a, dict)]
-        # 用户在输入框里显式选择的技能：名字 → 本轮 system prompt 附加段
-        raw_skills = body.get("skills")
-        skill_names = [s for s in (raw_skills or []) if isinstance(s, str)][:8]
-        skill_context, used_skills = _skill_context(self.web.skill_loader, skill_names)
-        if not message and not attachments and not used_skills:
+        mode = body.get("mode") if body.get("mode") in ("chat", "agent") else "agent"
+        # 技能写在消息里（\x01名字\x01），运行时自己查；快速对话模式不启用技能
+        skill_names, message = _skills_from_message(
+            self.web.skill_loader if mode == "agent" else None, message
+        )
+        skill_context, _used_skills = _skill_context(self.web.skill_loader, skill_names)
+        if not message and not attachments:
             self._fail(400, "message 不能为空")
             return
-        mode = body.get("mode") if body.get("mode") in ("chat", "agent") else "agent"
         # 联网开关：前端总是随请求带上本会话的值；未带则沿用会话已保存的配置
         web = bool(body.get("web")) if "web" in body else None
         approval = str(body.get("approval") or "ask")

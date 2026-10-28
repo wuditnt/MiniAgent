@@ -564,8 +564,6 @@ export async function chatStream(
     session: string;
     workspace?: string;
     attachments?: Attachment[];
-    /** 用户在输入框里显式选择的技能名（后端注入本轮 system prompt） */
-    skills?: string[];
     approval?: ApprovalMode;
     /** 会话级模型配置：新会话（磁盘上还没有文件）首条消息时随请求落盘 */
     model_id?: string;

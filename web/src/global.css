@@ -1573,9 +1573,11 @@ body,
   pointer-events: none;
 }
 
-/* 技能块：蓝色文字、整体不可编辑（contenteditable=false），退格整块删除 */
+/* 技能块：图标 + 名字，蓝色文字、整体不可编辑（contenteditable=false），退格整块删除 */
 .skill-chip {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   margin: 0 2px;
   padding: 0 6px;
   border-radius: 6px;
@@ -1583,8 +1585,19 @@ body,
   color: #1677ff;
   font-weight: 500;
   line-height: 1.5;
+  vertical-align: baseline;
   user-select: all;
   cursor: default;
+}
+
+.skill-chip-icon {
+  flex: none;
+  color: #1677ff;
+}
+
+/* 自定义技能的图标用浅蓝，其余与内置一致 */
+.skill-chip[data-source="custom"] .skill-chip-icon {
+  color: #69b1ff;
 }
 
 /* ---- 技能选择面板：贴着输入框顶部向上弹出，宽度与输入框一致 ---- */
@@ -1625,12 +1638,12 @@ body,
   color: #999;
 }
 
-/* 一行两项：名称左对齐（黑），描述右对齐（灰），描述超长省略 */
+/* 一行三项：图标 + 名称（左对齐、黑）+ 描述（右对齐、灰、超长省略） */
 .skill-pop-item {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 7px 10px;
+  gap: 8px;
+  padding: 7px 10px 7px 18px;
   border-radius: 6px;
   cursor: pointer;
 }
@@ -1640,26 +1653,15 @@ body,
   background: #f5f8ff;
 }
 
-.skill-pop-check {
+.skill-pop-icon {
   flex: none;
-  width: 14px;
-  color: #1677ff;
-  font-size: 12px;
-  opacity: 0;
-}
-
-.skill-pop-check.on {
-  opacity: 1;
+  font-size: 13px;
 }
 
 .skill-pop-name {
   flex: none;
   color: #262626;
   font-size: 13px;
-}
-
-.skill-pop-item.selected .skill-pop-name {
-  color: #1677ff;
 }
 
 .skill-pop-desc {

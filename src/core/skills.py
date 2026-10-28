@@ -83,8 +83,8 @@ class Skill:
     dir: str            # 目录绝对路径
     path: str           # SKILL.md 绝对路径
     body: str           # frontmatter 之后的正文（use_skill 返回它）
-    # 来源分类：builtin = 项目内置 skills/；custom = skills_user/ 等自定义目录；
-    # auto = 未来由对话自动生成的技能（frontmatter 写 origin: auto 预留，暂不实现创建）
+    # 来源分类：builtin = 项目内置 skills/；custom = 用户自己创建（skills_user/ 等）。
+    # 未来「由对话自动生成」的技能也归入 custom —— 它们同样属于用户创建的内容。
     source: str = "builtin"
 
 
@@ -171,11 +171,8 @@ class SkillLoader:
             report.failed[dir_name] = f"技能名冲突：{name}（已被 {self._skills[name].dir} 占用）"
             return
 
-        # 默认目录 skills/ 视为内置，其余（skills_user 等）视为自定义；
-        # frontmatter 写 origin: auto 的是「自动生成」技能（创建能力尚未实现，先留分类）
+        # 默认目录 skills/ 视为内置，其余（skills_user 等）视为用户自定义
         source = "builtin" if base_dir == DEFAULT_SKILL_DIRS[0] else "custom"
-        if (meta.get("origin") or "").strip().lower() == "auto":
-            source = "auto"
 
         self._skills[name] = Skill(
             name=name,

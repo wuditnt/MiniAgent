@@ -1,34 +1,56 @@
 /**
  * 输入框里「技能文字块」的编码约定。
  *
- * 输入框的值始终是一个纯字符串（Sender 是受控的），技能块用一个不可见的
- * 私有字符包裹：`\u0001skill:<名字>\u0001`。内容可编辑区把它渲染成不可编辑的
- * 蓝色块，用户看到的是名字；提交前用 parseComposer 把标记拆成「技能名 + 正文」。
+ * 两套字符，互不冲突：
+ *  · 输入框内部：`\u0002skill:<来源>:<名字>\u0002`，用来把块渲染成不可编辑的胶囊；
+ *  · 发送给后端：`\u0001<名字>\u0001`，裸名字 + 不可见包裹字符 —— 后端在消息里
+ *    查找技能时既不会误判正文，用户也看不见这两个字符。
  */
-const MARK = "\u0001";
-const TOKEN_RE = /\u0001skill:([^\u0001]*)\u0001/g;
+export type SkillSource = "builtin" | "custom";
 
-/** 把技能名编码成输入串里的标记 */
-export function skillToken(name: string): string {
-  return `${MARK}skill:${name}${MARK}`;
+export interface ComposerSkill {
+  name: string;
+  source: SkillSource;
 }
 
-/** 拆出技能名与用户正文（正文只去掉标记，不 trim —— 交给调用方决定） */
-export function parseComposer(value: string): { skills: string[]; text: string } {
-  const skills: string[] = [];
-  const text = value.replace(TOKEN_RE, (_m, name: string) => {
-    skills.push(name);
+const TOKEN_RE = /\u0002skill:(builtin|custom):([^\u0002]*)\u0002/g;
+const SENT_RE = /\u0001([^\u0001\n]{1,64})\u0001/g;
+
+/** 输入框内部的技能块标记 */
+export function skillToken(name: string, source: SkillSource): string {
+  return `\u0002skill:${source}:${name}\u0002`;
+}
+
+/** 拆出技能块与用户正文（正文只去掉标记，不 trim —— 交给调用方决定） */
+export function parseComposer(value: string): { skills: ComposerSkill[]; text: string } {
+  const skills: ComposerSkill[] = [];
+  const text = value.replace(TOKEN_RE, (_m, source: string, name: string) => {
+    skills.push({ name, source: source as SkillSource });
     return "";
   });
   return { skills, text };
 }
 
-/** 当前输入串里是否含技能块 */
-export function hasSkillToken(value: string): boolean {
-  return value.includes(`${MARK}skill:`);
+/** 发送前序列化：技能块 → `\u0001名字\u0001`，其余原样保留 */
+export function serializeForSend(value: string): string {
+  return value.replace(TOKEN_RE, (_m, _source: string, name: string) => `\u0001${name}\u0001`);
 }
 
-/** 最后一个技能块结束的位置（没有技能块时返回 -1） */
+/** 发送串里的技能名（顺序即出现顺序；重复保留，供气泡兜底用） */
+export function skillsInSent(message: string): string[] {
+  const names: string[] = [];
+  SENT_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = SENT_RE.exec(message))) names.push(m[1]);
+  return names;
+}
+
+/** 展示用：去掉包裹字符，只留下技能名 */
+export function stripSkillMarks(message: string): string {
+  return message.replace(SENT_RE, (_m, name: string) => name);
+}
+
+/** 已有技能块结束时在新块前补空格，保持技能区连续（顺序即选择顺序） */
 function lastTokenEnd(value: string): number {
   let end = -1;
   let m: RegExpExecArray | null;
@@ -39,7 +61,7 @@ function lastTokenEnd(value: string): number {
 
 /**
  * 插入一个技能块。
- *  · 已经有技能块 → 紧跟在最后一个技能块后面，保持技能区连续、顺序即选择顺序；
+ *  · 已经有技能块 → 紧跟在最后一个技能块后面；
  *  · 输入为空 → 技能块放最前；
  *  · leading=true（"/" 触发）→ 技能块放最前，正文接在后面；
  *  · 其余（打字中途选择）→ 接在当前文字后面。
@@ -55,9 +77,8 @@ export function insertSkillToken(value: string, token: string, leading = false):
   return leading ? `${token} ${body}` : `${body} ${token}`;
 }
 
-/** 移除指定技能块，并清理因此产生的多余空格 */
-export function removeSkillToken(value: string, name: string): string {
-  const token = skillToken(name);
-  const next = value.replace(`${token} `, "").replace(token, "");
-  return next.replace(/ {2,}/g, " ").trimStart();
+/** 移除全部技能块（切到快速对话时用），并清理多余空格 */
+export function removeAllSkillTokens(value: string): string {
+  TOKEN_RE.lastIndex = 0;
+  return value.replace(TOKEN_RE, "").replace(/ {2,}/g, " ").trimStart();
 }

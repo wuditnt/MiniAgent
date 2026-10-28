@@ -48,7 +48,13 @@ import ToolChain from "./ToolChain";
 import WelcomePane from "./WelcomePane";
 import SkillInput from "./composer/SkillInput";
 import SkillPicker from "./composer/SkillPicker";
-import { insertSkillToken, parseComposer, removeSkillToken, skillToken } from "./composer/skillMarks";
+import {
+  insertSkillToken,
+  parseComposer,
+  removeAllSkillTokens,
+  serializeForSend,
+  skillToken,
+} from "./composer/skillMarks";
 import { detectSlashCommand, stripTrigger } from "./composer/slashCommands";
 import ConfirmPanel from "./ConfirmPanel";
 
@@ -442,7 +448,7 @@ interface Props {
   /** 三档确认模式（ask / auto / full），仅智能体模式下可切 */
   approval: ApprovalMode;
   onApproval: (m: ApprovalMode) => void;
-  onSend: (text: string, attachments?: Attachment[], skills?: string[]) => void;
+  onSend: (text: string, attachments?: Attachment[]) => void;
   onStop: () => void;
   /** 搜索命中后要定位闪烁的消息 id（形如 h-3）；为 null 表示无定位请求 */
   focusId?: string | null;
@@ -725,7 +731,7 @@ export default function Chat({
    */
   const handleInputChange = (v: string) => {
     const hit = detectSlashCommand(input, v);
-    if (hit && hit.command.id === "skill" && !busy) {
+    if (hit && hit.command.id === "skill" && mode === "agent" && !busy) {
       ensureSkills();
       setSkillOpen(true);
       setSlashAt(hit.index);
@@ -737,27 +743,36 @@ export default function Chat({
   };
 
   /**
-   * 切换一个技能的勾选状态（多选，面板不自动关闭）。
-   *  · 已选 → 删掉对应的技能块；
-   *  · 未选且未超上限 → 插入技能块（"/" 触发时先删掉那个 "/"）；
+   * 选择一个技能（选择器是单选动作，插完即关闭）。
+   *  · 上限 3 个，重复也计数；
+   *  · 前端不做重复性判断，去重交给后端运行时处理；
    *  · 输入框为空放最前，已有文字接在后面，已有技能块则紧跟最后一个技能块。
    */
-  const toggleSkill = (name: string) => {
-    if (pickedSkills.includes(name)) {
-      setInput((prev) => removeSkillToken(prev, name));
-      return;
-    }
+  const selectSkill = (item: SkillItem) => {
     if (pickedSkills.length >= MAX_SKILLS) {
-      message.warning(`最多同时选择 ${MAX_SKILLS} 个技能`);
+      message.warning(`最多选择 ${MAX_SKILLS} 个技能`);
       return;
     }
     const leading = slashAt === 0;
     const base = slashAt === null ? input : stripTrigger(input, slashAt);
-    setInput(insertSkillToken(base, skillToken(name), leading));
+    setInput(insertSkillToken(base, skillToken(item.name, item.source), leading));
+    setSkillOpen(false);
     setSlashAt(null);   // 触发符已消费，避免下次插入重复删字符
     // 等 DOM 重建完再聚焦，否则光标落在旧节点上
     requestAnimationFrame(() => senderRef.current?.focus?.());
   };
+
+  // 切到快速对话：技能不参与，清掉输入框里的技能块（保留正文）
+  useEffect(() => {
+    if (mode !== "chat") return;
+    if (!parseComposer(input).skills.length) return;
+    setInput(removeAllSkillTokens(input));
+    setSkillOpen(false);
+    setSlashAt(null);
+    message.info("快速对话模式不使用技能，已移除已选技能");
+    // 只在模式切换时触发一次；input 用当前值即可
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
 
   // 切会话时 App 会先清空 items：窗口恢复到默认值
   useEffect(() => {
@@ -1095,8 +1110,10 @@ export default function Chat({
               onChange={handleInputChange}
               components={{ input: SkillInput }}
               onSubmit={(v: string) => {
-                const { skills: picked, text } = parseComposer(v);
-                onSend(text.trim(), pending.length ? pending : undefined, picked);
+                // 技能块序列化成「裸名字 + 不可见包裹字符」，由后端运行时自行查找
+                const message = serializeForSend(v).trim();
+                if (!message && !pending.length) return;
+                onSend(message, pending.length ? pending : undefined);
                 setInput("");
                 setPending([]);
                 setSlashAt(null);
@@ -1171,18 +1188,19 @@ export default function Chat({
                           <DownOutlined className="tb-mode-caret" />
                         </span>
                       </Dropdown>
-                      {/* 技能选择（第三个交互按钮）：内置 / 自定义，多选（最多 3 个） */}
-                      <SkillPicker
-                        skills={skills}
-                        value={pickedSkills}
-                        open={skillOpen}
-                        onOpenChange={(o) => {
-                          if (o) ensureSkills();
-                          else setSlashAt(null);
-                          setSkillOpen(o);
-                        }}
-                        onToggle={toggleSkill}
-                      />
+                      {/* 技能选择（第三个交互按钮）：树形列表，插完即关闭；快速对话模式不提供 */}
+                      {mode === "agent" && (
+                        <SkillPicker
+                          skills={skills}
+                          open={skillOpen}
+                          onOpenChange={(o) => {
+                            if (o) ensureSkills();
+                            else setSlashAt(null);
+                            setSkillOpen(o);
+                          }}
+                          onSelect={selectSkill}
+                        />
+                      )}
                       {/* 确认模式：仅智能体模式有意义（chat 模式无危险本地工具） */}
                       {mode === "agent" && (
                         <ApprovalChip value={approval} onChange={onApproval} />
