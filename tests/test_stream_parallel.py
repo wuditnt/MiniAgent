@@ -447,7 +447,7 @@ def test_mcp_concurrent_requests_do_not_timeout():
     from core.registry import ToolRegistry
 
     reg = ToolRegistry()
-    mgr = MCPManager(os.path.join(HERE, "mcp", "mcp_servers.json"), HERE, reg)
+    mgr = MCPManager(bootstrap.demo_mcp_config(), HERE, reg)
     mgr.load()
     try:
         client = mgr.clients.get("demo")

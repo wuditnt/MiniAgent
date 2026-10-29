@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -58,7 +59,31 @@ MCP_CONFIG = os.path.join(PACKAGE_ROOT, "mcp", "mcp_servers.json")
 #: demo 服务端脚本（相对项目根）
 MCP_SERVER_SCRIPT = os.path.join("mcp", "mcp_demo_server.py")
 
+_DEMO_CFG = ""
+
+
+def demo_mcp_config() -> str:
+    """返回一份「demo server 已启用」的临时 MCP 配置路径（进程内复用）。
+
+    仓库的 mcp_servers.json 默认关闭 demo：它的 6 个工具只服务于协议/取消通知
+    测试，开着会让每次真实会话白带一份用不上的工具 schema。
+    需要 demo 的用例统一从这里拿配置，不再依赖生产默认值。
+    """
+    global _DEMO_CFG
+    if _DEMO_CFG and os.path.exists(_DEMO_CFG):
+        return _DEMO_CFG
+    with open(MCP_CONFIG, encoding="utf-8") as f:
+        cfg = json.load(f)
+    cfg.setdefault("servers", {}).setdefault("demo", {})["enabled"] = True
+    fd, path = tempfile.mkstemp(prefix="ma-mcp-demo-", suffix=".json")
+    os.close(fd)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False)
+    _DEMO_CFG = path
+    return path
+
+
 __all__ = [
     "TESTS_DIR", "PACKAGE_ROOT", "SRC_DIR", "PKG_DIR",
-    "MCP_CONFIG", "MCP_SERVER_SCRIPT",
+    "MCP_CONFIG", "MCP_SERVER_SCRIPT", "demo_mcp_config",
 ]

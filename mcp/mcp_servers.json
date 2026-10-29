@@ -5,14 +5,16 @@
     "dangerous=true 表示这些外部工具在执行前需要用户确认（/approve on 时生效）。",
     "路径说明：cwd 与 args 里的相对路径，都以【项目根目录】为基准解析，",
     "不是以本文件所在目录为基准。所以 demo server 写作 mcp/mcp_demo_server.py。",
-    "timeout 是单次协议调用的超时秒数。"
+    "timeout 是单次协议调用的超时秒数。",
+    "demo server 默认关闭：它的 6 个工具只服务于协议/取消通知测试，",
+    "开着会让每次会话白白多带一份工具 schema。要用它演示时把 enabled 改成 true。"
   ],
   "servers": {
     "demo": {
       "command": "python",
       "args": ["mcp/mcp_demo_server.py"],
       "cwd": ".",
-      "enabled": true,
+      "enabled": false,
       "dangerous": false,
       "group": "MCP:demo",
       "timeout": 20

@@ -562,7 +562,8 @@ frontmatter 的 `name` / `description` 都可省略：`name` 省略时用目录�
 控制台里 `/mcp` 看状态，`/mcp reload` 重新挂载。
 
 仓库自带一个 `mcp/mcp_demo_server.py` 用于验证协议链路（`now` / `sha256` / `env_info` / `sleep` /  
-`stubborn_sleep` / `cancel_log`），`mcp/mcp_servers.json` 里默认就挂着它。  
+`stubborn_sleep` / `cancel_log`）。它在 `mcp/mcp_servers.json` 里**默认关闭** —— 这 6 个工具只服务于测试与演示，  
+开着会让每次会话多带一份用不上的工具 schema；要看效果把 `enabled` 改成 `true` 即可（测试脚本会自己打开它）。
 `sleep` 是刻意慢的工具，用来量并行的真实收益；后三个是取消通知专项测试用的  
 （会收通知的、故意无视通知的、回显收到过什么通知的）。
 

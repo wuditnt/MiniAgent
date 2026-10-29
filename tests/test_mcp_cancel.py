@@ -322,7 +322,7 @@ def test_registry_path_sends_notification():
     from core.registry import ToolRegistry
 
     reg = ToolRegistry()
-    mgr = MCPManager(os.path.join(HERE, "mcp", "mcp_servers.json"), HERE, reg)
+    mgr = MCPManager(bootstrap.demo_mcp_config(), HERE, reg)
     mgr.load()
     try:
         assert reg.get("demo__sleep") is not None, "demo server 未挂载"

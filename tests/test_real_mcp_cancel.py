@@ -102,7 +102,7 @@ def main() -> int:
     assert model_config.resolve_active().get("api_key"), \
         "缺少模型配置（请先运行 --web 在「设置 → 模型」里配置）"
 
-    mcp = MCPManager(os.path.join(HERE, "mcp", "mcp_servers.json"), HERE, REGISTRY)
+    mcp = MCPManager(bootstrap.demo_mcp_config(), HERE, REGISTRY)
     mcp.load()
     print(f"MCP: {mcp.report.summary()}")
     assert "demo__sleep" in REGISTRY, "demo MCP server 未挂载"

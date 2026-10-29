@@ -382,7 +382,7 @@ def test_mcp_cancel():
     from core.registry import ToolRegistry
 
     reg = ToolRegistry()
-    mgr = MCPManager(os.path.join(HERE, "mcp", "mcp_servers.json"), HERE, reg)
+    mgr = MCPManager(bootstrap.demo_mcp_config(), HERE, reg)
     mgr.load()
     try:
         assert reg.get("demo__sleep") is not None, "demo server 未挂载"

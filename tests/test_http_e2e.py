@@ -312,7 +312,7 @@ def main() -> int:
         from core.registry import ToolRegistry
 
         reg = ToolRegistry()
-        mgr = MCPManager(os.path.join(HERE, "mcp", "mcp_servers.json"), HERE, reg)
+        mgr = MCPManager(bootstrap.demo_mcp_config(), HERE, reg)
         mgr.load()
         try:
             a = Agent(verbose=False, stream=False, parallel_tools=parallel,

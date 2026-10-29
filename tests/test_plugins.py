@@ -265,8 +265,10 @@ def test_mcp_end_to_end():
     from core.registry import REGISTRY as GLOBAL
 
     reg = ToolRegistry()
+    # 仓库默认关闭 demo server（6 个工具只服务于测试/演示，开着会白占会话 schema）。
+    # 用例从 bootstrap 拿一份「demo 已启用」的临时配置，不依赖生产默认值。
     mgr = MCPManager(
-        config_path=os.path.join(HERE, "mcp", "mcp_servers.json"),
+        config_path=bootstrap.demo_mcp_config(),
         project_root=HERE,
         registry=reg,
     )
