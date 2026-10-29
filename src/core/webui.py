@@ -653,15 +653,46 @@ def _brief_args(args: dict, limit: int = 1200) -> dict:
     return {k: _clip(v) for k, v in (args or {}).items()}
 
 
-def _session_registry(mode: str, approval: str = "ask", web: bool = False):
+#: standard 档位不加载的低频工具分组（工具本身仍在 REGISTRY 里，改成 full 立即恢复）。
+#: 判断依据：这些分组平均每次任务都很少被选，但 schema 合计约 1.3 万字符 ——
+#: 每轮请求都要为它们付一次 token。系统/文件/文档/代码/数据/联网等常用组不受影响。
+_STANDARD_EXCLUDED_GROUPS = frozenset({
+    "sys_monitor",   # cpu / 磁盘 / 网络速率 / 进程排行
+    "net_extra",     # ping / dns / check_port / http_post
+    "random",        # random_int / random_string / gen_uuid / random_choice
+    "hash",          # base64 / 文本哈希
+    "sys_extra",     # 剪贴板 / kill_process / wait_for_file
+    "dataframe",     # df_sql / df_summary / df_to_parquet
+    "database",      # sqlite / csv_sql
+    "archive",       # zip 创建与解包
+    "ocr",           # ocr_image / ocr_pdf
+    "image_meta",    # image_convert / image_info
+    "time_math",     # time_add / time_diff
+    "text_extra",    # case_convert / url 编解码 / json_query / html_to_text
+})
+
+
+def _session_registry(mode: str, approval: str = "ask", web: bool = False,
+                      profile: str | None = None):
     """按行为矩阵克隆一份会话工具表（见方案 §3.1）。
 
     chat 模式 = 不做推理思考，只保留联网能力（web_search / fetch_url），其余工具不加载；
     web_search 仅在联网开关打开时加载；fetch_url 始终可用（云端 or 本地按本轮模式分派）。
     Tool 对象本身无状态，跨注册表共享引用是安全的。
     request_approval 仅在 auto 档暴露 —— 其它档位模型看不到它。
+
+    profile = standard / full（缺省读通用配置里的 tool_profile）：
+    智能体模式下 standard 会略去 _STANDARD_EXCLUDED_GROUPS 里的低频分组，省下每轮
+    约 1.3 万字符的工具 schema；full 暴露全部工具。
     """
     from core.registry import REGISTRY, ToolRegistry
+
+    if profile is None:
+        try:
+            from core import settings
+            profile = str(settings.get("tool_profile") or "standard")
+        except Exception:  # noqa: BLE001 —— 配置层异常按标准档
+            profile = "standard"
 
     # 记忆总开关关闭时，remember 工具也不进会话工具表（模型看不到就不会调）
     try:
@@ -679,6 +710,8 @@ def _session_registry(mode: str, approval: str = "ask", web: bool = False):
             pass                  # 抓取始终可用：云端 / 本地实现按本轮联网模式分派
         elif mode == "chat":
             continue              # 快速对话：除联网能力外不调用任何工具
+        if profile != "full" and t.group in _STANDARD_EXCLUDED_GROUPS:
+            continue
         if t.name == "request_approval" and approval != "auto":
             continue
         if t.name == "remember" and not memory_on:

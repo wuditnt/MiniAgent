@@ -345,6 +345,8 @@ export interface GeneralSettings {
   memory_auto_extract: boolean;
   /** 注入 system prompt 的记忆字符预算 */
   memory_budget_chars: number;
+  /** 智能体模式的工具档位：standard=只加载常用工具（省 token），full=全部工具 */
+  tool_profile: "standard" | "full";
   /** 是否写本地文件日志（logs/ 下按类别分文件） */
   log_enabled: boolean;
   /** 文件日志级别；DEBUG 才能看到 HTTP 访问日志 */

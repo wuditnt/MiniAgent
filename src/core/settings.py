@@ -58,7 +58,14 @@ DEFAULTS: dict = {
     "events_enabled": True,        # 是否把运行时事实写入 <sid>.events.jsonl
     "events_value_limit": 65_536,  # 单个字符串值超过它就写成显式截断标记
     "events_keep_runs": 0,         # 预留：每会话保留最近 N 次 run 的完整事件（0=不裁剪）
+    # ---- 工具暴露档位 ----
+    # standard：智能体模式只加载常用工具分组（文件/文档/代码/数据/网络/系统基础…），
+    #           低频领域工具（随机值、哈希编码、压缩包、OCR、DataFrame、数据库、网络诊断…）
+    #           不进请求体，省下每轮约 1.3 万字符的工具 schema；
+    # full：暴露全部工具（原来的行为），适合需要冷门工具的场景。
+    "tool_profile": "standard",
 }
+
 
 #: 数值型取值区间；未列出的项不做区间限制
 RANGES: dict[str, tuple] = {
@@ -86,6 +93,7 @@ ENUM_KEYS: dict[str, tuple[str, ...]] = {
     "sandbox_read": ("strict", "whitelist", "open"),
     "log_level": ("DEBUG", "INFO", "WARNING", "ERROR"),
     "search_provider": ("deepseek", "tavily", "bocha", "bing"),
+    "tool_profile": ("standard", "full"),
 }
 #: 字符串列表字段（元素必须是非空字符串，自动去空白）
 LIST_KEYS = ("sandbox_read_whitelist",)
@@ -101,6 +109,7 @@ ENV_KEYS = {
     "stream": "MINI_AGENT_STREAM",
     "parallel_tools": "MINI_AGENT_PARALLEL",
     "max_workers": "MINI_AGENT_MAX_WORKERS",
+    "tool_profile": "MINI_AGENT_TOOL_PROFILE",
 }
 
 #: 旧版名字只读兼容（模板与文档里不再出现）
@@ -157,6 +166,9 @@ def _env_value(key: str):
         if low in _FALSY:
             return False
         return None
+    if key in ENUM_KEYS:
+        v = raw.strip()
+        return v if v in ENUM_KEYS[key] else None
     try:
         v = float(raw)
     except ValueError:

@@ -261,6 +261,28 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
           <div className="gs-control">{renderField(f.key)}</div>
         </div>
       ))}
+      {group === "context" && (
+        <div className="gs-row">
+          <div className="gs-label">
+            <span className="gs-label-text">工具档位</span>
+            <span className="gs-help">
+              标准只加载常用工具分组（文件 / 文档 / 代码 / 数据 / 联网 / 系统基础），
+              每次请求省下约 1.3 万字符的工具描述；需要冷门工具时切到「全部」
+            </span>
+          </div>
+          <div className="gs-control">
+            <Select
+              value={draft?.tool_profile ?? "standard"}
+              style={{ width: 200 }}
+              options={[
+                { value: "standard", label: "标准（省 token）" },
+                { value: "full", label: "全部工具" },
+              ]}
+              onChange={(v) => patch("tool_profile", v)}
+            />
+          </div>
+        </div>
+      )}
       {group === "perf" && (
         <>
           <div className="gs-row">

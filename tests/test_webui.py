@@ -205,15 +205,26 @@ def scenario_registry_matrix() -> None:
     chat_cloud = {t.name for t in _session_registry("chat", "ask", True).all()}
     assert chat_cloud == {"web_search", "fetch_url"}, f"chat 联网工具表异常：{sorted(chat_cloud)}"
     # agent 模式：全量；关联网时剔除 web_search，抓取仍在；ask 档不暴露 request_approval
-    agent_local = {t.name for t in _session_registry("agent").all()}
+    agent_local = {t.name for t in _session_registry("agent", profile="full").all()}
     expect_agent = all_names - {"web_search", "request_approval"}
     assert agent_local == expect_agent, (
         f"agent 关联网差异：多 {sorted(agent_local - expect_agent)} / "
         f"少 {sorted(expect_agent - agent_local)}"
     )
-    agent_cloud = {t.name for t in _session_registry("agent", "auto", True).all()}
+    agent_cloud = {t.name for t in _session_registry("agent", "auto", True, profile="full").all()}
     assert agent_cloud == all_names, f"auto + 联网应为全量，差异：{sorted(all_names ^ agent_cloud)}"
-    print("  [1] 会话工具表矩阵（chat±web / agent±web）通过")
+
+    # 档位：standard 只略去低频分组（常用能力必须留下），full 等于全量
+    from core.webui import _STANDARD_EXCLUDED_GROUPS
+    std = {t.name for t in _session_registry("agent", "auto", True, profile="standard").all()}
+    assert std < all_names, f"standard 应当比全量少：{len(std)} vs {len(all_names)}"
+    for t in REGISTRY.all():
+        if t.name in std:
+            assert t.group not in _STANDARD_EXCLUDED_GROUPS, f"{t.name} 属于应裁分组：{t.group}"
+    need = {"read_file", "write_file", "read_xlsx", "run_shell", "web_search", "ask_user"}
+    assert need <= std, f"standard 少了常用工具：{sorted(need - std)}"
+    assert "random_int" not in std and "zip_create" not in std, "standard 应裁掉低频工具"
+    print("  [1] 会话工具表矩阵（chat±web / agent±web / 档位）通过")
 
 
 def scenario_health() -> None:
