@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
+from unittest import mock
 
 import bootstrap  # noqa: F401  —— 必须最先导入：铺 sys.path
 
@@ -187,6 +189,98 @@ def test_last_seen_write_throttled() -> None:
     assert seen() != old, "超过节流窗口后应刷新 last_seen_at"
 
 
+def test_disabled_superadmin_is_not_last_superadmin() -> None:
+    """已禁用的超管不该触发「最后一超管」保护，否则永远清理不掉。"""
+    _isolate()
+    root1 = auth.create_user(
+        "root1", "root1pass", role=auth.ROLE_SUPERADMIN, must_change_password=False
+    )
+    root2 = auth.create_user(
+        "root2", "root2pass", role=auth.ROLE_SUPERADMIN, must_change_password=False
+    )
+    # 先禁用 root2（此时启用的超管还有 2 个，允许）
+    auth.update_user(root2["id"], disabled=True)
+    assert auth.get_user(root2["id"])["disabled"] == 1
+
+    # 再把它降级：这次变更不会减少「启用中的超管」数量，应当成功
+    assert auth.update_user(root2["id"], role=auth.ROLE_USER)["role"] == auth.ROLE_USER
+
+    # 真正的最后一个启用超管仍然受保护
+    _expect(
+        "LAST_SUPERADMIN",
+        lambda: auth.update_user(root1["id"], role=auth.ROLE_USER, actor_id=root2["id"]),
+    )
+
+
+def test_invalid_expiry_fails_closed() -> None:
+    """损坏的 expires_at 必须按已过期处理（fail closed），不能换来永久有效。"""
+    _isolate()
+    auth.create_user("erin", "erin1234")
+    token, _ = auth.login("erin", "erin1234")
+    conn = auth._conn()
+    key = auth._token_hash(token)
+    with conn:
+        conn.execute("UPDATE sessions SET expires_at = 'not-a-time' WHERE token_hash = ?", (key,))
+
+    assert auth.resolve_session(token) is None, "解析失败应视为过期"
+    assert conn.execute(
+        "SELECT 1 FROM sessions WHERE token_hash = ?", (key,)
+    ).fetchone() is None, "应顺手删掉这条会话"
+
+
+def test_concurrent_delete_last_superadmins() -> None:
+    """两个请求同时删两个启用超管：判断与写入同事务，必须恰好一个被拒。"""
+    _isolate()
+    a = auth.create_user("root_a", "root1234", role=auth.ROLE_SUPERADMIN)
+    b = auth.create_user("root_b", "root1234", role=auth.ROLE_SUPERADMIN)
+    errors: list[str] = []
+
+    def kill(uid: int) -> None:
+        try:
+            auth.delete_user(uid)
+        except auth.AuthError as e:
+            errors.append(e.code)
+
+    threads = [
+        threading.Thread(target=kill, args=(a["id"],)),
+        threading.Thread(target=kill, args=(b["id"],)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == ["LAST_SUPERADMIN"], errors
+    assert auth._superadmin_count() == 1, "必须保留一个启用的超管"
+
+
+def test_password_and_session_wipe_atomic() -> None:
+    """改密与踢会话同事务：踢会话失败时密码更新必须回滚。"""
+    _isolate()
+    user = auth.create_user("frank", "frank1234")
+    token, _ = auth.login("frank", "frank1234")
+    conn = auth._conn()
+
+    def pw_hash() -> str:
+        return str(
+            conn.execute(
+                "SELECT password_hash FROM users WHERE id = ?", (user["id"],)
+            ).fetchone()["password_hash"]
+        )
+
+    before = pw_hash()
+    with mock.patch.object(auth, "_delete_sessions", side_effect=RuntimeError("boom")):
+        try:
+            auth.update_user(user["id"], password="frank5678")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("踢会话失败应把异常透传出来")
+
+    assert pw_hash() == before, "密码更新必须随事务回滚"
+    assert auth.resolve_session(token) is not None, "旧会话也应保留（整体回滚）"
+
+
 if __name__ == "__main__":
     test_init_and_default_admin()
     test_password_hash_and_verify()
@@ -197,5 +291,9 @@ if __name__ == "__main__":
     test_change_password_keeps_current_session()
     test_disabled_account_cannot_login()
     test_last_seen_write_throttled()
+    test_disabled_superadmin_is_not_last_superadmin()
+    test_invalid_expiry_fails_closed()
+    test_concurrent_delete_last_superadmins()
+    test_password_and_session_wipe_atomic()
     print("---")
     print("全部通过 ✅")

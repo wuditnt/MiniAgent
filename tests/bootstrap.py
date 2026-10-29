@@ -12,7 +12,7 @@
        src/core/          → `import agent` / `import tools` / `from ... import`
      后者是「裸模块名导入」的落点，缺了它老写法全挂。
 
-  2. **AGENT_WORKSPACE** —— 沙箱根必须是项目根，否则 `demo_case/inbox/x.csv`
+  2. **MINI_AGENT_WORKSPACE** —— 沙箱根必须是项目根，否则 `demo_case/inbox/x.csv`
      这类相对路径会解析到别处。用 setdefault 而不是直接赋值，是为了让
      外部（run_tests.py / CI）能覆盖它。
 
@@ -45,7 +45,7 @@ for _p in (SRC_DIR, PKG_DIR, PACKAGE_ROOT, TESTS_DIR):
         sys.path.insert(0, _p)
 
 # 沙箱根与环境标识 —— setdefault 让调用方仍可覆盖
-os.environ.setdefault("AGENT_WORKSPACE", PACKAGE_ROOT)
+os.environ.setdefault("MINI_AGENT_WORKSPACE", PACKAGE_ROOT)
 os.environ.setdefault("MINI_AGENT_ROOT", PACKAGE_ROOT)
 # 数据目录默认指向一次性临时目录：测试绝不读写用户真实数据（~/.mini-agent）。
 # 需要固定路径的用例（settings / models / auth）仍会各自覆写模块内的路径常量。

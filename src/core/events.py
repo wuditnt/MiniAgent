@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from typing import Any, Iterator
 
@@ -98,8 +99,20 @@ KIND_ATTACHMENT_IMAGES = "attachment_images"
 
 # ---------------------------------------------------------------- 路径与哈希
 
+#: 会话 id 白名单：它会被拼进文件名，必须拒绝路径分隔符与 `..`
+_SID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def valid_sid(sid: object) -> bool:
+    """会话 id 是否合法（Web 层入口校验与此处共用同一规则）。"""
+    s = str(sid or "")
+    return s not in (".", "..") and ".." not in s and bool(_SID_RE.match(s))
+
+
 def events_path(sid: str) -> str:
-    """会话事件文件路径。"""
+    """会话事件文件路径；非法 id 直接拒绝，绝不拼出目录外的路径。"""
+    if not valid_sid(sid):
+        raise ValueError(f"非法会话 id：{sid!r}")
     return os.path.join(_SESSIONS_DIR, f"{sid}.events.jsonl")
 
 
@@ -118,14 +131,20 @@ def _canon(obj: Any) -> str:
 
 
 def _canon_content(content: Any) -> Any:
-    """content 规范化：图片分片（image_url）的 url 换成哈希占位，其余原样。"""
+    """content 规范化：图片分片（image_url）的 url 换成哈希占位，其余原样（含 detail 等兄弟字段）。"""
     if not isinstance(content, list):
         return content
     out: list[Any] = []
     for part in content:
         if isinstance(part, dict) and part.get("type") == "image_url":
-            url = ((part.get("image_url") or {}).get("url") or "").strip()
-            out.append({"type": "image_url", "image_url": {"url": _img_marker(url)}})
+            img = part.get("image_url")
+            url = img.get("url") if isinstance(img, dict) else None
+            if isinstance(url, str):
+                # 保留 detail 等兄弟字段：只替换 url，不重建分片
+                out.append({**part, "image_url": {**img, "url": _img_marker(url.strip())}})
+            else:
+                # url 非 str（被截断成 dict / 厂家私有形态）：不参与图片哈希，原样透传
+                out.append(part)
         else:
             out.append(part)
     return out
@@ -230,13 +249,34 @@ def load_events(sid: str, from_seq: int = 0, limit: int = 500) -> list[dict]:
 # ---------------------------------------------------------------- 截断
 
 def _truncate(text: str, limit: int) -> dict:
+    """超长字段 → 摘要。limit 是单字段字符上限：head/tail 合计不超过它，且不超过现状 2048。"""
+    half = max(0, int(limit) // 2)
     return {
         "__truncated__": True,
         "len": len(text),
         "sha256": sha256_text(text),
-        "head": text[:_TRUNC_HEAD],
-        "tail": text[-_TRUNC_TAIL:],
+        "head": text[: min(_TRUNC_HEAD, half)],
+        "tail": text[-min(_TRUNC_TAIL, half):] if half else "",
     }
+
+
+#: 事实层正文字段：这些字段参与 I1 重放与 sha256 校验，必须原样保留。
+#: 一旦被 _shrink 截断，rebuild_messages 重建出的正文与 llm_request 里的
+#: digest 就对不上（重建校验失败），所以按事件类型豁免截断。
+#: 代价是事件文件可能明显变大 —— 宁可文件大，也不能让事实流自相矛盾。
+_FACT_BODY_FIELDS: dict[str, tuple[str, ...]] = {
+    SYSTEM_PROMPT: ("content",),
+    USER_MESSAGE: ("content", "attachments"),
+    LLM_RESPONSE: ("content", "tool_calls"),
+    TOOL_RESULT: ("content",),
+    CONTEXT_INJECT: ("content", "parts"),
+}
+
+
+def _shrink_payload(type: str, payload: dict, limit: int) -> dict:
+    """按事件类型裁剪 payload：事实层正文豁免，其余（预览/元数据）照旧截断。"""
+    keep = _FACT_BODY_FIELDS.get(type, ())
+    return {k: (v if k in keep else _shrink(v, limit)) for k, v in payload.items()}
 
 
 def _shrink(value: Any, limit: int) -> Any:
@@ -304,7 +344,7 @@ class EventWriter:
                 "phase": phase,
                 "turn": turn,
                 "run_id": self.run_id,
-                "payload": _shrink(payload, self.value_limit),
+                "payload": _shrink_payload(type, payload, self.value_limit),
             }
             self._fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
             self._fh.flush()
@@ -323,6 +363,9 @@ class EventWriter:
         if fh is not None:
             try:
                 fh.flush()
+            except OSError:
+                pass
+            try:
                 fh.close()
             except OSError:
                 pass
@@ -418,7 +461,9 @@ def rebuild_messages(sid: str, upto_seq: int | None = None, *, verify: bool = Tr
     """
     events = list(iter_events(sid))
     if upto_seq is None:
-        upto_seq = max((e.get("seq", 0) for e in events), default=0)
+        upto_seq = max(
+            (e["seq"] for e in events if isinstance(e.get("seq"), int)), default=0
+        )   # 坏 seq（非 int）与 iter_events 同口径：跳过，不参与解析
     target = next((e for e in events if e.get("seq") == upto_seq), None)
     msgs, sys_sha = _replay(events, upto_seq)
 

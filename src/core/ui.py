@@ -220,6 +220,10 @@ class PlainUI:
     # ---------------------------------------------------------- 交互确认
 
     def ask_confirm(self, tool, args: dict) -> bool:
+        # 非交互（enabled=False，如管道 / 后台任务）时不提问、不阻塞 stdin：
+        # 直接按默认值返回（默认是否决），危险工具一律不执行。
+        if not self.enabled:
+            return False
         preview = ", ".join(f"{k}={brief(v, 50)}" for k, v in args.items())
         with self._lock:
             sys.stderr.write(f"\n⚠  即将执行危险工具 {tool.name}({preview})\n确认执行？[y/N] ")
@@ -277,7 +281,7 @@ class RichUI(PlainUI):
         if not (self.enabled and self.console) or len(items) < 2:
             return super().tools_start(turn, items)
         # 并行批次：先一次性列出这一轮要跑哪些工具，后面谁先完成谁先出结果
-        preview = " + ".join(t.name for t, _a in items)
+        preview = " + ".join(self._escape(t.name) for t, _a in items)
         with self._lock:
             self.console.print(
                 f"  [cyan]⚙[/cyan] [bold]并行执行 {len(items)} 个工具[/bold][dim]（{preview}）[/dim]"
@@ -285,7 +289,10 @@ class RichUI(PlainUI):
             for t, args in items:
                 p = ", ".join(f"{k}={brief(v, 40)}" for k, v in args.items())
                 danger = "[red]危险[/red] " if t.dangerous else ""
-                self.console.print(f"      {danger}[bold]{t.name}[/bold][dim]({p})[/dim]")
+                self.console.print(
+                    f"      {danger}[bold]{self._escape(t.name)}[/bold]"
+                    f"[dim]({self._escape(p)})[/dim]"
+                )
 
     def tool_start(self, turn: int, tool, args: dict) -> None:
         if not (self.enabled and self.console):
@@ -293,7 +300,12 @@ class RichUI(PlainUI):
         preview = ", ".join(f"{k}={brief(v, 60)}" for k, v in args.items())
         danger = "[red]危险[/red] " if tool.dangerous else ""
         with self._lock:
-            self.console.print(f"  [cyan]⚙[/cyan] {danger}[bold]{tool.name}[/bold][dim]({preview})[/dim]")
+            # 预览来自模型给出的参数（完全可控的字符串）：不转义会让
+            # `[bold]`/`[red]` 这类片段被 rich 当标记执行，控制台显示被搅乱。
+            self.console.print(
+                f"  [cyan]⚙[/cyan] {danger}[bold]{self._escape(tool.name)}[/bold]"
+                f"[dim]({self._escape(preview)})[/dim]"
+            )
 
     def tool_end(self, turn: int, tool, result: str, seconds: float) -> None:
         if not (self.enabled and self.console):
@@ -333,6 +345,9 @@ class RichUI(PlainUI):
     # ---------------------------------------------------------- 交互确认
 
     def ask_confirm(self, tool, args: dict) -> bool:
+        # 同 PlainUI：关闭 UI 时不做任何提问，按默认值（否决）返回
+        if not self.enabled:
+            return False
         preview = ", ".join(f"{k}={brief(v, 50)}" for k, v in args.items())
         if not self.console:
             return super().ask_confirm(tool, args)

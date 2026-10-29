@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -34,12 +35,23 @@ from urllib.request import Request
 import bootstrap  # noqa: F401
 from bootstrap import PACKAGE_ROOT as HERE
 
-# 强制指向本文件的 mock 服务（直接赋值覆盖，避免读到真实 .env）
+# 模型来自 models.json（Web UI 配置）：测试里直接造一条指向本文件的 mock 服务。
+# 先把 models.json 指到临时文件再写入 —— 否则会污染用户真实的模型配置。
 MOCK_PORT = 8775
 WEB_PORT = 8776
-os.environ["OPENAI_API_KEY"] = "mock-key-not-real"
-os.environ["OPENAI_MODEL"] = "mock-gpt"
-os.environ["OPENAI_BASE_URL"] = f"http://127.0.0.1:{MOCK_PORT}/v1"
+import core.model_config as _model_config  # noqa: E402
+
+_MODELS_TMPDIR = tempfile.mkdtemp(prefix="miniagent-webui-models-")
+_model_config._MODELS_FILE = os.path.join(_MODELS_TMPDIR, "models.json")
+
+_mock = _model_config.create_entry(
+    provider="custom",
+    name="mock",
+    base_url=f"http://127.0.0.1:{MOCK_PORT}/v1",
+    api_key="mock-key-not-real",
+    model="mock-gpt",
+)
+_model_config.set_active(_mock["id"])
 
 # ---------------------------------------------------------------- mock 模型
 # 确定性脚本：按「消息历史里 tool 消息的条数」决定下一步。
@@ -273,6 +285,47 @@ def scenario_display_grouping() -> None:
     print(f"  [1b] 展示分组通过（{len(raw)} 条消息 → {len(items)} 个气泡）")
 
 
+def scenario_attachment_path() -> None:
+    """附件路径解析：分隔符 / 目录穿越 / 前缀兄弟目录 / 符号链接 / size 以磁盘为准。"""
+    from core.webui import ATTACH_DIR, _attachment_file, _resolve_attachments
+
+    root = tempfile.mkdtemp(prefix="ma-attach-")
+    other = tempfile.mkdtemp(prefix="ma-attach-sibling-")
+    try:
+        os.makedirs(os.path.join(root, ATTACH_DIR), exist_ok=True)
+        inside = os.path.join(root, ATTACH_DIR, "a.txt")
+        with open(inside, "w", encoding="utf-8") as f:
+            f.write("hello")
+        # /api/upload 返回的是正斜杠，Windows 上 os.sep 是反斜杠 —— 两种都必须认
+        assert _attachment_file(root, ".attachments/a.txt") == os.path.realpath(inside)
+        assert _attachment_file(root, ".attachments\\a.txt") == os.path.realpath(inside)
+        # 穿越、前缀兄弟目录、绝对路径一律拒绝
+        assert _attachment_file(root, ".attachments/../../etc/passwd") is None
+        sibling = os.path.join(other, "x.txt")
+        with open(sibling, "w", encoding="utf-8") as f:
+            f.write("secret")
+        assert _attachment_file(root, f"../{os.path.basename(other)}/x.txt") is None
+        assert _attachment_file(root, sibling) is None
+        # .attachments 里指向区外的符号链接也要拒绝
+        kw = {"target_is_directory": True} if os.name == "nt" else {}
+        try:
+            os.symlink(other, os.path.join(root, ATTACH_DIR, "lnk"), **kw)
+        except OSError:
+            pass   # Windows 未开开发者模式时无法建链接，跳过这一条
+        else:
+            assert _attachment_file(root, ".attachments/lnk/x.txt") is None
+        # size 以磁盘实际大小为准，客户端少报不能绕过读取上限
+        item = _resolve_attachments(
+            [{"name": "a", "path": ".attachments/a.txt", "mime": "text/plain", "size": 1}], root
+        )[0]
+        assert item["size"] == 5, item
+        assert item.get("excerpt") == "hello", item
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(other, ignore_errors=True)
+    print("  [0] 附件路径解析通过")
+
+
 def scenario_session_title() -> None:
     """标题：本地规则兜底（剥口语前缀 / 附件用文件名 / 别切在 .csv 里）+ 模型标题落地与锁定。"""
     from core.webui import WebUI, _derive_title, _tidy_title
@@ -501,6 +554,13 @@ def scenario_409() -> None:
             status, body = api("POST", "/api/chat",
                                {"message": "第二条", "mode": "agent", "session": "t-busy"})
             assert status == 409 and "error" in body, f"应为 409：{status} {body}"
+            # 运行中的会话不允许被截断 / 改配置（与 worker 抢写盘）
+            for path, payload in (
+                ("/api/sessions/t-busy/truncate", {"keep": 0}),
+                ("/api/sessions/t-busy/model", {"web": True}),
+            ):
+                s2, b2 = api("POST", path, payload)
+                assert s2 == 409 and "error" in b2, f"{path} 运行中应为 409：{s2} {b2}"
             api("POST", "/api/stop", {"session": "t-busy"})
     types = [e["type"] for e in events]
     assert "cancelled" in types, f"收尾应拿到 cancelled：{types}"
@@ -511,7 +571,7 @@ def scenario_state_and_index() -> None:
     """⑨ state 字段与静态托管兜底页。"""
     status, st = api("GET", "/api/state")
     assert status == 200
-    for key in ("model", "workspace", "tools", "search_backend", "confirm_timeout", "sessions"):
+    for key in ("model", "workspace", "tools", "search_backend", "sessions"):
         assert key in st, f"state 缺字段：{key}"
     assert st["model"] == "mock-gpt" and st["tools"] > 0
     assert any(s["id"] == "t-chat" for s in st["sessions"]), "历史会话应出现在 state 里"
@@ -616,15 +676,15 @@ def scenario_workspaces() -> None:
 
 
 def scenario_models() -> None:
-    """⑪ 模型配置：默认 DeepSeek / 列表脱敏 / 新增校验 / 切换 / 删除保护 / 连接测试。"""
+    """⑪ 模型配置：测试预置的 mock 为当前项 / 列表脱敏 / 新增校验 / 切换 / 删除保护 / 连接测试。"""
     status, body = api("GET", "/api/models")
     assert status == 200
-    assert body["active"] == "default", f"默认应选中 DeepSeek：{body['active']}"
+    assert body["active"] == _mock["id"], f"应选中测试预置的 mock 服务商：{body['active']}"
     assert {"deepseek", "zhipu", "kimi", "qwen", "doubao", "qianfan",
             "siliconflow", "openai", "ollama", "vllm"} <= set(body["templates"]), "内置模板不全"
 
-    first = body["providers"][0]
-    assert first["model"] == "mock-gpt", f"默认配置应取自环境变量：{first}"
+    first = next(p for p in body["providers"] if p["id"] == _mock["id"])
+    assert first["model"] == "mock-gpt", f"应能查到测试写入的 mock：{first}"
     assert first["has_key"] is True
     assert first["api_key_masked"].startswith("****"), "Key 必须脱敏回显"
     assert "mock-key-not-real" not in json.dumps(body), "真实 Key 不该下发"
@@ -650,8 +710,8 @@ def scenario_models() -> None:
     status, res = api("POST", "/api/models/test", {"base_url": "", "api_key": ""})
     assert status == 200 and res["ok"] is False, f"空地址应 ok=false：{res}"
 
-    # 切回默认并删除新增；最后一条不可删
-    assert api("POST", "/api/models/default/activate")[0] == 200
+    # 切回测试预置的 mock；最后一条不可删
+    assert api("POST", f"/api/models/{_mock['id']}/activate")[0] == 200
     assert api("GET", "/api/state")[1]["model"] == "mock-gpt"
 
     # ---- 会话级模型配置：每个对话单独保存，互不影响 ----
@@ -684,9 +744,48 @@ def scenario_models() -> None:
     api("DELETE", f"/api/sessions/{msid}")
     assert api("DELETE", f"/api/models/{pid2}")[0] == 200
     assert api("DELETE", f"/api/models/{pid}")[0] == 200
-    status, err = api("DELETE", "/api/models/default")
+    # 删除保护：删到只剩一条时不允许再删（先删掉内置 default，留下 mock 作为最后一条）
+    assert api("DELETE", "/api/models/default")[0] == 200
+    status, err = api("DELETE", f"/api/models/{_mock['id']}")
     assert status == 400 and "error" in err, f"至少保留一条：{status} {err}"
     print("  [11] 模型配置：默认/脱敏/新增校验/切换/删除保护 + 会话级模型配置 通过")
+
+
+def scenario_session_model_restore(wsrv) -> None:
+    """重启后会话模型仍生效：元数据必须在构造 Agent 之前恢复。
+
+    回归点：Agent 的 model / base_url 是构造时定型的。如果先建 Agent 再从磁盘
+    补 model_id，重启后的会话会悄悄退回全局默认模型（界面上选好的模型没了）。
+    """
+    import core.webui as _w
+
+    _, created = api("POST", "/api/models", {"provider": "ollama", "model": "qwen2.5:7b"})
+    pid = created["id"]
+    now = time.time()
+    sid = "t-restore"
+    _w._save_session_file(sid, {
+        "id": sid, "title": "带模型的会话", "workspace_id": "default",
+        "model_id": pid, "reasoning": "low",
+        "messages": [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "你好，需要我做什么？"},
+        ],
+        "created_at": now, "updated_at": now,
+    })
+    # 模拟进程重启：内存里没有任何会话状态，只有一个全新的 _Session 对象
+    sess = _w._Session(sid, wsrv)
+    agent = sess.ensure_agent()
+    assert sess.title == "带模型的会话", f"标题未恢复：{sess.title}"
+    assert sess.model_id == pid
+    assert agent.model == "qwen2.5:7b", f"应使用会话保存的模型，实际 {agent.model}"
+    assert agent.reasoning_level == "low", f"推理等级未恢复：{agent.reasoning_level}"
+    assert [m["content"] for m in agent.messages[1:]] == [
+        "你好", "你好，需要我做什么？",
+    ], f"历史未恢复：{agent.messages}"
+    # 同一份数据只读一次：元数据与历史共用缓存
+    assert sess._session_data is not None
+    api("DELETE", f"/api/models/{pid}")
+    print("  [11b] 重启后会话模型恢复：标题/模型/推理/历史 通过")
 
 
 def scenario_search() -> None:
@@ -815,6 +914,59 @@ def scenario_user_memory_command() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def scenario_api_guards() -> None:
+    """接口兜底：未知 /api/* 404、keep 非整数 400、非法会话 id 400、
+    工作区 HTML/SVG 按附件 + 沙箱下发、文件夹选择框仅本机。
+    """
+    import core.webui as webui_mod
+
+    # 未知 /api/* 必须 404（落到静态托管会返回 200 + index.html）
+    status, body = api("GET", "/api/no_such_endpoint")
+    assert status == 404 and "error" in body, f"未知接口应 404：{status} {body}"
+    # 非 API 路径仍走静态托管（200/404 都可，但不能是 JSON 错误）
+    try:
+        with urllib.request.urlopen(
+            Request(f"http://127.0.0.1:{WEB_PORT}/no_such_page"), timeout=10
+        ) as resp:
+            assert resp.status in (200, 404)
+    except HTTPError as e:
+        assert e.code == 404
+
+    # keep 非整数 → 400（以前 int() 抛异常变 500）
+    status, body = api("POST", "/api/sessions/t-guard/truncate", {"keep": "abc"})
+    assert status == 400 and "error" in body, f"keep 非法应 400：{status} {body}"
+
+    # 非法会话 id → 400（不能拼进文件系统）
+    status, body = api("GET", "/api/history?session=" + quote("../../evil"))
+    assert status == 400, f"非法 session 应 400：{status} {body}"
+    status, body = api("POST", "/api/sessions/..%2Fevil/truncate", {"keep": 0})
+    assert status == 400, f"非法路由 session 应 400：{status} {body}"
+
+    # 工作区里的 .svg 仍可内联浏览，但必须带 CSP sandbox（禁脚本，防同源 XSS）
+    _make_file("_guard_probe.svg")
+    try:
+        with urllib.request.urlopen(
+            Request(f"http://127.0.0.1:{WEB_PORT}/api/workspace/asset/default/_guard_probe.svg"),
+            timeout=10,
+        ) as resp:
+            assert resp.headers.get("Content-Type", "").startswith("image/svg+xml"), resp.headers
+            assert resp.headers.get("Content-Security-Policy") == "sandbox allow-popups", resp.headers
+            # 不能改成强制下载：预览里的静态资源仍要能内联加载
+            assert "attachment" not in (resp.headers.get("Content-Disposition") or ""), resp.headers
+    finally:
+        os.remove(os.path.join(_ws_root(), "_guard_probe.svg"))
+
+    # 文件夹选择框仅本机：把对端伪装成远端
+    original = webui_mod._RequestHandler._is_remote
+    webui_mod._RequestHandler._is_remote = lambda self: True
+    try:
+        status, body = api("POST", "/api/workspaces/pick", {})
+        assert status == 403, f"远端弹选择框应 403：{status} {body}"
+    finally:
+        webui_mod._RequestHandler._is_remote = original
+    print("  [16] 未知接口 404 / keep 400 / 会话 id 白名单 / SVG 沙箱 / 选择框限本机通过")
+
+
 def scenario_keepalive_body() -> None:
     """⑭ keep-alive 复用：没读的请求体不能污染下一个请求。
 
@@ -826,7 +978,7 @@ def scenario_keepalive_body() -> None:
 
     conn = http.client.HTTPConnection("127.0.0.1", WEB_PORT, timeout=15)
     try:
-        conn.request("POST", "/api/models/default/activate", body=b"{}",
+        conn.request("POST", f"/api/models/{_mock['id']}/activate", body=b"{}",
                      headers={"Content-Type": "application/json"})
         r1 = conn.getresponse()
         first = (r1.status, json.loads(r1.read() or b"{}"))
@@ -847,10 +999,10 @@ def scenario_keepalive_body() -> None:
 # ---------------------------------------------------------------- 主流程
 
 def main() -> int:
-    # 隔离存储：会话 / 工作区 / 模型配置都指到临时目录，
-    # 既不污染真实 web_data，也让「默认 DeepSeek」确定地从环境变量生成
+    # 隔离存储：会话 / 工作区 / 设置都指到临时目录，
+    # 既不污染真实 web_data，也让每次运行从干净状态开始
+    # （models.json 已在模块导入时单独隔离并写入 mock 服务商）
     tmpdir = tempfile.mkdtemp(prefix="miniagent-webui-test-")
-    import core.model_config as _mc
     import core.settings as _st
     import core.workspace_config as _wc
     import core.webui as _webui
@@ -861,7 +1013,7 @@ def main() -> int:
     import core.events as _events
 
     _events._SESSIONS_DIR = os.path.join(tmpdir, "sessions")
-    _mc._MODELS_FILE = os.path.join(tmpdir, "models.json")
+    # models.json 已在导入时指向独立的临时文件（并写入 mock 服务商），这里不再改
     _wc._WORKSPACES_FILE = os.path.join(tmpdir, "workspaces.json")
     _st._SETTINGS_FILE = os.path.join(tmpdir, "settings.json")
 
@@ -876,8 +1028,6 @@ def main() -> int:
 
     wsrv = WebServer(port=WEB_PORT, model="mock-gpt", login_enabled=False)
     threading.Thread(target=wsrv.serve_forever, daemon=True).start()
-    # 测试里若有确认没被应答，10s 就该超时拒绝并暴露问题，不必等 120s
-    _webui.CONFIRM_TIMEOUT = 10
     for _ in range(50):
         try:
             if api("GET", "/api/state")[0] == 200:
@@ -895,6 +1045,7 @@ def main() -> int:
         ("会话工具表矩阵", scenario_registry_matrix),
         ("健康检查", scenario_health),
         ("Host 头白名单", scenario_host_guard),
+        ("附件路径解析", scenario_attachment_path),
         ("展示分组-注入不拆气泡", scenario_display_grouping),
         ("会话标题生成与锁定", scenario_session_title),
         ("chat 模式 + history", scenario_chat_and_history),
@@ -907,10 +1058,12 @@ def main() -> int:
         ("state + 首页", scenario_state_and_index),
         ("工作区管理", scenario_workspaces),
         ("模型配置", scenario_models),
+        ("重启后会话模型恢复", lambda: scenario_session_model_restore(wsrv)),
         ("会话搜索", scenario_search),
         ("通用配置", scenario_settings),
         ("用户指令记忆", scenario_user_memory_command),
         ("keep-alive 请求体", scenario_keepalive_body),
+        ("接口兜底与限权", scenario_api_guards),
     ]
     for name, fn in scenarios:
         try:

@@ -84,17 +84,22 @@ def kill_tree(p: subprocess.Popen, *, background: bool = False) -> None:
                 pass
         return
     try:
-        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        pgid = os.getpgid(p.pid)
     except (ProcessLookupError, PermissionError):
+        pgid = None
+    # 只有当子进程自成一个进程组（start_new_session=True）时才能按组杀。
+    # 否则它的组就是 agent 自己所在的组，killpg 会把 agent 连同一整棵会话树
+    # 一起 SIGKILL —— 表现为「点停止，整个程序没了」。
+    if pgid and pgid != os.getpgrp():
         try:
-            p.kill()
-        except Exception:  # noqa: BLE001
+            os.killpg(pgid, signal.SIGKILL)
+            return
+        except Exception:  # noqa: BLE001 —— 组杀失败时不外抛，退回只杀 pid
             pass
+    try:
+        p.kill()
     except Exception:  # noqa: BLE001 —— 杀进程失败不该让取消流程卡死
-        try:
-            p.kill()
-        except Exception:  # noqa: BLE001
-            pass
+        pass
 
 
 # 兼容旧私有名（sandbox.py 历史上这么引用）；新代码请直接用 kill_tree

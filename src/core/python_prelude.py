@@ -38,17 +38,30 @@ def _install():
     _PROT = __MA_MEMORY__
 
     def _norm(p):
-        return _os.path.normcase(_os.path.abspath(_os.path.expanduser(_os.fspath(p))))
+        # realpath 必须做：abspath 只是字符串折叠，工作区内一个指向外部的符号链接
+        # 会让结果仍落在工作区前缀里，护栏就形同虚设。
+        return _os.path.normcase(_os.path.realpath(_os.path.expanduser(_os.fspath(p))))
+
+    _WS_N = _norm(_WS)
+    _PROT_N = _norm(_PROT)
 
     def _within(p):
         ap = _norm(p)
-        root = _os.path.normcase(_os.path.abspath(_WS))
-        return ap == root or ap.startswith(root + _os.sep)
+        return ap == _WS_N or ap.startswith(_WS_N + _os.sep)
 
     def _protected(p):
-        ap = _norm(p)
-        pp = _os.path.normcase(_os.path.abspath(_PROT))
+        # 大小写再折叠一次：normcase 在 POSIX 上是空操作，而 macOS 默认不区分大小写。
+        # 这里只会「多判保护区」，方向是安全的。
+        ap = _norm(p).casefold()
+        pp = _PROT_N.casefold()
         return ap == pp or ap.startswith(pp + _os.sep)
+
+    def _link_target(link, target):
+        """链接目标按「相对链接所在目录」解释（与 os.symlink 语义一致）。"""
+        t = _os.fspath(target)
+        if not _os.path.isabs(t):
+            t = _os.path.join(_os.path.dirname(_os.path.abspath(_os.fspath(link))), t)
+        return t
 
     def _guard(p, what):
         if _protected(p):
@@ -110,17 +123,30 @@ def _install():
     _wrap2("rename", "移动/重命名")
     _wrap2("replace", "移动/替换")
 
+    def _check_link(link, target, what):
+        """链接的落点必须在工作区内，且目标不能指向区外或 .memory（否则就是越界跳板）。"""
+        _guard(link, what)
+        t = _link_target(link, target)
+        if _protected(t):
+            raise PermissionError(
+                f".memory 是系统记忆目录，禁止创建指向它的{what}：{t}"
+            )
+        if not _within(t):
+            raise PermissionError(
+                f"禁止创建指向工作区外的{what}：{t}（工作区 {_os.path.abspath(_WS)}）"
+            )
+
     _link_orig = getattr(_os, "link", None)
     if _link_orig is not None:
         def _link(src, dst, *a, **k):
-            _guard(dst, "创建链接")
+            _check_link(dst, src, "硬链接")
             return _link_orig(src, dst, *a, **k)
         _os.link = _link
 
     _symlink_orig = getattr(_os, "symlink", None)
     if _symlink_orig is not None:
         def _symlink(src, dst, *a, **k):
-            _guard(dst, "创建符号链接")
+            _check_link(dst, src, "符号链接")
             return _symlink_orig(src, dst, *a, **k)
         _os.symlink = _symlink
 
@@ -194,9 +220,20 @@ def _install():
     _p1("touch", "写入")
     _p2("rename", "移动/重命名")
     _p2("replace", "移动/替换")
-    _p1("symlink_to", "创建符号链接")
-    _p1("hardlink_to", "创建硬链接")
-    _p1("link_to", "创建硬链接")  # 旧版本 Python
+
+    def _plink(name, what):
+        orig = getattr(_P, name, None)
+        if orig is None:
+            return
+
+        def wrapper(self, target, *a, **k):
+            _check_link(self, target, what)
+            return orig(self, target, *a, **k)
+        setattr(_P, name, wrapper)
+
+    _plink("symlink_to", "符号链接")
+    _plink("hardlink_to", "硬链接")
+    _plink("link_to", "硬链接")  # 旧版本 Python
 
     # ---------- sqlite3：区外库禁止读写连接（只读 URI 放行）----------
     try:
@@ -204,22 +241,42 @@ def _install():
 
         _connect_orig = _sqlite3.connect
 
+        def _db_path(database):
+            """把 connect 的第一个参数归一成可判定的字符串；不需要检查时返回 None。
+
+            原来只认 str，`Path(...)` / `bytes` 会整个跳过检查，从而在工作区外
+            以读写方式打开数据库。
+            """
+            db = database
+            if isinstance(db, (bytes, bytearray)):
+                db = _os.fsdecode(db)
+            elif not isinstance(db, str):
+                try:
+                    db = _os.fspath(db)          # pathlib.Path / os.PathLike
+                except TypeError:
+                    return None                   # 其它类型交给 sqlite3 自己报错
+                if isinstance(db, bytes):
+                    db = _os.fsdecode(db)
+            db = str(db)
+            return None if db in ("", ":memory:") else db
+
         def _connect(database, *a, **k):
-            if isinstance(database, str) and database not in (":memory:", ""):
-                uri = database if k.get("uri") else None
+            db = _db_path(database)
+            if db is not None:
+                uri = db if k.get("uri") else None
                 readonly = bool(uri) and "mode=ro" in uri
                 # .memory 内的库任何连接方式都拦（只读也会泄露记忆内容）
-                if uri and database.startswith("file:"):
+                if uri and db.startswith("file:"):
                     from urllib.request import url2pathname
-                    _db_path = url2pathname(database[5:].split("?", 1)[0])
+                    _db_file = url2pathname(db[5:].split("?", 1)[0])
                 else:
-                    _db_path = database
-                if _protected(_db_path):
+                    _db_file = db
+                if _protected(_db_file):
                     raise PermissionError(
-                        f".memory 是系统记忆目录，禁止访问数据库：{_os.path.abspath(_db_path)}"
+                        f".memory 是系统记忆目录，禁止访问数据库：{_os.path.abspath(_db_file)}"
                     )
                 if not readonly:
-                    _guard(_db_path, "写数据库")
+                    _guard(_db_file, "写数据库")
             return _connect_orig(database, *a, **k)
 
         _sqlite3.connect = _connect

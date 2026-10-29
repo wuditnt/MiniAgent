@@ -25,6 +25,7 @@ Agent 核心循环：整个「智能体」最本质的部分。
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
@@ -109,7 +110,7 @@ def _pick(explicit, name: str, fallback):
 
 
 def _resolve_model() -> str:
-    """当前生效的模型名：优先用户在 Web UI 里选的，其次环境变量，最后兜底。"""
+    """当前生效的模型名：用户在 Web UI 里选的（models.json）；没有再兜底。"""
     try:
         from core import model_config
 
@@ -118,18 +119,18 @@ def _resolve_model() -> str:
             return m
     except Exception:  # noqa: BLE001 —— 配置层出问题不该让 Agent 起不来
         pass
-    return os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+    return "gpt-4o-mini"
 
 
 def _resolve_endpoint() -> tuple[str, str]:
-    """当前生效的 (base_url, api_key)：用户配置优先，回退环境变量。"""
+    """当前生效的 (base_url, api_key)：只认用户配置（models.json）。"""
     try:
         from core import model_config
 
         cfg = model_config.resolve_active()
         return cfg.get("base_url") or "", cfg.get("api_key") or ""
     except Exception:  # noqa: BLE001
-        return os.environ.get("OPENAI_BASE_URL", ""), os.environ.get("OPENAI_API_KEY", "")
+        return "", ""
 
 
 def _apply_reasoning(payload: dict, spec: dict | None = None, level: str | None = None) -> None:
@@ -631,10 +632,11 @@ class Agent:
             tags={},
         )
         # 本轮确认模式：同步 system prompt（auto 追加责任准则 + 记忆块），
-        # 并把 request_approval / ask_user 的询问桥接到 UI（结束后立刻摘除）
+        # 并把 request_approval / ask_user 的询问桥接到 UI（结束后立刻摘除）。
+        # 用 token 恢复而不是置 None：并发会话互不干扰，也不会有「A 结束把 B 清掉」。
         self._sync_system_prompt(user_input)
-        approval.set_asker(self._ask_approval)
-        ask.set_asker(self._ask_user)
+        approval_tok = approval.set_asker(self._ask_approval)
+        ask_tok = ask.set_asker(self._ask_user)
         try:
             answer = self._run_loop(user_input, attachments)
             # 回复已定稿：记忆提炼放后台线程，绝不让它拖慢 done 事件
@@ -678,8 +680,8 @@ class Agent:
             self.last_cancel_notice_shown = bool(self._ui_call("cancelled", reason))
             raise Cancelled(f"任务已被用户取消（{reason}）") from None
         finally:
-            approval.set_asker(None)
-            ask.set_asker(None)
+            approval.reset_asker(approval_tok)
+            ask.reset_asker(ask_tok)
             self.cancel_token = None
             self._extra_system = ""
             set_current_token(prev)
@@ -1291,9 +1293,11 @@ class Agent:
         需要的是一个结论，而不是再一轮工具调用。这次调用**不带 tools**，因此
         不可能再产出 tool_calls，必定一轮结束，不会把主循环接回去。
 
-        返回值直接拼进最后一条 assistant 回答里（而不是另起一条消息）——
-        这样无论流式还是一般模式，整轮任务始终只呈现为一个回复气泡。
-        调用失败则退回本地合成的兜底文案：收尾是为了给用户交代，
+        返回值作为**一条新的 assistant 消息**追加进历史（另起一个气泡）。
+        不能反向扫描去拼进「最后一条有正文的 assistant」：轮数用尽时，历史末尾
+        通常是带 tool_calls 的 assistant（content 为空）+ 工具结果，反向扫描会
+        越过它们，把收尾总结塞进**上一轮早已结束的回答**里，既改写旧轮语义，
+        展示上也会串轮。调用失败则退回本地合成的兜底文案：收尾是为了给用户交代，
         不能因为收尾本身失败就什么都不说。
         """
         note = (
@@ -1353,11 +1357,7 @@ class Agent:
         head = f"**已达最大轮次（{self.max_turns} 轮），任务未完成**"
         body = (content or "").strip() or self._max_turns_fallback()
         block = f"{head}\n\n{body}"
-        # 并入最后一条 assistant 回答：整轮任务始终只呈现为一个气泡
-        for m in reversed(self.messages):
-            if m.get("role") == "assistant" and isinstance(m.get("content"), str) and m["content"]:
-                m["content"] = m["content"].rstrip() + "\n\n" + block
-                return m["content"]
+        # 单独成一条 assistant 消息：只追加，不改写历史里任何已结束的回答
         self.messages.append({"role": "assistant", "content": block})
         return block
 
@@ -1611,8 +1611,13 @@ class Agent:
                 longest = 0.0
                 pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tool")
                 try:
+                    # copy_context()：把当前运行上下文（询问通道）带进工作线程；
+                    # ThreadPoolExecutor 不会自动传播 ContextVar。每个任务各复制一份，
+                    # 因为同一个 Context 不能被并发进入。
                     futures = {
-                        pool.submit(self._call_tool, tool, args): (i, tool)
+                        pool.submit(
+                            contextvars.copy_context().run, self._call_tool, tool, args,
+                        ): (i, tool)
                         for i, tool, args in todo
                     }
                     for fut in as_completed(futures):

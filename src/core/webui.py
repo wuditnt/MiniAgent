@@ -7,8 +7,8 @@ Web UI 后端：把 Agent 的 9 个 UI 回调翻译成 SSE 事件流，浏览器
     agent → 全量 REGISTRY（关联网时剔除 web_search）。Agent.run() 全程走
     self.registry（schemas/get/call），所以逐消息换 agent.registry 即可，核心代码一行不改。
   · 一个会话一个 Agent（保住消息历史与用量统计）；同一会话同时只允许一个任务
-  · 危险确认：ask_confirm 回调推 confirm_request 事件后，在工作线程上
-    Event.wait(120) 挂起；POST /api/confirm 置位事件返回用户选择
+  · 危险确认：ask_confirm 回调推 confirm_request 事件后，在工作线程上无限等待
+    （0.5s 轮询检查停止/断连，不设超时）；POST /api/confirm 置位事件返回用户选择
   · 取消：POST /api/stop → agent.interrupt()，复用 core/cancel 全链路
 """
 
@@ -42,8 +42,9 @@ from core.images import ATTACH_NOTE
 
 # ---------------------------------------------------------------- 常量
 
-CONFIRM_TIMEOUT = 120          # 危险确认等待上限（秒），超时视为拒绝
-PUMP_IDLE = 15                 # SSE 空闲心跳间隔（秒）
+# 确认/提问不设超时：等用户作答，直到应答、点停止或浏览器断连。
+# （以前是 120s 自动拒绝，用户离开一会儿回来就发现任务已经被拒了。）
+PUMP_IDLE = 15                 # SSE 空闲心跳间隔（秒，顺带探测断连）
 HISTORY_RESULT_LIMIT = 4000    # tool_end 事件里结果文本的传输上限
 CONFIRM_ARG_LIMIT = 20000      # 危险确认弹窗参数上限：需完整展示脚本/代码，故放宽
 MAX_BODY = 32 * 1024 * 1024    # 请求体上限 32MB（base64 附件膨胀约 1/3，实际文件上限约 24MB）
@@ -169,6 +170,9 @@ _DIR_MAX_ENTRIES = 500                  # 目录最多返回 500 项
 _RAW_MAX_BYTES = 20 * 1024 * 1024       # 原始字节预览（图片/PDF 等）上限 20MB
 _HIDDEN_DIRS = frozenset({".memory", ".attachments"})
 _IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"})
+# 工作区内容由用户 / 模型生成：这些扩展名按同源文档打开会执行脚本（存储型 XSS），
+# 只加 CSP sandbox（禁脚本 / 唯一源），仍可正常静态浏览；图片 / PDF / 文本不受影响。
+_UNSAFE_INLINE_EXTS = frozenset({".html", ".htm", ".xhtml", ".svg", ".xml"})
 
 # 表格预览（CSV / TSV）：解析上限 + 单页窗口。
 # 10M 个格子不可能一次性传给前端，所以按「行窗口 × 列窗口」分页返回，
@@ -217,6 +221,11 @@ class _Session:
         self.busy = False                     # run_lock 的可观察副本
         self.run_lock = threading.Lock()
         self.confirm_lock = threading.Lock()
+        # 询问槽位：同一会话同一时刻只挂一张确认/提问卡（前端是单卡 UI）。
+        # 并发的第二个询问先排队，等前一个答完再弹，而不是互相覆盖。
+        self.ask_slot = threading.Lock()
+        # 停止 / 断连时自增：排队者和等待者据此立刻放弃（无限等待的唯一出口）
+        self.ask_epoch = 0
         self.pending_confirm: tuple[str, threading.Event, dict] | None = None
         # ask_user 内联提问卡片的待答项：(cid, event, {"answer": str})
         self.pending_ask: tuple[str, threading.Event, dict] | None = None
@@ -231,6 +240,9 @@ class _Session:
         self.created_at = now
         self.updated_at = now
         self._loaded = False                 # 是否已从磁盘灌入过历史
+        self._meta_loaded = False            # 是否已从磁盘恢复过会话元数据
+        self._session_data: dict | None = None   # 磁盘数据缓存（meta 与历史共用一次读取）
+        self._force_stale = False            # 全局换模型时给「运行中」会话打的标记
 
     def ensure_agent(self):
         if self.agent is None:
@@ -238,6 +250,10 @@ class _Session:
 
             from core.registry import REGISTRY
 
+            # 先恢复磁盘上的会话元数据，再构造 Agent：Agent 的 model/base_url
+            # 是构造时定型的，晚于 _inject_history 恢复会让重启后的会话
+            # 悄悄退回全局默认模型。
+            self._load_session_meta()
             # 会话级模型：优先本会话保存的 model_id，无效/未存 → 回退全局 active
             cfg = model_config.resolve_model(self.model_id)
             self.agent = Agent(
@@ -267,24 +283,45 @@ class _Session:
         会话中换模型：字段先更新、Agent 到下一次对话时才重建（历史落盘不丢）。
         """
         return self.agent is not None and (
-            (self.model_id, self.reasoning)
+            self._force_stale
+            or (self.model_id, self.reasoning)
             != (getattr(self, "_agent_model_id", None), getattr(self, "_agent_reasoning", None))
         )
+
+    def _load_session_meta(self) -> None:
+        """从磁盘恢复会话元数据（标题 / 工作区 / 模型 / 推理 / 联网）。
+
+        只读一次磁盘，结果缓存在 `_session_data` 里供 `_inject_history` 复用。
+        必须在构造 Agent 之前调用：Agent 的 model/base_url 是构造时定型的，
+        晚于建 Agent 再改 `model_id` 会让重启后的会话悄悄退回全局默认模型。
+        """
+        if self._meta_loaded:
+            return
+        self._meta_loaded = True
+        data = _load_session_file(self.id)
+        if not data:
+            return
+        self._session_data = data
+        self.title = data.get("title") or self.title
+        self.title_custom = bool(data.get("title_custom", False))
+        self.workspace_id = data.get("workspace_id") or self.workspace_id
+        self.model_id = data.get("model_id") or None
+        self.reasoning = model_config.normalize_reasoning(data.get("reasoning"))
+        self.web = bool(data.get("web", False))
+        self.created_at = data.get("created_at") or self.created_at
+        self.updated_at = data.get("updated_at") or self.updated_at
 
     def _inject_history(self) -> None:
         """首次创建 Agent 时，把磁盘上的 user/assistant 消息灌入。"""
         if self._loaded or self.agent is None:
             return
-        data = _load_session_file(self.id)
+        self._load_session_meta()
+        # 重建 Agent 时（换模型/切换全局配置）缓存会被主动清空，这里按需重读磁盘，
+        # 拿到的是 save() 之后的最新消息而不是首次加载时的旧快照。
+        data = self._session_data
+        if data is None:
+            data = _load_session_file(self.id)
         if data:
-            self.title = data.get("title") or self.title
-            self.title_custom = bool(data.get("title_custom", False))
-            self.workspace_id = data.get("workspace_id") or self.workspace_id
-            self.model_id = data.get("model_id") or None
-            self.reasoning = model_config.normalize_reasoning(data.get("reasoning"))
-            self.web = bool(data.get("web", False))
-            self.created_at = data.get("created_at") or self.created_at
-            self.updated_at = data.get("updated_at") or self.updated_at
             for m in data.get("messages", []):
                 role, content = m.get("role"), m.get("content")
                 # 老会话文件里混着内部注入消息（那时还没打标记），一并跳过，
@@ -363,10 +400,11 @@ class _Session:
     def deny_pending_confirm(self) -> None:
         """以「拒绝」解除正在等待的确认（停止任务 / 浏览器断连时调用）。
 
-        ask_confirm 挂在工作线程的 Event.wait 上，取消令牌叫不醒它；
-        不主动放行的话，worker 会一直卡到 120s 超时。
+        ask_confirm 挂在工作线程的等待上，取消令牌叫不醒它；
+        不主动放行的话，worker 会一直挂着（现在没有超时兜底）。
         """
         with self.confirm_lock:
+            self.ask_epoch += 1        # 让排队中的询问也立刻退出
             pending = self.pending_confirm
             if pending:
                 pending[2]["approve"] = False
@@ -385,14 +423,37 @@ class _Session:
     def deny_pending_ask(self) -> None:
         """以「未作答」解除正在等待的提问（停止任务 / 浏览器断连时调用）。
 
-        与 deny_pending_confirm 同理：ask_user 挂在工作线程的 Event.wait 上，
-        取消令牌叫不醒它；不主动放行的话 worker 会一直卡到 120s 超时。
+        与 deny_pending_confirm 同理：ask_user 挂在工作线程的等待上，
+        取消令牌叫不醒它；不主动放行的话 worker 会一直挂着。
         """
         with self.confirm_lock:
+            self.ask_epoch += 1        # 让排队中的询问也立刻退出
             pending = self.pending_ask
             if pending:
                 pending[2]["answer"] = ""
                 pending[1].set()
+
+    def acquire_ask_slot(self, epoch: int) -> bool:
+        """排队占用「一次只问一件事」的槽位（无限等待版）。
+
+        没有超时，唯一的出口是：
+          · 前一张卡被答完 → 正常轮到；
+          · 停止任务 / 浏览器断连 → deny_pending_* 把 ask_epoch 加一，排队者立刻放弃；
+          · SSE 泵已经退出（queue 为空）→ 没人能答，立刻放弃。
+
+        轮询间隔 0.2s 只是为了能感知上面两种中止，不是为了限时。
+        """
+        while True:
+            if self.ask_slot.acquire(timeout=0.2):
+                with self.confirm_lock:
+                    aborted = self.ask_epoch != epoch or self.queue is None
+                if not aborted:
+                    return True
+                self.ask_slot.release()
+                return False
+            with self.confirm_lock:
+                if self.ask_epoch != epoch or self.queue is None:
+                    return False
 
 
 class WebUI:
@@ -480,19 +541,64 @@ class WebUI:
             "result": result[:HISTORY_RESULT_LIMIT],
         })
 
-    def ask_confirm(self, tool, args: dict) -> bool:
-        """危险确认桥：推事件 → Event.wait 挂起工作线程 → /api/confirm 置位。"""
+    def _bridge_ask(self, payload: dict, holder: dict, kind: str) -> bool:
+        """确认 / 提问共用的一套「推事件 → 无限等待 → 收答案」。
+
+        为什么无限等待：以前 120s 自动拒绝，用户离开一会儿回来任务就已经被拒了。
+        现在唯一的出口是应答、点停止、浏览器断连（见 acquire_ask_slot 的说明）。
+        返回 True 表示拿到了应答（holder 里是内容），False 表示被中止。
+        """
         session = self.session
-        cid = uuid.uuid4().hex[:12]
-        event = threading.Event()
-        holder = {"approve": False}
-        with session.confirm_lock:
-            session.pending_confirm = (cid, event, holder)
-        self._push({"type": "confirm_request", "id": cid, "tool": tool.name,
-                    "args": _brief_args(args, CONFIRM_ARG_LIMIT)})
-        got = event.wait(CONFIRM_TIMEOUT)
-        with session.confirm_lock:
-            session.pending_confirm = None
+        if session.queue is None:      # 没有 SSE 消费者：没人能答，直接按默认值返回
+            return False
+        epoch = session.ask_epoch
+        if not session.acquire_ask_slot(epoch):
+            return False
+        try:
+            if session.queue is None:  # 排队期间连接断了
+                return False
+            cid = uuid.uuid4().hex[:12]
+            event = threading.Event()
+            pending = (cid, event, holder)
+            with session.confirm_lock:
+                if kind == "confirm":
+                    session.pending_confirm = pending
+                else:
+                    session.pending_ask = pending
+            self._push({**payload, "id": cid})
+            got = False
+            while True:
+                if event.wait(0.5):
+                    got = True
+                    break
+                # 每 0.5s 检查一次中止条件：停止按钮 / 断连 / 令牌已取消
+                from core.cancel import current_token
+
+                token = current_token()
+                if session.queue is None or (token is not None and token.cancelled()):
+                    break
+                with session.confirm_lock:
+                    if session.ask_epoch != epoch:
+                        break
+            with session.confirm_lock:
+                cur = session.pending_confirm if kind == "confirm" else session.pending_ask
+                if cur is not None and cur[0] == cid:
+                    if kind == "confirm":
+                        session.pending_confirm = None
+                    else:
+                        session.pending_ask = None
+            return got
+        finally:
+            session.ask_slot.release()
+
+    def ask_confirm(self, tool, args: dict) -> bool:
+        """危险确认桥：推事件 → 挂起工作线程 → /api/confirm 置位（无超时）。"""
+        holder: dict = {"approve": False}
+        got = self._bridge_ask(
+            {"type": "confirm_request", "tool": tool.name,
+             "args": _brief_args(args, CONFIRM_ARG_LIMIT)},
+            holder, "confirm",
+        )
         return got and holder["approve"]
 
     def ask_approval(self, reason: str) -> bool:
@@ -501,39 +607,29 @@ class WebUI:
         前端按 tool == "request_approval" 展示「模型主动申请授权」样式，
         申请理由在 args.reason 里。
         """
-        session = self.session
-        cid = uuid.uuid4().hex[:12]
-        event = threading.Event()
-        holder = {"approve": False}
-        with session.confirm_lock:
-            session.pending_confirm = (cid, event, holder)
-        self._push({"type": "confirm_request", "id": cid, "tool": "request_approval",
-                    "args": {"reason": reason}})
-        got = event.wait(CONFIRM_TIMEOUT)
-        with session.confirm_lock:
-            session.pending_confirm = None
+        holder: dict = {"approve": False}
+        got = self._bridge_ask(
+            {"type": "confirm_request", "tool": "request_approval",
+             "args": {"reason": reason}},
+            holder, "confirm",
+        )
         return got and holder["approve"]
 
     def ask_user(self, question: str, options: list, allow_free_text: bool = True,
                  multi: bool = False) -> str:
-        """ask_user 内联提问桥：推 ask_request 事件 → Event.wait 挂起 → /api/answer 置位。
+        """ask_user 内联提问桥：推 ask_request 事件 → 挂起 → /api/answer 置位（无超时）。
 
-        与 ask_confirm 共用 confirm_lock 与 CONFIRM_TIMEOUT，但载荷是文本答案。
+        与 ask_confirm 共用同一个询问槽位（同一时刻只挂一张卡，其余排队）。
         前端把它渲染在助手气泡内部，用户点选/输入后即时回传。
         multi=True 时前端渲染多选控件，多选结果仍以「、」拼接的单个字符串回传。
         """
-        session = self.session
-        cid = uuid.uuid4().hex[:12]
-        event = threading.Event()
-        holder = {"answer": ""}
-        with session.confirm_lock:
-            session.pending_ask = (cid, event, holder)
-        self._push({"type": "ask_request", "id": cid, "question": question,
-                    "options": list(options or []), "allow_free_text": allow_free_text,
-                    "multi": multi})
-        got = event.wait(CONFIRM_TIMEOUT)
-        with session.confirm_lock:
-            session.pending_ask = None
+        holder: dict = {"answer": ""}
+        got = self._bridge_ask(
+            {"type": "ask_request", "question": question,
+             "options": list(options or []), "allow_free_text": allow_free_text,
+             "multi": multi},
+            holder, "ask",
+        )
         return holder["answer"] if got else ""
 
     def cancelled(self, reason: str = "") -> bool:
@@ -650,6 +746,26 @@ def _settings_public() -> dict:
 
 # ---------------------------------------------------------- 附件
 
+def _attachment_file(ws_root: str, rel: str) -> str | None:
+    """把附件元数据里的相对路径解析成 `.attachments/` 下的真实文件路径；非法返回 None。
+
+    两道坑都在这里收口：
+      · 分隔符：`/api/upload` 返回的是 `.attachments/<name>`（正斜杠），而 Windows 上
+        `os.sep` 是 `\\`，用 `ATTACH_DIR + os.sep` 做前缀判断会把所有附件判成非法；
+      · 越界：`normpath` + 裸 `startswith` 既挡不住 `ws` / `ws-evil` 这种前缀兄弟目录，
+        也挡不住 `.attachments/` 里指向区外的符号链接。这里统一 realpath 后按
+        `root + os.sep` 比较目录边界。
+    """
+    parts = [p for p in str(rel or "").replace("\\", "/").split("/") if p not in ("", ".")]
+    if not parts or parts[0] != ATTACH_DIR:
+        return None
+    root = os.path.realpath(ws_root)
+    fp = os.path.realpath(os.path.join(root, *parts))
+    if fp != root and not fp.startswith(root + os.sep):
+        return None
+    return fp
+
+
 def _resolve_attachments(attachments: list[dict], ws_root: str) -> list[dict]:
     """把上传接口登记的附件元数据解析成 agent.run() 需要的完整结构。
 
@@ -666,17 +782,16 @@ def _resolve_attachments(attachments: list[dict], ws_root: str) -> list[dict]:
         name = str(att.get("name") or "附件")
         rel = str(att.get("path") or "")
         mime = str(att.get("mime") or "")
-        size = int(att.get("size") or 0)
-        item: dict = {"name": name, "path": rel, "mime": mime, "size": size}
+        item: dict = {"name": name, "path": rel, "mime": mime, "size": int(att.get("size") or 0)}
         # 只允许读工作区 .attachments/ 下的文件，防目录穿越
-        fp = os.path.normpath(os.path.join(ws_root, rel))
-        if not rel.startswith(ATTACH_DIR + os.sep) or not fp.startswith(os.path.normpath(ws_root)):
-            out.append(item)
-            continue
-        if not os.path.isfile(fp):
+        fp = _attachment_file(ws_root, rel)
+        if fp is None or not os.path.isfile(fp):
             out.append(item)
             continue
         try:
+            # 以磁盘实际大小为准：客户端上报的 size 可以被改小，用来绕过读取上限
+            size = os.path.getsize(fp)
+            item["size"] = size
             if mime.startswith("image/") and size <= MAX_UPLOAD_BYTES:
                 with open(fp, "rb") as f:
                     data = f.read()
@@ -921,6 +1036,9 @@ def _posix_rel(path: str, root: str) -> str:
 # ---------------------------------------------------------- 会话持久化
 
 def _session_file(sid: str) -> str:
+    # 会话 id 会直接拼进文件名：规则与事件流共用，非法值绝不落到文件系统
+    if not events.valid_sid(sid):
+        raise ValueError(f"非法会话 id：{sid!r}")
     return os.path.join(_SESSIONS_DIR, f"{sid}.json")
 
 
@@ -972,6 +1090,8 @@ def _list_session_files() -> list[dict]:
         if not name.endswith(".json") or name.endswith(".tmp"):
             continue
         sid = name[:-5]
+        if not events.valid_sid(sid):
+            continue                    # 老版本可能留下非法 id 的文件，列不出来也不该报错
         data = _load_session_file(sid)
         if not data:
             continue
@@ -1339,8 +1459,14 @@ class WebServer:
         """
         with self._lock:
             for s in self.sessions.values():
+                if s.busy:
+                    # 正在跑的会话不能抽走 Agent：worker 还在用它，会话落盘会读到空历史。
+                    # 只打标记，这一轮结束后下一次对话时再重建（模型下一条消息生效）。
+                    s._force_stale = True
+                    continue
                 s.agent = None
                 s._loaded = False
+                s._session_data = None   # 消息缓存作废：重建时从磁盘读最新内容
 
     # ---------------------------------------------------------- 运行
 
@@ -1466,6 +1592,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def _fail(self, status: int, message: str) -> None:
         _log.warning("api.fail status=%d route=%s message=%s", status, self.path, message)
         self._json({"error": message}, status)
+
+    def _sid_or_fail(self, raw) -> str | None:
+        """会话 id 的统一入口校验：它会拼进文件名，非法值直接 400。
+
+        调用方拿到 None 时必须原样 return（响应已发出）。白名单之外的字符
+        （尤其是路径分隔符与 `..`）绝不能进文件系统。
+        """
+        sid = str(raw or "default")[:64]
+        if not events.valid_sid(sid):
+            self._fail(400, "会话 id 不合法（只允许字母、数字、下划线、点、短横线）")
+            return None
+        return sid
 
     def _read_body(self) -> dict | None:
         if self._body_read:
@@ -1632,7 +1770,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
         elif route == "/api/attachment":
             self._handle_attachment_serve(parse_qs(parsed.query))
         else:
-            self._serve_static(route)
+            if route.startswith("/api/"):
+                # 未知接口必须 404：落到 _serve_static 会返回 200 + index.html，
+                # 前端会把「接口不存在」误当成成功响应。
+                self._fail(404, f"未知接口：{route}")
+            else:
+                self._serve_static(route)
 
     def do_POST(self) -> None:  # noqa: N802
         route = urlparse(self.path).path
@@ -1900,7 +2043,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
             "workspace": self._workspace(),
             "tools": self._tool_count(),
             "search_backend": _search_backend(),
-            "confirm_timeout": CONFIRM_TIMEOUT,
             "max_context_chars": settings.get("max_context_chars") or 200000,
             "sessions": sessions,
             "remote": self._is_remote(),
@@ -1930,7 +2072,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
         优先用内存里的 Agent（含本轮最新状态）；本进程还没跑过该会话时
         退回磁盘文件 —— 否则刷新页面 / 重启服务后，老会话会显示为空。
         """
-        sid = (params.get("session") or ["default"])[0]
+        sid = self._sid_or_fail((params.get("session") or ["default"])[0])
+        if sid is None:
+            return
         session = self.web.session(sid)
         if session.agent is not None:
             src = session.agent.messages[1:]          # [0] 是 system
@@ -1949,7 +2093,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
         无事件文件（P0 之前的老会话）→ 返回空数组，不报 404。
         limit 默认 500、上限 5000；from_seq 只取 seq 大于它的增量。
         """
-        sid = str((params.get("session") or ["default"])[0])[:64]
+        sid = self._sid_or_fail((params.get("session") or ["default"])[0])
+        if sid is None:
+            return
 
         def _int(name: str, default: int) -> int:
             try:
@@ -2007,36 +2153,57 @@ class _RequestHandler(BaseHTTPRequestHandler):
         session.workspace_id = wid
         self._json({"id": sid, "title": "新对话", "workspace_id": wid})
 
+    def _lock_session_or_409(self, sid: str, action: str):
+        """会话变更端点的互斥：运行中的会话直接 409，避免和 worker 抢写盘。
+
+        返回持有 run_lock 的 _Session；失败时已写好响应并返回 None。
+        """
+        session = self.web.session(sid)
+        if session.run_lock.acquire(blocking=False):
+            return session
+        self._fail(409, f"该会话正在运行，请先停止再{action}")
+        return None
+
     def _handle_session_delete(self, sid: str) -> None:
         """删除一个会话（磁盘文件 + 内存 + 对应主题摘要）。"""
-        sid = sid[:64]
-        # 先解析工作区（内存对象优先，否则读磁盘），用于删掉 .memory/topics 下的摘要
-        wid = "default"
+        sid = self._sid_or_fail(sid)
+        if sid is None:
+            return
+        # 运行中不能删：删掉会留下一个继续写盘的孤儿 worker
         sess = self.web.sessions.get(sid)
-        if sess is not None:
-            wid = sess.workspace_id or "default"
-        else:
-            data = _load_session_file(sid)
-            if data:
-                wid = data.get("workspace_id") or "default"
-        with self.web._lock:
-            self.web.sessions.pop(sid, None)
-        ok = _delete_session_file(sid)
-        # 事件流文件一并删除（失败不阻断 —— 与主题摘要处理一致）
+        if sess is not None and not sess.run_lock.acquire(blocking=False):
+            self._fail(409, "该会话正在运行，请先停止再删除")
+            return
         try:
-            os.remove(_session_events_file(sid))
-        except OSError:
-            pass
-        # 摘要清理失败不阻断会话删除（记忆是衍生物）
-        try:
-            from core import memory
-            memory.delete_topic(sid, workspace_config.resolve_path(wid))
-        except Exception:  # noqa: BLE001
-            pass
-        if ok:
-            self._json({"ok": True})
-        else:
-            self._fail(404, "会话不存在")
+            # 先解析工作区（内存对象优先，否则读磁盘），用于删掉 .memory/topics 下的摘要
+            wid = "default"
+            if sess is not None:
+                wid = sess.workspace_id or "default"
+            else:
+                data = _load_session_file(sid)
+                if data:
+                    wid = data.get("workspace_id") or "default"
+            with self.web._lock:
+                self.web.sessions.pop(sid, None)
+            ok = _delete_session_file(sid)
+            # 事件流文件一并删除（失败不阻断 —— 与主题摘要处理一致）
+            try:
+                os.remove(_session_events_file(sid))
+            except OSError:
+                pass
+            # 摘要清理失败不阻断会话删除（记忆是衍生物）
+            try:
+                from core import memory
+                memory.delete_topic(sid, workspace_config.resolve_path(wid))
+            except Exception:  # noqa: BLE001
+                pass
+            if ok:
+                self._json({"ok": True})
+            else:
+                self._fail(404, "会话不存在")
+        finally:
+            if sess is not None:
+                sess.run_lock.release()
 
     def _handle_session_truncate(self, sid: str) -> None:
         """截断会话：保留前 keep 条 user/assistant 消息（不含 system），删除其后的全部内容。
@@ -2044,84 +2211,108 @@ class _RequestHandler(BaseHTTPRequestHandler):
         前端用它实现「重新生成 / 编辑重发」：截掉末尾不满意的几轮，
         保留的轮次按原样恢复，然后前端用保留的 user 消息重发。
         """
-        sid = sid[:64]
+        sid = self._sid_or_fail(sid)
+        if sid is None:
+            return
         body = self._read_body()
-        keep = int(body.get("keep") or 0) if body else 0
+        try:
+            # body 里可能是数组 / 对象 / 字符串：int() 会抛 TypeError/ValueError，
+            # 直接 500 不合适，按「参数不合法」返回 400。
+            keep = int(body.get("keep") or 0) if body else 0
+        except (TypeError, ValueError):
+            self._fail(400, "keep 必须是非负整数")
+            return
         if keep < 0:
             self._fail(400, "keep 必须是非负整数")
             return
-        session = self.web.session(sid)
-        # 内存优先（含最新态），否则从磁盘恢复后再改
-        if session.agent is not None:
-            # keep 按前端展示气泡计数：同一轮多段 assistant 合并为一项
-            msgs = session.agent.messages[1:]   # [0] 是 system
-            kept = _keep_slice(msgs, keep)
-            if kept is None:
-                self._fail(400, "keep 超出当前消息数量")
-                return
-            session.agent.messages = session.agent.messages[:1] + kept
-            session.save()
-        else:
-            data = _load_session_file(sid)
-            if data is None:
-                self._fail(404, "会话不存在")
-                return
-            kept = _keep_slice(data.get("messages", []), keep)
-            if kept is None:
-                self._fail(400, "keep 超出当前消息数量")
-                return
-            data["messages"] = kept
-            _save_session_file(sid, data)
-        self._json({"ok": True, "keep": keep})
+        session = self._lock_session_or_409(sid, "截断")
+        if session is None:
+            return
+        try:
+            # 内存优先（含最新态），否则从磁盘恢复后再改
+            if session.agent is not None:
+                # keep 按前端展示气泡计数：同一轮多段 assistant 合并为一项
+                msgs = session.agent.messages[1:]   # [0] 是 system
+                kept = _keep_slice(msgs, keep)
+                if kept is None:
+                    self._fail(400, "keep 超出当前消息数量")
+                    return
+                session.agent.messages = session.agent.messages[:1] + kept
+                session.save()
+            else:
+                data = _load_session_file(sid)
+                if data is None:
+                    self._fail(404, "会话不存在")
+                    return
+                kept = _keep_slice(data.get("messages", []), keep)
+                if kept is None:
+                    self._fail(400, "keep 超出当前消息数量")
+                    return
+                data["messages"] = kept
+                _save_session_file(sid, data)
+            self._json({"ok": True, "keep": keep})
+        finally:
+            session.run_lock.release()
 
     def _handle_session_model(self, sid: str) -> None:
         """设置本会话的配置：{model_id?, reasoning?, web?}（缺省项保持原值）。
         每个对话单独保存自己的模型与联网选择，互不影响；全局 active 只管新会话的缺省。
         """
-        sid = sid[:64]
+        sid = self._sid_or_fail(sid)
+        if sid is None:
+            return
         body = self._read_body()
         if body is None:
             self._fail(400, "请求体必须是 JSON（{model_id, reasoning}）")
             return
-        data = _load_session_file(sid)
-        if data is None:
-            self._fail(404, "会话不存在")
+        session = self._lock_session_or_409(sid, "修改配置")
+        if session is None:
             return
-        if "model_id" in body:
-            mid = str(body.get("model_id") or "")[:64]
-            if mid and model_config.get_entry(mid) is None:
-                self._fail(400, "模型配置不存在")
+        try:
+            data = _load_session_file(sid)
+            if data is None:
+                self._fail(404, "会话不存在")
                 return
-        else:
-            mid = data.get("model_id") or ""
-        if "reasoning" in body:
-            rlv = str(body.get("reasoning") or "")[:16]
-            if rlv and rlv not in model_config.REASONING_LEVELS:
-                self._fail(400, "推理档位不合法")
-                return
-        else:
-            rlv = model_config.normalize_reasoning(data.get("reasoning")) or ""
-        if "web" in body:
-            wv = bool(body.get("web"))
-        else:
-            wv = bool(data.get("web", False))
-        data["model_id"] = mid or None
-        data["reasoning"] = rlv or None
-        data["web"] = wv
-        _save_session_file(sid, data)
-        # 内存中的会话同步更新字段；Agent 交给下一次对话的过期检查（_agent_stale）
-        # 去重建 —— 正在运行的 worker 仍握着旧 Agent 引用，不受影响
-        with self.web._lock:
-            sess = self.web.sessions.get(sid)
-            if sess is not None:
-                sess.model_id = mid or None
-                sess.reasoning = rlv or None
-                sess.web = wv
-        self._json({"ok": True, "model_id": mid or None, "reasoning": rlv or None, "web": wv})
+            if "model_id" in body:
+                mid = str(body.get("model_id") or "")[:64]
+                if mid and model_config.get_entry(mid) is None:
+                    self._fail(400, "模型配置不存在")
+                    return
+            else:
+                mid = data.get("model_id") or ""
+            if "reasoning" in body:
+                rlv = str(body.get("reasoning") or "")[:16]
+                if rlv and rlv not in model_config.REASONING_LEVELS:
+                    self._fail(400, "推理档位不合法")
+                    return
+            else:
+                rlv = model_config.normalize_reasoning(data.get("reasoning")) or ""
+            if "web" in body:
+                wv = bool(body.get("web"))
+            else:
+                wv = bool(data.get("web", False))
+            data["model_id"] = mid or None
+            data["reasoning"] = rlv or None
+            data["web"] = wv
+            _save_session_file(sid, data)
+            # 内存中的会话同步更新字段；Agent 交给下一次对话的过期检查（_agent_stale）
+            # 去重建 —— 换配置不会打断正在跑的那一轮
+            with self.web._lock:
+                sess = self.web.sessions.get(sid)
+                if sess is not None:
+                    sess.model_id = mid or None
+                    sess.reasoning = rlv or None
+                    sess.web = wv
+            self._json({"ok": True, "model_id": mid or None,
+                        "reasoning": rlv or None, "web": wv})
+        finally:
+            session.run_lock.release()
 
     def _handle_session_update(self, sid: str) -> None:
         """修改会话标题：{title}。改过之后不再按首条消息自动生成标题。"""
-        sid = sid[:64]
+        sid = self._sid_or_fail(sid)
+        if sid is None:
+            return
         body = self._read_body()
         if body is None:
             self._fail(400, "请求体必须是 JSON（{title}）")
@@ -2165,6 +2356,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def _handle_workspace_pick(self) -> None:
         """弹原生文件夹选择框：返回 {path}；用户取消返回 {path: null}。"""
+        if not self._require_local_only("文件夹选择框只能在本机弹出"):
+            return
         try:
             path = pick_folder_dialog()
         except RuntimeError as e:
@@ -2359,12 +2552,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------ 技能管理（仅本机）
 
-    def _require_local_skill_admin(self) -> bool:
-        """技能编辑/删除/启停只允许本机操作 —— 这些动作改的是服务器自己的文件。"""
+    def _require_local_only(self, message: str) -> bool:
+        """本机专用接口的统一门禁：改服务器自身文件、弹系统对话框都属于此类。"""
         if self._is_remote():
-            self._fail(403, "技能管理仅支持在本机操作")
+            self._fail(403, message)
             return False
         return True
+
+    def _require_local_skill_admin(self) -> bool:
+        """技能编辑/删除/启停只允许本机操作 —— 这些动作改的是服务器自己的文件。"""
+        return self._require_local_only("技能管理仅支持在本机操作")
 
     def _skill_from_params(self, params: dict):
         loader = self.web.skill_loader
@@ -2597,9 +2794,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
         from core import memory
 
         body = self._read_body() or {}
-        sid = str(body.get("session") or "")[:80]
+        sid = str(body.get("session") or "")
         if not sid:
             self._fail(400, "缺少 session")
+            return
+        sid = self._sid_or_fail(sid)
+        if sid is None:
             return
         wid = str(body.get("workspace_id") or "default")
         try:
@@ -2668,12 +2868,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._fail(400, "缺少 path 参数")
             return
         ws_root = workspace_config.resolve_path(ws or workspace_config.DEFAULT_ID)
-        fp = os.path.normpath(os.path.join(ws_root, rel))
-        if not rel.startswith(ATTACH_DIR + os.sep) and not rel.startswith(ATTACH_DIR + "/"):
+        fp = _attachment_file(ws_root, rel)
+        if fp is None:
             self._fail(403, "只能读取 .attachments/ 下的文件")
-            return
-        if not fp.startswith(os.path.normpath(ws_root)):
-            self._fail(403, "路径越界")
             return
         if not os.path.isfile(fp):
             self._fail(404, "文件不存在")
@@ -2690,6 +2887,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
+        # 同源直出 HTML/SVG 等于给上传内容一个执行环境（存储型 XSS）；这类一律强制下载。
+        # 其余类型也加 nosniff，避免浏览器按内容猜类型。
+        if mime.startswith("text/html") or mime.startswith("image/svg"):
+            fname = os.path.basename(fp).replace('"', "")
+            self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)
 
@@ -3031,6 +3234,14 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
+        # HTML/SVG/XML 加 CSP sandbox：工作区是用户/模型可写区，直接按同源文档打开
+        # 等于允许脚本带着登录态调 /api（存储型 XSS）。sandbox 让文档变成唯一源、
+        # 禁脚本，但样式/图片/字体照常加载；工作台预览走 srcDoc，不受这个头影响。
+        # allow-popups 只放开「用户点击开链接」：新页面仍继承沙箱（没有
+        # allow-popups-to-escape-sandbox），脚本/表单/同源依旧禁用。
+        # 不开 allow-top-navigation：否则一个 _top 链接就能把整个 Web UI 换掉。
+        if ext in _UNSAFE_INLINE_EXTS:
+            self.send_header("Content-Security-Policy", "sandbox allow-popups")
         self.end_headers()
         self.wfile.write(data)
 
@@ -3057,7 +3268,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
         approval = str(body.get("approval") or "ask")
         if approval not in ("ask", "auto", "full"):
             approval = "ask"
-        sid = str(body.get("session") or "default")[:64]
+        sid = self._sid_or_fail(str(body.get("session") or "default")[:64])
+        if sid is None:
+            return
 
         session = self.web.session(sid)
         if web is None:
@@ -3066,56 +3279,63 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._fail(409, "该会话已有任务在执行，请先停止或等待完成")
             return
 
-        # 全新会话（磁盘无记录，含前端「草稿占位」的首条消息）：接受请求带来的
-        # 会话级模型配置并落进 session；已开始的会话由 /api/sessions/<id>/model
-        # 端点负责变更（与 workspace 同一套「空会话才可指定」的口径）
-        if _load_session_file(sid) is None:
-            mid = str(body.get("model_id") or "")[:64]
-            if mid and model_config.get_entry(mid):
-                session.model_id = mid
-            rlv = str(body.get("reasoning") or "")[:16]
-            if rlv in model_config.REASONING_LEVELS:
-                session.reasoning = rlv
-
-        agent = session.ensure_agent()
-        # 会话级模型配置与内存 Agent 脱节（磁盘恢复晚于构造 / 上次运行中换过模型）→ 重建
-        if session._agent_stale():
-            session.agent = None
-            session._loaded = False
-            agent = session.ensure_agent()
-
-        # 还没开始过的会话，允许前端指定工作区（缺省留在默认工作区）；
-        # 一旦有了消息就不再改 —— 换沙箱根会让「之前写的文件在哪」变得难以理解
-        #
-        # 必须放在 ensure_agent() 之后：_inject_history() 会从磁盘把 workspace_id
-        # 恢复进来，先设的话会被它覆盖回去。
-        ws = str(body.get("workspace") or "").strip()
-        if ws and workspace_config.get_workspace(ws) and not agent.messages[1:]:
-            session.workspace_id = ws
-
-        session.mode, session.web = mode, web
-        session.approval_mode = approval
-        session.busy = True
-        q: queue.Queue = queue.Queue()
-        session.queue = q
-        # 用户显式「请帮我记住 XXX」：在 run 之前写入用户画像，
-        # 这样本轮重建 system prompt 时记忆块里就已经包含它
-        mem_event = _remember_from_message(message)
-        if mem_event:
-            q.put(mem_event)
-
-        worker = threading.Thread(
-            target=self._run_worker,
-            args=(session, agent, message, mode, q, attachments, approval, web, skill_context),
-            daemon=True,
-            name=f"web-chat-{sid}",
-        )
-        worker.start()
-
-        self._sse_headers()
-        self.close_connection = True
+        # 抢到锁之后的**所有**准备动作都必须在 try 里：任何一步抛异常，
+        # busy 与 run_lock 都要在 finally 复位，否则这个会话会永久 409。
+        q: queue.Queue | None = None
         alive = True
+        pumping = False
         try:
+            # 全新会话（磁盘无记录，含前端「草稿占位」的首条消息）：接受请求带来的
+            # 会话级模型配置并落进 session；已开始的会话由 /api/sessions/<id>/model
+            # 端点负责变更（与 workspace 同一套「空会话才可指定」的口径）
+            if _load_session_file(sid) is None:
+                mid = str(body.get("model_id") or "")[:64]
+                if mid and model_config.get_entry(mid):
+                    session.model_id = mid
+                rlv = str(body.get("reasoning") or "")[:16]
+                if rlv in model_config.REASONING_LEVELS:
+                    session.reasoning = rlv
+
+            agent = session.ensure_agent()
+            # 会话级模型配置与内存 Agent 脱节（磁盘恢复晚于构造 / 上次运行中换过模型）→ 重建
+            if session._agent_stale():
+                session.agent = None
+                session._loaded = False
+                session._session_data = None   # 同上：消息缓存作废，重建时重读磁盘
+                session._force_stale = False    # 重建后就追上了全局模型
+                agent = session.ensure_agent()
+
+            # 还没开始过的会话，允许前端指定工作区（缺省留在默认工作区）；
+            # 一旦有了消息就不再改 —— 换沙箱根会让「之前写的文件在哪」变得难以理解
+            #
+            # 必须放在 ensure_agent() 之后：_inject_history() 会从磁盘把 workspace_id
+            # 恢复进来，先设的话会被它覆盖回去。
+            ws = str(body.get("workspace") or "").strip()
+            if ws and workspace_config.get_workspace(ws) and not agent.messages[1:]:
+                session.workspace_id = ws
+
+            session.mode, session.web = mode, web
+            session.approval_mode = approval
+            session.busy = True
+            q = queue.Queue()
+            session.queue = q
+            # 用户显式「请帮我记住 XXX」：在 run 之前写入用户画像，
+            # 这样本轮重建 system prompt 时记忆块里就已经包含它
+            mem_event = _remember_from_message(message)
+            if mem_event:
+                q.put(mem_event)
+
+            worker = threading.Thread(
+                target=self._run_worker,
+                args=(session, agent, message, mode, q, attachments, approval, web, skill_context),
+                daemon=True,
+                name=f"web-chat-{sid}",
+            )
+            worker.start()
+
+            self._sse_headers()
+            self.close_connection = True
+            pumping = True
             while True:
                 try:
                     event = q.get(timeout=PUMP_IDLE)
@@ -3127,6 +3347,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
                         alive = False
                         agent.interrupt("浏览器断开了连接")
+                        # 断连后没人能应答：立刻解除确认/提问，别让 worker 无限等
+                        session.deny_pending_confirm()
+                        session.deny_pending_ask()
                         break
                     continue
                 if not self._sse_frame(event):
@@ -3137,11 +3360,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     break
                 if event.get("type") in ("done", "error", "cancelled"):
                     break
+        except Exception as e:  # noqa: BLE001 —— 准备阶段异常也要让会话回到可用状态
+            _log.exception("chat.setup_failed session=%s", sid)
+            if not pumping:
+                self._fail(500, f"{type(e).__name__}: {e}")
         finally:
             session.busy = False
             session.queue = None
             session.run_lock.release()
-            if not alive:
+            if not alive and q is not None:
                 # 工作线程很快会被取消；把队列排干，避免事件滞留
                 try:
                     while True:

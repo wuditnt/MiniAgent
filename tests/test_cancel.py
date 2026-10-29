@@ -1,7 +1,7 @@
 """
 取消机制的专项测试 —— 全部用假客户端 / 真子进程，不花 API 费用。
 
-覆盖 9 件事：
+覆盖 11 件事：
   1  令牌基础：check / 幂等 / on_cancel 钩子 / 注册进程被杀
   2  纯 Python 慢工具的协作式取消
   3  并行批次取消：未启动的调用快速失败、结果补齐
@@ -12,6 +12,7 @@
   8  MCP 工具的等待循环响应取消，且把取消通知送达对端（真实 server，慢调用）
   9  没有取消发生时一切照旧（回归）
  10  取消原因（reason）透传到 UI 与 Cancelled 文案，且不谎报「已提示」
+ 11  同进程组的子进程只杀 pid，kill_tree 不会把 agent 自己杀掉
 
 跑法：python test_cancel.py
 """
@@ -236,8 +237,31 @@ def test_subprocess_killed():
     print(f"✓ 真实子进程：run_shell(sleep 30) 在 {elapsed:.2f}s 内被整棵树终止")
 
 
-# ============================================================ 5 流式中断
+def test_kill_tree_does_not_kill_own_group():
+    """kill_tree 不能杀自己所在的进程组。
 
+    没有 start_new_session 的子进程与 agent 同组。老实现直接 killpg，
+    SIGKILL 会落在整个组上 —— 表现是「点停止，agent 连终端一起没了」。
+    这个用例跑完本身就证明没自杀，同时验证子进程确实被终止。
+    """
+    from core.cancel import kill_tree
+
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        time.sleep(0.2)
+        kill_tree(p)
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            raise AssertionError("子进程没有被杀掉")
+        assert p.returncode not in (0, None), p.returncode
+        print("✓ kill_tree：同进程组只杀子进程，不会连坐 agent")
+    finally:
+        if p.poll() is None:
+            p.kill()
+
+
+# ============================================================ 5 流式中断
 def _stream_chunk(content=None):
     d = NS(content=content, reasoning_content=None, tool_calls=None)
     return NS(choices=[NS(delta=d)], usage=None)
@@ -490,6 +514,7 @@ def main() -> int:
         test_cooperative_cancel_in_tool,
         test_parallel_batch_cancel,
         test_subprocess_killed,
+        test_kill_tree_does_not_kill_own_group,
         test_stream_cancel,
         test_keyboard_interrupt_normalized,
         test_conversation_continues_after_cancel,

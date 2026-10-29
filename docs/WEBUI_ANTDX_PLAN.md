@@ -124,7 +124,7 @@ chat+联网下的搜索调用复用 `tool_start/tool_end`（name=web_search）�
 
 危险确认的阻塞桥接：`ask_confirm` 回调推 `confirm_request` 事件后，
 在 `threading.Event().wait()` 上挂起；浏览器 `POST /api/confirm` 后 set 事件，返回用户选择。
-超时（如 120s）自动视为拒绝，防止会话卡死。
+不设超时：一直等到用户作答；点停止或浏览器断连（SSE 断开）才按拒绝/未回答处理，防止会话卡死。
 
 ## 7. 前端组件映射（Ant Design X）
 

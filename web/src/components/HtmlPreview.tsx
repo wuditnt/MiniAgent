@@ -3,7 +3,8 @@
  *
  * 关键点：
  *  · sandbox="allow-scripts"（不带 allow-same-origin）→ 脚本可运行，但拿不到父页面
- *    DOM / localStorage / cookie；
+ *    DOM / localStorage / cookie；allow-popups 让 target="_blank" 链接能开新标签，
+ *    新页面仍继承沙箱（服务端还会给资源文档加 CSP sandbox）；
  *  · 注入 <base> 指向工作区只读资源接口，HTML 里的相对 CSS/图片/JS 能正常加载；
  *  · MHTML 的内嵌资源以 data: URL 形式传入，按 cid / Content-Location 别名替换。
  */
@@ -125,7 +126,7 @@ export default function HtmlPreview({ html, workspaceId, filePath, resources }: 
       <iframe
         className="wb-html-frame"
         title={`预览：${filePath}`}
-        sandbox="allow-scripts"
+        sandbox="allow-scripts allow-popups"
         referrerPolicy="no-referrer"
         srcDoc={srcDoc}
       />

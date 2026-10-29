@@ -7,8 +7,8 @@
   · _apply_reasoning：三种参数风格的实际落参、界面档位到接口取值的重映射
     （values）、厂家不支持的等级一律不发；
   · 默认值与迁移：缺省 high、旧 off→low / medium→high、非法值回退 high；
-  · resolve_model：按 id 解析、空/失效 id 回退全局 active、
-    空字段回退环境变量。
+  · resolve_model：按 id 解析、空/失效 id 回退全局 active，
+    空字段不再回退环境变量（模型配置只认 models.json）。
 """
 
 from __future__ import annotations
@@ -17,10 +17,6 @@ import os
 import tempfile
 
 import bootstrap  # noqa: F401  —— 必须最先导入：铺 sys.path + 定工作区
-
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-os.environ.setdefault("OPENAI_MODEL", "env-model")
-os.environ.setdefault("OPENAI_BASE_URL", "http://env-url/v1")
 
 import core.model_config as mc  # noqa: E402
 from agent import _apply_reasoning, _apply_thinking_off  # noqa: E402
@@ -164,8 +160,6 @@ def test_default_and_migration() -> None:
 
 def test_resolve_model() -> None:
     _isolate()
-    # 断言与环境值相对（pytest 全量收集时其他套件可能改写过 OPENAI_* 环境变量）
-    env_key = os.environ.get("OPENAI_API_KEY", "")
     e = mc.create_entry("ollama", "本地小模型", "http://127.0.0.1:11434/v1", "", "qwen2.5:7b")
     pid = e["id"]
 
@@ -174,8 +168,8 @@ def test_resolve_model() -> None:
     assert r["model_id"] == pid
     assert r["provider"] == "ollama"
     assert r["model"] == "qwen2.5:7b"
-    # 空字段回退环境变量（api_key 为空串 → 环境变量）
-    assert r["api_key"] == env_key
+    # 空 Key 就是空：不再回退环境变量（用户删掉的 Key 不该被旧 .env 复活）
+    assert r["api_key"] == ""
     assert r["base_url"] == "http://127.0.0.1:11434/v1"
 
     # 空 id / 已删除 id → 回退全局 active
@@ -183,8 +177,33 @@ def test_resolve_model() -> None:
     assert r["model_id"] == "default"
     r = mc.resolve_model("no-such-id")
     assert r["model_id"] == "default"
-    # active 也可能空字段（缺 key 的本地服务商）→ 环境变量兜底
-    assert r["api_key"] == env_key
+    assert r["api_key"] == ""
+
+
+# ---------------------------------------------------------------- 安全：地址与密钥
+
+def test_test_values_rejects_non_http() -> None:
+    """连接测试只接受 http/https：file:// 会变成本机任意文件读取，且 Key 会被带到该地址。"""
+    for bad in ("file:///C:/Windows/win.ini", "ftp://example.com/v1",
+                "data:text/plain,hi", "C:\\models"):
+        r = mc.test_values(bad, "secret-key", timeout=0.2)
+        assert r["ok"] is False and r["error"], (bad, r)
+    assert mc.test_values("", "k")["ok"] is False
+    # 合法 http 地址能过协议校验（127.0.0.1:1 无服务，必然连接失败，但不该是协议错误）
+    r = mc.test_values("http://127.0.0.1:1/v1", "k", timeout=0.5)
+    assert r["ok"] is False and "必须是" not in r["error"], r
+
+
+def test_saved_models_file_is_private() -> None:
+    """models.json 里是明文 Key：目录 0700、文件 0600（Windows 上 chmod 无实际语义）。"""
+    path = _isolate()
+    mc._save_raw({"active": "x", "providers": [], "reasoning": "high"})
+    assert os.path.isfile(path)
+    if os.name == "nt":
+        print("· 权限断言跳过（Windows 上 chmod 只影响只读位）")
+        return
+    assert os.stat(path).st_mode & 0o777 == 0o600, oct(os.stat(path).st_mode)
+    assert os.stat(os.path.dirname(path)).st_mode & 0o777 == 0o700
 
 
 if __name__ == "__main__":
@@ -197,5 +216,7 @@ if __name__ == "__main__":
     test_normalize_reasoning()
     test_default_and_migration()
     test_resolve_model()
+    test_test_values_rejects_non_http()
+    test_saved_models_file_is_private()
     print("---")
     print("全部通过 ✅")

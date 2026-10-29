@@ -109,6 +109,29 @@ def _safe_print(text: str) -> None:
             pass
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"错误：{name} 必须是整数，当前值：{raw!r}", file=sys.stderr)
+        raise SystemExit(2) from None
+
+
+def _env_port() -> int:
+    port = _env_int("MINI_AGENT_PORT", 8000)
+    if not 1 <= port <= 65535:
+        print(f"错误：MINI_AGENT_PORT 必须在 1-65535 之间，当前值：{port}", file=sys.stderr)
+        raise SystemExit(2)
+    return port
+
+
+def _env_host() -> str:
+    return os.environ.get("MINI_AGENT_HOST", "").strip() or "0.0.0.0"
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="mini-agent",
@@ -130,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--plugin-dir", default=None, help="插件目录，逗号分隔（替换默认目录）")
     ap.add_argument("--skill-dir", default=None, help="技能目录，逗号分隔（替换默认目录）")
     ap.add_argument("--max-turns", type=int, default=None,
-                    help="最大轮次（不填则读 Web UI 的通用配置，默认 25）")
+                    help="最大轮次（不填则读 Web UI 的通用配置，默认 10）")
     ap.add_argument("--no-mcp", action="store_true", help="不挂载 MCP server")
     ap.add_argument("--no-plugins", action="store_true", help="不加载插件")
     ap.add_argument("--no-skills", action="store_true", help="不加载技能")
@@ -145,11 +168,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="关闭登录校验（仅调试/自动化测试；任何能访问端口的人都能操作本机）")
     ap.add_argument("--reset-password", metavar="USERNAME", default=None,
                     help="重置某个本地账号的密码后退出（终端救援通道）")
-    ap.add_argument("--port", type=int, default=8000, help="Web UI 监听端口（默认 8000）")
+    ap.add_argument("--port", type=int, default=_env_port(),
+                    help="Web UI 监听端口（默认读 MINI_AGENT_PORT，否则 8000）")
     ap.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="Web UI 监听地址（默认 0.0.0.0，局域网可访问；传 127.0.0.1 收窄为仅本机）",
+        default=_env_host(),
+        help="Web UI 监听地址（默认读 MINI_AGENT_HOST，否则 0.0.0.0；传 127.0.0.1 收窄为仅本机）",
     )
     return ap
 
@@ -163,15 +187,15 @@ def _apply_cli_env(args: argparse.Namespace) -> None:
     都在模块导入时读取，顺序反了开关就不生效。
     """
     if args.workspace:
-        os.environ["AGENT_WORKSPACE"] = os.path.abspath(args.workspace)
+        os.environ["MINI_AGENT_WORKSPACE"] = os.path.abspath(args.workspace)
     if args.no_plugins:
-        os.environ["AGENT_NO_PLUGINS"] = "1"
+        os.environ["MINI_AGENT_NO_PLUGINS"] = "1"
     elif args.plugin_dir:
-        os.environ["AGENT_PLUGIN_DIRS"] = args.plugin_dir
+        os.environ["MINI_AGENT_PLUGIN_DIRS"] = args.plugin_dir
     if args.no_skills:
-        os.environ["AGENT_NO_SKILLS"] = "1"
+        os.environ["MINI_AGENT_NO_SKILLS"] = "1"
     elif args.skill_dir:
-        os.environ["AGENT_SKILL_DIRS"] = args.skill_dir
+        os.environ["MINI_AGENT_SKILL_DIRS"] = args.skill_dir
 
 
 def _bootstrap(args: argparse.Namespace) -> tuple[Any, SkillLoader, SkillLoadReport]:
@@ -186,7 +210,7 @@ def _bootstrap(args: argparse.Namespace) -> tuple[Any, SkillLoader, SkillLoadRep
     # 可能还不存在，在这里先建好 —— Web 后端、控制台、--selftest 都要拿它
     # 当工具的工作目录（cwd / 沙箱根）。
     # 显式给了 --workspace 就跳过，免得白建一个用不到的目录。
-    if not os.environ.get("AGENT_WORKSPACE"):
+    if not os.environ.get("MINI_AGENT_WORKSPACE"):
         from core import workspace_config
 
         workspace_config.ensure_default_workspace()
@@ -416,7 +440,7 @@ def _run_web(
         serve(
             host=args.host,
             port=args.port,
-            model=args.model or os.environ.get("OPENAI_MODEL"),
+            model=args.model,
             system_prompt=system_prompt,
             max_turns=args.max_turns,
             login_enabled=not args.no_login,
@@ -440,7 +464,7 @@ def _apply_data_dir(explicit: str | None) -> None:
     顺序很重要：settings / model_config / webui 等模块的路径常量都在**导入时**
     计算，所以必须先写环境变量，再让那些模块被惰性导入。
     """
-    from core._paths import DATA_DIR_ENV, data_dir, migrate_legacy_data
+    from core._paths import DATA_DIR_ENV, migrate_legacy_data
 
     if explicit:
         os.environ[DATA_DIR_ENV] = os.path.abspath(os.path.expanduser(explicit))
@@ -487,7 +511,32 @@ def _cmd_reset_password(username: str) -> int:
 
 # ---------------------------------------------------------------- 编排
 
+def _has_model_config() -> bool:
+    """是否已有可用模型配置（models.json）—— 模型已改由 Web UI 配置，不看环境变量。
+
+    只认**用户保存过**的记录：models.json 不存在时，配置层会按模板兜底造一条
+    DeepSeek 记录（有地址、有模型名、但没有 Key），那不是「已配置」。
+    需要 Key 的服务商还要求 Key 非空；Ollama / vLLM 这类本地服务允许无 Key。
+    """
+    try:
+        from core import model_config
+
+        if not os.path.exists(model_config._MODELS_FILE):
+            return False
+        entry = model_config.active_entry()
+        if not entry:
+            return False
+        if not (entry.get("base_url") and entry.get("model")):
+            return False
+        tpl = model_config.PROVIDER_TEMPLATES.get(entry.get("provider") or "", {})
+        return bool(entry.get("api_key")) or bool(tpl.get("no_key"))
+    except Exception:  # noqa: BLE001 —— 配置层异常按「没配置」处理，给出可读提示
+        return False
+
+
 def main() -> int:
+    # .env 必须先读：--host / --port 的默认值来自它
+    load_dotenv()
     args = build_parser().parse_args()
 
     # 数据目录必须最先确定：后续模块的路径常量都在导入时计算
@@ -513,7 +562,7 @@ def main() -> int:
     _mode = "web" if args.web else ("prompt" if args.prompt else "console")
     _app_log.info(
         "启动 mode=%s workspace=%s model=%s host=%s port=%s",
-        _mode, _workspace(), os.environ.get("OPENAI_MODEL") or "(默认)",
+        _mode, _workspace(), args.model or "(默认)",
         args.host, args.port,
     )
 
@@ -526,27 +575,45 @@ def main() -> int:
         return _cmd_list_skills(skill_loader, skill_report)
 
     mcp_manager = _attach_mcp(args)
-    if mcp_manager is not None and args.mcp_status:
+    if args.mcp_status:
+        # 显式要状态就一定退出：--no-mcp 时没有 manager，不能落到下面的交互流程
+        if mcp_manager is None:
+            print("MCP：未启用（--no-mcp）", file=sys.stderr)
+            return 0
         try:
             return _cmd_mcp_status(mcp_manager)
         finally:
             mcp_manager.shutdown()
 
     # ---- 以下需要模型 ----
-    if not os.environ.get("OPENAI_API_KEY"):
-        _app_log.warning("未设置 OPENAI_API_KEY，已中止启动")
+    if args.web:
+        # 模型就在 Web UI 里配置：无配置也允许启动，进界面填好即可
+        if not _has_model_config():
+            _app_log.warning("尚未配置模型，启动后请在 Web UI 的「设置 → 模型」里配置")
+            print(
+                "提示：尚未配置模型。启动后在浏览器「设置 → 模型」里填写即可。",
+                file=sys.stderr,
+            )
+        return _run_web(args, skill_loader, mcp_manager)
+
+    if not _has_model_config():
+        _app_log.warning("尚未配置模型，已中止启动")
         print(
-            "错误：未设置 OPENAI_API_KEY。请复制 .env.example 为 .env 并填写，或直接导出环境变量。",
+            "错误：尚未配置模型。请先运行 `mini-agent --web`，"
+            "在「设置 → 模型」里配置后重试。",
             file=sys.stderr,
         )
         if mcp_manager:
             mcp_manager.shutdown()
         return 2
 
-    if args.web:
-        return _run_web(args, skill_loader, mcp_manager)
-
-    agent, system_base = _build_agent(args, ui, skill_loader)
+    try:
+        agent, system_base = _build_agent(args, ui, skill_loader)
+    except BaseException:
+        # MCP 子进程在 _attach_mcp 里已经 start() 了：建 Agent 失败必须收回，否则泄漏
+        if mcp_manager:
+            mcp_manager.shutdown()
+        raise
     if args.prompt:
         return _run_prompt_once(agent, " ".join(args.prompt), mcp_manager)
     return _run_console(agent, ui, mcp_manager, skill_loader, system_base)

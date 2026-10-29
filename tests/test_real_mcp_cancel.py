@@ -97,7 +97,10 @@ class CancelOnMcpToolUI:
 
 
 def main() -> int:
-    assert os.environ.get("OPENAI_API_KEY"), "缺少 OPENAI_API_KEY（.env）"
+    from core import model_config
+
+    assert model_config.resolve_active().get("api_key"), \
+        "缺少模型配置（请先运行 --web 在「设置 → 模型」里配置）"
 
     mcp = MCPManager(os.path.join(HERE, "mcp", "mcp_servers.json"), HERE, REGISTRY)
     mcp.load()

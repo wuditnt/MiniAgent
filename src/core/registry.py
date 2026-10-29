@@ -15,8 +15,8 @@
 
 from __future__ import annotations
 
+import contextvars
 import re
-import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -208,27 +208,28 @@ REGISTRY = ToolRegistry()
 # 插件模块里的 `@tool` 默认往哪注册。
 # 正常情况下就是 REGISTRY；PluginLoader 会在导入插件期间临时切到它自己的注册表，
 # 这样「把插件装进指定注册表」才真正成立（而不是嘴上说说）。
-_ACTIVE: ToolRegistry = REGISTRY
-_ACTIVE_LOCK = threading.RLock()
+_ACTIVE: contextvars.ContextVar[ToolRegistry] = contextvars.ContextVar(
+    "active_tool_registry", default=REGISTRY
+)
 
 
 def active_registry() -> ToolRegistry:
     """当前 `@tool` 会注册到的注册表。"""
-    return _ACTIVE
+    return _ACTIVE.get()
 
 
 @contextmanager
 def use_registry(reg: ToolRegistry):
-    """临时切换默认注册表。插件导入期间使用。"""
-    global _ACTIVE
-    with _ACTIVE_LOCK:
-        previous = _ACTIVE
-        _ACTIVE = reg
+    """临时切换默认注册表。插件导入期间使用。
+
+    用 ContextVar 而不是全局变量：Web UI 可能并发导入/重载插件，全局槽位
+    会让 A 的切换覆盖 B，把工具装到错误的注册表里（甚至装进别人的临时表后丢弃）。
+    """
+    token = _ACTIVE.set(reg)
     try:
         yield reg
     finally:
-        with _ACTIVE_LOCK:
-            _ACTIVE = previous
+        _ACTIVE.reset(token)
 
 
 # ---------------------------------------------------------------- 装饰器
@@ -262,7 +263,7 @@ def tool(
     """
     # 注意：不能写 `registry or REGISTRY`。
     # ToolRegistry 定义了 __len__，空注册表是 falsy，会被静默替换成全局注册表。
-    reg = registry if registry is not None else _ACTIVE
+    reg = registry if registry is not None else _ACTIVE.get()
 
     def _build(fn: Callable) -> Callable:
         module = getattr(fn, "__module__", "") or ""

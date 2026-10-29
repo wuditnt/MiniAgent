@@ -34,8 +34,6 @@ from types import SimpleNamespace as NS
 import bootstrap  # noqa: F401  —— 必须最先导入：铺 sys.path + 定工作区
 from bootstrap import PACKAGE_ROOT as HERE
 
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-
 import agent as agent_mod  # noqa: E402
 import ui as ui_mod  # noqa: E402
 from core.registry import ToolRegistry, tool  # noqa: E402

@@ -13,9 +13,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 
+from . import envs
 from ._paths import data_dir
 
 _SETTINGS_FILE = os.path.join(data_dir(), "settings.json")
@@ -90,8 +92,19 @@ LIST_KEYS = ("sandbox_read_whitelist",)
 #: 普通字符串字段（去首尾空白、限制长度；空串合法）
 STR_KEYS = ("deepseek_search_api_key",)
 
-#: 环境变量兜底：没保存过、也没显式传参时，仍按老 .env 设置来
+#: 环境变量兜底：没保存过、也没显式传参时，仍按环境变量设置来
 ENV_KEYS = {
+    "max_turns": "MINI_AGENT_MAX_TURNS",
+    "max_context_chars": "MINI_AGENT_MAX_CONTEXT",
+    "keep_recent_turns": "MINI_AGENT_KEEP_TURNS",
+    "max_output_chars": "MINI_AGENT_MAX_OUTPUT",
+    "stream": "MINI_AGENT_STREAM",
+    "parallel_tools": "MINI_AGENT_PARALLEL",
+    "max_workers": "MINI_AGENT_MAX_WORKERS",
+}
+
+#: 旧版名字只读兼容（模板与文档里不再出现）
+LEGACY_ENV_KEYS = {
     "max_turns": "AGENT_MAX_TURNS",
     "max_context_chars": "AGENT_MAX_CONTEXT",
     "keep_recent_turns": "AGENT_KEEP_TURNS",
@@ -134,7 +147,7 @@ def _save_saved(data: dict) -> None:
 
 def _env_value(key: str):
     """环境变量兜底值；没设或写错都返回 None（当作「没设置」）。"""
-    raw = os.environ.get(ENV_KEYS.get(key, ""), "").strip()
+    raw = envs.get_str(ENV_KEYS.get(key, ""), alias=LEGACY_ENV_KEYS.get(key))
     if not raw:
         return None
     if key in BOOL_KEYS:
@@ -193,6 +206,12 @@ def coerce(key: str, value):
         num = float(value)
     except (TypeError, ValueError):
         raise ValueError(f"{key} 必须是数字")
+
+    # NaN / inf 不能当配置值：nan 能同时绕过上下界比较（nan<lo 与 nan>hi 都是 False），
+    # 而 inf 在 int() 上抛的是 OverflowError，不在上面的异常契约里 ——
+    # 两者都会让「保存成功」变成「读出来是非法值 / 直接崩」。
+    if not math.isfinite(num):
+        raise ValueError(f"{key} 必须是有限数字")
 
     if key in INT_KEYS:
         if num != int(num):

@@ -85,6 +85,34 @@ def test_manual_params_override():
     print("✓ Schema：手写 params 覆盖 + 自动推导兜底，可混用")
 
 
+def test_json_type_and_full_schema_edge_cases():
+    """三个注解/合并的坑：内层 typing. 前缀、PEP 604、旧式整份 schema 丢键。"""
+    from core.schema import json_type, merge_params
+
+    # 字符串注解：内层 typing. 前缀也要剥掉
+    assert json_type("Optional[typing.List[int]]") == "array"
+    assert json_type("typing.Optional[typing.Dict[str, int]]") == "object"
+    # PEP 604：int | None 是 types.UnionType，不是 typing.Union
+    assert json_type(int | None) == "integer"
+    assert json_type(list[str] | None) == "array"
+
+    auto = {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}
+    override = {
+        "type": "object",
+        "title": "自定义",
+        "additionalProperties": False,
+        "properties": {"b": {"type": "integer"}},
+        "required": ["b"],
+    }
+    got = merge_params(auto, override, None)
+    assert got["title"] == "自定义" and got["additionalProperties"] is False, got  # 其余键不丢
+    assert got["properties"] == {"b": {"type": "integer"}}, got
+    assert got["required"] == ["b"], got
+    # required_override 优先于整份 schema 里自带的 required
+    assert merge_params(auto, override, ["a", "b"])["required"] == ["a", "b"]
+    print("✓ Schema：内层 typing 前缀 / PEP 604 / 整份 schema 键保留与 required 覆盖")
+
+
 # ============================================================ 2. 注册表语义
 
 def test_registry_semantics():
@@ -194,6 +222,25 @@ def test_loader_discover_reload_and_isolation():
         assert f"{PROBE}.ok_mod" in rep3.removed, rep3.removed
         assert reg.get("probe_one") is None and reg.get("probe_two") is None
         print("✓ 加载器：插件文件被删后重载，其工具被正确摘除")
+
+        # 把同名文件加回来：必须真的重新导入（sys.modules 里不能留着旧模块对象）
+        _write(os.path.join(base, "ok_mod.py"), (
+            "from core import tool\n"
+            "@tool\ndef probe_three(z: str = '') -> str:\n"
+            "    '''加回来的探针。'''\n"
+            "    return 'three'\n"
+        ))
+        rep4 = ldr.reload(f"{PROBE}.ok_mod")
+        assert f"{PROBE}.ok_mod" in rep4.loaded, rep4
+        assert reg.get("probe_three") is not None, "删除后重新加回的文件应重新导入并注册"
+        print("✓ 加载器：插件删除后再加回，能重新导入（无残留 sys.modules 缓存）")
+
+        # 重载失败（语法错）不能把已有工具清空
+        _write(os.path.join(base, "ok_mod.py"), "def broken(:\n")
+        rep5 = ldr.reload(f"{PROBE}.ok_mod")
+        assert f"{PROBE}.ok_mod" in rep5.failed, rep5
+        assert reg.get("probe_three") is not None, "重载失败时旧工具必须保留"
+        print("✓ 加载器：重载失败时旧工具被恢复（一次失败不会清空插件能力）")
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -254,7 +301,6 @@ def test_mcp_end_to_end():
 # ============================================================ 5. 危险工具确认
 
 def test_agent_denies_dangerous_tool():
-    os.environ.setdefault("OPENAI_API_KEY", "test-key")
     import agent as agent_mod
 
     class _UI:
@@ -296,6 +342,7 @@ if __name__ == "__main__":
     test_schema_from_annotations()
     test_schema_optional_and_sphinx()
     test_manual_params_override()
+    test_json_type_and_full_schema_edge_cases()
     test_registry_semantics()
     test_call_converts_errors()
     test_loader_discover_reload_and_isolation()

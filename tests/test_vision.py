@@ -15,8 +15,6 @@ import os
 import bootstrap  # noqa: F401  —— 必须最先导入：铺 sys.path + 定工作区
 from bootstrap import PACKAGE_ROOT as HERE
 
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-
 from core.images import attach_image, take_images  # noqa: E402
 from plugins.vision_tools import MAX_IMAGE_BYTES, _sniff  # noqa: E402
 

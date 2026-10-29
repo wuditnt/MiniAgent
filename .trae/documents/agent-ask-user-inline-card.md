@@ -9,7 +9,7 @@
 已确认的三项决策：
 1. 交互形态：**内联卡片**（阻塞式工具，同一轮继续）
 2. 回答形式：**单选 + 自定义输入**；后续扩展 **多选（收集信息）**，见第六节
-3. 超时行为：**沿用现有 120s 超时**（超时/停止任务视为「用户未回答」）
+3. 等待行为：**无限等待**（不设超时；停止任务或浏览器断连视为「用户未回答」）
 
 ## 二、Current State Analysis
 
@@ -19,10 +19,10 @@
 | --- | --- | --- |
 | 工具定义 | [approval.py](file:///d:/codeworks/mini-agent/src/core/approval.py#L70-L113) | 模块级 `_asker` 回调 + `Tool(...)` 手动构造（`exclusive=True`、`dangerous=False`） |
 | asker 注入 | [agent.py#L520](file:///d:/codeworks/mini-agent/src/core/agent.py#L520)、[#L564](file:///d:/codeworks/mini-agent/src/core/agent.py#L564) | `run()` 开始时注入、`finally` 里摘除 |
-| UI 桥（阻塞） | [webui.py#L352-L384](file:///d:/codeworks/mini-agent/src/core/webui.py#L352-L384) | 推 SSE → `event.wait(CONFIRM_TIMEOUT)` 挂起工作线程 |
+| UI 桥（阻塞） | [webui.py](file:///d:/codeworks/mini-agent/src/core/webui.py#L544-L592) | 推 SSE → 无限等待（`event.wait(0.5)` 轮询检查停止/断连/取消）挂起工作线程 |
 | 唤醒通道 | [webui.py#L262-L270](file:///d:/codeworks/mini-agent/src/core/webui.py#L262-L270) + [POST /api/confirm](file:///d:/codeworks/mini-agent/src/core/webui.py#L964-L965) | `answer_confirm(cid, approve)` 置位 Event |
 | 停止时解阻塞 | [webui.py#L272-L282](file:///d:/codeworks/mini-agent/src/core/webui.py#L272-L282)，调用点 [#L1933](file:///d:/codeworks/mini-agent/src/core/webui.py#L1933)、[#L2052](file:///d:/codeworks/mini-agent/src/core/webui.py#L2052) | `deny_pending_confirm()` 解除 `Event.wait` |
-| 超时上限 | [webui.py#L40](file:///d:/codeworks/mini-agent/src/core/webui.py#L40) | `CONFIRM_TIMEOUT = 120` |
+| 无超时 | [webui.py#L45-L47](file:///d:/codeworks/mini-agent/src/core/webui.py#L45-L47) | 确认/提问一直等待；`PUMP_IDLE = 15` 只用于 SSE 心跳探测断连 |
 | 工具暴露过滤 | [webui.py#L405-L429](file:///d:/codeworks/mini-agent/src/core/webui.py#L405-L429) | `request_approval` 仅 auto 档暴露；`remember` 受记忆开关控制 |
 | 注册入口 | [tools.py](file:///d:/codeworks/mini-agent/src/core/tools.py#L62-L68) | `_register_approval()` / `_register_memory()` |
 | SSE 事件类型 | [types.ts#L38-L51](file:///d:/codeworks/mini-agent/web/src/types.ts#L38-L51) | 已有 `confirm_request` |
@@ -51,7 +51,7 @@
   - `options` 规范化：去空白、去空项、保序去重，最多保留 8 项
   - 无 asker（脚本/测试直调）→ 返回 `"[unanswered] 当前环境没有人工问答通道。"`
   - asker 抛异常 → 返回 `"[unanswered] 询问通道故障，请改用其它方式获取信息。"`
-  - 用户回答为空 → 返回 `"[unanswered] 用户未作答（超时或跳过）。请基于已有信息继续，或说明你的假设。"`
+  - 用户回答为空 → 返回 `"[unanswered] 用户未作答（跳过或任务已停止）。请基于已有信息继续，或说明你的假设。"`
   - 正常 → 返回 `"[answer] " + 用户答案`
 - `register(reg=None)`：幂等注册（`target.get("ask_user") is not None` 则返回）
 - `_ASK_USER_TOOL = Tool(...)`，参数 schema：
@@ -113,17 +113,14 @@ def _ask_user(self, question: str, options: list, allow_free_text: bool) -> str:
 
 ```python
 def ask_user(self, question: str, options: list, allow_free_text: bool = True) -> str:
-    session = self.session
-    cid = uuid.uuid4().hex[:12]
-    event = threading.Event()
     holder = {"answer": ""}
-    with session.confirm_lock:
-        session.pending_ask = (cid, event, holder)
-    self._push({"type": "ask_request", "id": cid, "question": question,
-                "options": list(options or []), "allow_free_text": bool(allow_free_text)})
-    got = event.wait(CONFIRM_TIMEOUT)
-    with session.confirm_lock:
-        session.pending_ask = None
+    # 与 ask_confirm 共用 _bridge_ask：推 ask_request → 无限等待 → /api/answer 置位
+    # 单槽排队（ask_slot）：同一时刻只挂一张卡，其余等前一张答完再推
+    got = self._bridge_ask(
+        {"type": "ask_request", "question": question,
+         "options": list(options or []), "allow_free_text": bool(allow_free_text)},
+        holder, "ask",
+    )
     return holder["answer"] if got else ""
 ```
 
@@ -151,7 +148,7 @@ export interface AskRecord {
   allowFreeText: boolean;
   /** 用户答案；空 = 未回答 */
   answer?: string;
-  /** true = 超时/停止导致的失效 */
+  /** true = 停止/断连导致的失效（不设超时） */
   expired?: boolean;
 }
 ```
@@ -195,7 +192,7 @@ case "ask_request":
 - 新增内部组件 `AskCard`：
   - 活跃态：问题正文（`item.ask` 没有时才用 `pendingAsk`）+ 单选列表（`Radio.Group`，无选项时跳过）+ `allowFreeText` 时显示「其他」输入框（`Input`，选中「其他」才启用）+ 「提交」按钮（`Button`）。`Enter` 提交、`Ctrl/⌘+Enter` 同义。
   - 提交规则：选了某个选项 → 回传该选项文本；选「其他」/直接输入 → 回传输入框文本；两者都空 → 按钮 disabled。
-  - 只读态（`answer` / `expired`）：折叠为一行 chip —— 已回答显示「已选择：XXX」，失效显示「未回答（已超时）」。用 `Tag`。
+  - 只读态（`answer` / `expired`）：折叠为一行 chip —— 已回答显示「已选择：XXX」，停止/断连失效显示「未回答」。用 `Tag`。
 - 在 `AssistantBody` 里渲染（[#L279](file:///d:/codeworks/mini-agent/web/src/components/Chat.tsx#L279) 附近，Markdown 之后）：
   - `item.ask` 存在（历史/已折叠）→ 渲染只读态
   - 当前条目 `status === "streaming"` 且 `pendingAsk` 非空 → 渲染活跃态
@@ -209,7 +206,7 @@ case "ask_request":
 
 #### 11. [README.md](file:///d:/codeworks/mini-agent/README.md)
 
-在「要点」列表中补充一条交互能力说明（放在三档确认模式附近）：Agent 需要澄清时会在回复气泡内给出可点选的问题卡片，支持单选 + 自定义输入，超时 120s 未答按未回答处理。这是项目约定「全部功能开发完成后必须更新 README」。
+在「要点」列表中补充一条交互能力说明（放在三档确认模式附近）：Agent 需要澄清时会在回复气泡内给出可点选的问题卡片，支持单选 + 自定义输入；等待不设超时，点停止或断连按未回答处理。这是项目约定「全部功能开发完成后必须更新 README」。
 
 ## 四、Assumptions & Decisions
 
@@ -218,13 +215,13 @@ case "ask_request":
 | 阻塞 vs 非阻塞 | **阻塞**（同一轮继续） | 连续性好、不浪费轮次；复用已验证的 `Event.wait` 通道 |
 | 答案传递方式 | **作为工具结果** 回给模型 | 与 `request_approval` 一致，不污染 user 消息历史 |
 | 选项数量 | 上限 8（描述里引导 2-6） | 避免卡片过长 |
-| 超时 | **120s**（沿用 `CONFIRM_TIMEOUT`） | 与危险确认行为统一，不引入新配置项 |
+| 等待 | **无限等待**，不设超时 | 用户离开一会儿回来还能作答；出口只有应答 / 停止 / 断连 |
 | 暴露档位 | agent 模式 **三档全暴露** | 它不是安全闸，是 UX 能力；与 `request_approval`（仅 auto）不同 |
 | 卡片持久化 | **不写历史** | `/api/history` 结构不动，避免破坏老会话兼容 |
-| 刷新页面 | 待答卡片丢失，服务端 120s 后按未回答继续 | 本次不做「断线恢复待答状态」 |
-| 停止任务 | `deny_pending_ask()` 立即解阻塞，按未回答处理 | 否则工作线程会卡满 120s |
+| 刷新页面 | 待答卡片丢失，连接断开后服务端立即按未回答继续 | 本次不做「断线恢复待答状态」 |
+| 停止任务 | `deny_pending_ask()` 立即解阻塞，按未回答处理 | 否则工作线程会一直挂着 |
 
-**明确不做**（避免过度设计）：断线恢复待答卡片、卡片进历史落盘、独立超时配置项。
+**明确不做**（避免过度设计）：断线恢复待答卡片、卡片进历史落盘、可配置的等待上限。
 
 ## 五、Verification
 
@@ -241,8 +238,8 @@ case "ask_request":
    - agent 模式下发一条需要澄清的任务，确认助手气泡内出现卡片
    - 点选项 → Agent 立刻继续，卡片折叠为「已选择：XXX」
    - 选「其他」输入 → 同样即时回传
-   - 卡片出现时不回答、直接点停止 → 工作线程立即解除阻塞，卡片转「未回答（已超时）」，无 120s 卡顿
-   - 刷新页面 → 卡片消失，服务端 120s 后继续（记录为已知限制）
+   - 卡片出现时不回答、直接点停止 → 工作线程立即解除阻塞，卡片转「未回答」，无需等待超时
+   - 刷新页面 → 卡片消失，连接断开后服务端立即按未回答继续（记录为已知限制）
    - 三档确认模式（ask / auto / full）下 `ask_user` 均可用
 3. **回归**：`.venv\Scripts\python.exe -m pytest tests -q`（当前基线 14/14 全绿，不得回退）
 

@@ -53,7 +53,10 @@ def _detect_root() -> str:
         return candidate
 
     # 3) 退化：把 src/ 当成根（至少 sys.path 注入能工作）
-    return candidate
+    #    注意返回 SRC_DIR 而不是 candidate —— candidate 就是第 2 步刚否定掉的值
+    #    （site-packages 里的 lib/pythonX.Y），拿它当根会把整个标准库目录
+    #    塞进 sys.path，插件/配置查找也会指错地方。
+    return SRC_DIR
 
 
 #: 项目根目录（绝对路径）。仓库里的 plugins/、mcp_servers.json、demo_case/ 都在它下面。
@@ -83,6 +86,24 @@ DEFAULT_DATA_DIR = (
 )
 
 _MIGRATE_MARKER = ".migrated"
+
+
+def _copy_missing(src: str, dst: str) -> None:
+    """把 src 目录树复制进 dst，但**只补缺失的文件**，绝不覆盖已有文件。
+
+    旧实现用 `copytree(..., dirs_exist_ok=True)` 合并，同名文件会被静默覆盖。
+    迁移前置检查只看 settings.json / auth.db / models.json 三个名字，
+    所以「新目录里已经有会话/日志、但恰好还没有这三个文件」时，
+    旧数据会把新数据整片盖掉 —— 这是不可逆的数据丢失，必须按「只补不改」处理。
+    """
+    for root, _dirs, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        out_dir = dst if rel == "." else os.path.join(dst, rel)
+        os.makedirs(out_dir, exist_ok=True)
+        for name in files:
+            out = os.path.join(out_dir, name)
+            if not os.path.exists(out):
+                shutil.copy2(os.path.join(root, name), out)
 
 
 def data_dir() -> str:
@@ -127,7 +148,7 @@ def migrate_legacy_data(legacy_root: str | None = None) -> str | None:
     os.makedirs(target, exist_ok=True)
     for src, dst in pairs:
         if os.path.isdir(src):
-            shutil.copytree(src, dst, dirs_exist_ok=True)
+            _copy_missing(src, dst)
     with open(os.path.join(target, _MIGRATE_MARKER), "w", encoding="utf-8") as f:
         f.write(f"migrated from {src_root}\n")
     return target

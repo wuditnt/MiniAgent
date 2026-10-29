@@ -173,7 +173,37 @@ def test_sandbox_guard():
             raise AssertionError("assert_can_write 未拦截")
         except PermissionError:
             pass
-        print("✓ 保护区：safe_path / read_path / assert_can_write 三处都拦，普通路径放行")
+
+        # --- 符号链接逃逸：路径归一必须解析链接，否则区内链接就是通用越界跳板 ---
+        outside = tempfile.mkdtemp(prefix="ma-mem-out-")
+        try:
+            link = os.path.join(ws, "link_out")
+            kw = {"target_is_directory": True} if os.name == "nt" else {}
+            try:
+                os.symlink(outside, link, **kw)
+            except OSError:
+                print("· 符号链接用例跳过（当前环境无创建链接权限）")
+            else:
+                for fn, name in ((sandbox.safe_path, "safe_path"),
+                                 (sandbox.read_path, "read_path"),
+                                 (sandbox.assert_can_write, "assert_can_write")):
+                    try:
+                        fn(os.path.join(link, "evil.txt"))
+                        raise AssertionError(f"{name} 跟随符号链接越界了")
+                    except PermissionError:
+                        pass
+                mlink = os.path.join(ws, "m_link")
+                os.symlink(md, mlink, **kw)
+                try:
+                    sandbox.safe_path(os.path.join(mlink, "project.md"))
+                    raise AssertionError("经符号链接写入 .memory 未被拦截")
+                except PermissionError:
+                    pass
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+        print("✓ 保护区：safe_path / read_path / assert_can_write 三处都拦，普通路径放行，"
+              "符号链接不能绕过")
     finally:
         sandbox.set_workspace(old)
         shutil.rmtree(ws, ignore_errors=True)
@@ -227,6 +257,7 @@ def test_tools_invisible():
 
 def test_python_prelude():
     ws = _new_ws()
+    outside = tempfile.mkdtemp(prefix="ma-prelude-out-")
     try:
         md = memory.ensure_layout(ws)
         from core.python_prelude import build_prelude
@@ -244,6 +275,17 @@ def test_python_prelude():
                 f"expect(lambda: open(r'{md}\\project.md').read(), 'open-r')\n"
                 f"expect(lambda: pathlib.Path(r'{md}\\x').write_text('x'), 'pathlib-w')\n"
                 f"expect(lambda: shutil.rmtree(r'{md}'), 'rmtree')\n"
+                # sqlite3 与链接：Path/bytes 参数、指向区外的链接都不能成为绕过口
+                "import os as _os, sqlite3\n"
+                f"_OUT = r'{outside}'\n"
+                "def expect2(fn, label):\n"
+                "    try:\n"
+                "        fn(); print('BAD2', label)\n"
+                "    except PermissionError: print('PASS2', label)\n"
+                f"expect2(lambda: sqlite3.connect(_OUT + r'{os.sep}db.sqlite'), 'sqlite-str')\n"
+                "expect2(lambda: sqlite3.connect(pathlib.Path(_OUT) / 'db.sqlite'), 'sqlite-path')\n"
+                f"expect2(lambda: _os.symlink(_OUT, _os.path.join(r'{ws}', 'lnk_out')), 'symlink-out')\n"
+                f"expect2(lambda: pathlib.Path(r'{ws}', 'lnk_m').symlink_to(r'{md}'), 'symlink-mem')\n"
                 "# 保护区外照常\n"
                 f"open(r'{ws}\\inside.txt', 'w').write('y')\n"
                 "print('OK inside')\n"
@@ -252,16 +294,20 @@ def test_python_prelude():
         out = r.stdout
         assert r.returncode == 0, r.stderr
         assert "FAIL" not in out, out
+        assert "BAD2" not in out, out
         assert out.count("OK") == 5, out
-        print("✓ prelude：open 读/写、pathlib、rmtree 全拦；区内写正常")
+        assert out.count("PASS2") == 4, out
+        print("✓ prelude：open 读/写、pathlib、rmtree / sqlite3 / 链接 全拦；区内写正常")
     finally:
         shutil.rmtree(ws, ignore_errors=True)
+        shutil.rmtree(outside, ignore_errors=True)
 
 
 # ============================================================ 7. shell 检测
 
 def test_shell_guard():
     ws = _new_ws()
+    outside = tempfile.mkdtemp(prefix="ma-shell-out-")
     old = sandbox.workspace()
     try:
         sandbox.set_workspace(ws)
@@ -273,15 +319,28 @@ def test_shell_guard():
             "copy a.txt .memory\\a.txt",
             "move a.txt .memory\\a.txt",
             "mkdir .memory\\topics",
+            # 紧贴重定向 + POSIX 绝对路径（老正则的 lookbehind 会整个漏掉）
+            "echo x>/etc/passwd",
+            # 带空格的引号路径要能解析出来
+            f'echo x > "{os.path.join(outside, "dir with space", "f.txt")}"',
+            # 写动词 + 区外绝对路径
+            f"rm -rf {outside}",
+            # 前置环境变量赋值不能让动词识别失效
+            f"FOO=bar rm -rf {outside}",
+            # `;` 分隔的语句也要检查
+            f"touch a.txt; rm -rf {outside}",
         ]
         for cmd in blocked:
             assert sandbox.check_command_write(cmd) is not None, f"未拦截：{cmd}"
         allowed = [
             "del normal.txt",
+            "del /f normal.txt",
             "echo hi > normal.txt",
             "copy a.txt b.txt",
             "mkdir output",
             "dir .",
+            "dir /s",
+            "echo done",
         ]
         for cmd in allowed:
             assert sandbox.check_command_write(cmd) is None, f"误拦：{cmd}"
@@ -289,6 +348,7 @@ def test_shell_guard():
     finally:
         sandbox.set_workspace(old)
         shutil.rmtree(ws, ignore_errors=True)
+        shutil.rmtree(outside, ignore_errors=True)
 
 
 # ============================================================ 8. 注入渲染

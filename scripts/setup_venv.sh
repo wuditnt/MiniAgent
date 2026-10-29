@@ -52,10 +52,10 @@ echo "==> 安装依赖（requirements.txt）"
 echo "==> 安装本项目（可选，提供 mini-agent 命令）"
 "$PY" -m pip install -e "$ROOT" -q || echo "[i] 可编辑安装失败，不影响从源码启动"
 
-# .env 缺失时从模板生成，避免首次启动因没 Key 报错
+# .env 缺失时从模板生成（只含系统配置；模型在 Web UI 里配置）
 if [ ! -f "$ROOT/.env" ] && [ -f "$ROOT/.env.example" ]; then
   cp "$ROOT/.env.example" "$ROOT/.env"
-  echo "[i] 已由 .env.example 生成 .env，请填入 OPENAI_API_KEY"
+  echo "[i] 已由 .env.example 生成 .env（监听地址/端口等系统配置）"
 fi
 
 echo "==> 工具层自检（不需要 API Key）"
@@ -63,5 +63,5 @@ echo "==> 工具层自检（不需要 API Key）"
 
 echo
 echo "==> 完成。接下来:"
-echo "    1) 编辑 .env，填好 OPENAI_API_KEY"
+echo "    1) 启动 --web，在浏览器「设置 → 模型」里配置模型（API Key 存本机 models.json）"
 echo "    2) 启动开发后端: $PY src/core/main.py --web --port 8123 --host 0.0.0.0"

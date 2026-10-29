@@ -214,7 +214,7 @@ python -m mini_agent --no-stream --no-parallel "…"      :: 对照：传统形�
 python tests/test_real_mcp_cancel.py                    :: 真模型 + 真 MCP：取消通知全链路
 ```
 
-需要 `.env` 里有 `OPENAI_API_KEY`。用 DeepSeek 的话，一次真实用例约几千 token。
+需要先在 Web UI「设置 → 模型」里配置好模型（存 `~/.mini-agent/models.json`）。用 DeepSeek 的话，一次真实用例约几千 token。
 
 > **为什么真实用例只留一个？** 它一次跑完「真模型决定调工具 → 工具执行中被取消 →
 > 本端立刻停 → 通知真的发出去 → 服务端真的收手」这条完整链路，
@@ -224,28 +224,31 @@ python tests/test_real_mcp_cancel.py                    :: 真模型 + 真 MCP�
 
 ## 4. 环境变量与 `.env`
 
-复制 `.env.example` 为 `.env`（已在 `.gitignore` 里，不会提交）：
+`.env` 只放**系统配置**（监听地址、端口、路径等），模型与 API Key 不放这里 ——
+它们由 Web UI「设置 → 模型」写入 `~/.mini-agent/models.json`。
+`cp .env.example .env` 后按需改下面几行（都有默认值）：
 
 ```ini
-OPENAI_API_KEY=sk-xxx
-OPENAI_BASE_URL=https://api.deepseek.com/v1
-OPENAI_MODEL=deepseek-chat
+MINI_AGENT_HOST=0.0.0.0      # 监听地址；127.0.0.1 = 仅本机
+MINI_AGENT_PORT=8000
+# MINI_AGENT_DATA_DIR=       # 数据目录（默认 ~/.mini-agent）
+# MINI_AGENT_WORKSPACE=      # 沙箱根（默认当前用户数据目录）
+# MINI_AGENT_ALLOWED_HOSTS=  # 追加允许的 Host（局域网域名）
 ```
 
-DeepSeek / 通义 / 智谱 / 本地 Ollama 的地址模板都在 `.env.example` 里，改一行即可切换。
-
-测试相关的开关（都有默认值，一般不用设）：
+其余运行时开关（同样有默认值，一般不用设；旧名 `AGENT_*` 仍可读）：
 
 | 变量 | 作用 | 默认 |
 |---|---|---|
-| `AGENT_WORKSPACE` | 沙箱根目录 | 当前工作目录 |
-| `AGENT_MAX_OUTPUT` | 单次工具输出上限（字符） | 8000 |
-| `AGENT_STREAM` | 流式输出 | 1（开） |
-| `AGENT_PARALLEL` | 并行工具执行 | 1（开） |
-| `AGENT_MAX_WORKERS` | 并行线程数 | 4 |
-| `AGENT_ALLOW_DANGEROUS` | 放开危险命令拦截 | 0（拦） |
+| `MINI_AGENT_WORKSPACE` | 沙箱根目录 | 当前用户数据目录 |
+| `MINI_AGENT_MAX_OUTPUT` | 单次工具输出上限（字符） | 8000 |
+| `MINI_AGENT_STREAM` | 流式输出 | 1（开） |
+| `MINI_AGENT_PARALLEL` | 并行工具执行 | 1（开） |
+| `MINI_AGENT_MAX_WORKERS` | 并行线程数 | 4 |
+| `MINI_AGENT_MAX_TURNS` | 最大轮数 | 10 |
+| `MINI_AGENT_ALLOW_DANGEROUS` | 放开危险命令拦截 | 0（拦） |
 
-`run_tests.py` 会自动设 `AGENT_WORKSPACE`（指向项目根）与
+`run_tests.py` 会自动设 `MINI_AGENT_WORKSPACE`（指向项目根）与
 `MINI_AGENT_PYTHON`（指向当前解释器），所以**从任何目录调用都不会踩路径坑**。
 
 ---

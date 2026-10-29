@@ -86,6 +86,10 @@ def _make_workspace() -> str:
         f.write("# 标题\n\n正文\n")
     with open(os.path.join(ws, "gbk.txt"), "wb") as f:
         f.write("中文内容\n第二行".encode("gbk"))
+    with open(os.path.join(ws, "utf16.xml"), "wb") as f:
+        # Windows 上不少配置工具写出 UTF-16 LE + BOM（每字符夹 0x00）
+        f.write('<?xml version="1.0" encoding="utf-16"?>\n<VarConfig>中文</VarConfig>'
+                .encode("utf-16"))
     with open(os.path.join(ws, "bin.dat"), "wb") as f:
         f.write(b"\x00\x01\x02binary")
     with open(os.path.join(ws, "big.txt"), "w", encoding="utf-8") as f:
@@ -213,7 +217,12 @@ def test_text_and_encoding():
     assert code == 200 and data["kind"] == "text", data
     assert data["content"] == "中文内容\n第二行", data["content"]
     assert data["encoding"] == "gbk"
-    print("✓ 文本读取：UTF-8 / GBK 解码正确")
+
+    code, data = _api_file("utf16.xml")
+    assert code == 200 and data["kind"] == "text", data
+    assert data["encoding"] == "utf-16", data["encoding"]
+    assert "<VarConfig>中文</VarConfig>" in data["content"], data["content"]
+    print("✓ 文本读取：UTF-8 / GBK / UTF-16(BOM) 解码正确")
 
 
 def test_markdown_and_image():

@@ -112,7 +112,7 @@ python -m mini_agent "请阅读 demo_case/TASK.md，然后严格按里面的三�
 ```bash
 cd mini-agent
 pip install -r requirements.txt
-cp .env.example .env          # 填 OPENAI_API_KEY / BASE_URL / MODEL
+python -m mini_agent --web      # 首次启动后先在「设置 → 模型」里配置模型（存 models.json）
 
 python make_demo_case.py      # 造沙箱数据（幂等，可重复执行）
 python tests/verify_answer.py       # 只看标准答案：不需要 Key

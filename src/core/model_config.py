@@ -13,14 +13,32 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
+import tempfile
+import threading
 import time
 import uuid
 
 from ._paths import data_dir
 
 _MODELS_FILE = os.path.join(data_dir(), "models.json")
+
+#: 配置写入锁：Web UI 有多条请求可能同时改模型配置。
+#: 每个写操作都是「读-改-写」，不加锁会互相覆盖（后写的赢）；
+#: 加上唯一临时文件后，至少不会出现两个线程共用 .tmp 把 JSON 写成半截的情况。
+_SAVE_LOCK = threading.RLock()
+
+
+def _locked(fn):
+    """让整个「读-改-写」过程串行化（重入锁，_save_raw 内部也可安全再取）。"""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _SAVE_LOCK:
+            return fn(*args, **kwargs)
+    return wrapper
+
 
 #: 推理档位全集（low/high/max，三档都表示「开启思考 + 强度」）；
 #: 具体厂家支持哪几档由模板的 reasoning.levels 声明，未声明的厂家按通用 effort
@@ -162,17 +180,17 @@ def mask_key(key: str) -> str:
 # ---------------------------------------------------------------- 读写
 
 def _default_entry() -> dict:
-    """首次使用时（无配置文件）按环境变量兜底造一条 DeepSeek 记录。
-    显示名称默认等于模型 ID（用户可在配置页改成更好读的名字）。
+    """首次使用时（无配置文件）按模板造一条记录。
+    Key 留空由用户在「设置 → 模型」里填；模型与地址取模板默认值。
     """
     tpl = PROVIDER_TEMPLATES["deepseek"]
-    model = os.environ.get("OPENAI_MODEL") or tpl["models"][0]
+    model = tpl["models"][0]
     return {
         "id": "default",
         "provider": "deepseek",
         "name": model,
-        "base_url": os.environ.get("OPENAI_BASE_URL") or tpl["base_url"],
-        "api_key": os.environ.get("OPENAI_API_KEY") or "",
+        "base_url": tpl["base_url"],
+        "api_key": "",
         "model": model,
         "created_at": time.time(),
     }
@@ -215,11 +233,31 @@ def _normalize(data: dict) -> dict:
 
 
 def _save_raw(data: dict) -> None:
-    os.makedirs(os.path.dirname(_MODELS_FILE), exist_ok=True)
-    tmp = _MODELS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, _MODELS_FILE)
+    # 文件里是明文 API Key：目录 0700、文件 0600，别让同机其他用户读到。
+    # （Windows 上 chmod 只影响只读位，实际隔离由用户目录的默认 ACL 提供。）
+    parent = os.path.dirname(_MODELS_FILE)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
+    # 唯一临时文件：固定 `models.json.tmp` 在并发写时会被两个线程同时截断/写入。
+    with _SAVE_LOCK:
+        fd, tmp = tempfile.mkstemp(dir=parent, prefix=".models-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            try:
+                os.chmod(tmp, 0o600)   # 覆盖 umask 生效的兜底
+            except OSError:
+                pass
+            os.replace(tmp, _MODELS_FILE)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 # ---------------------------------------------------------------- 查询
@@ -276,25 +314,19 @@ def provider_key(provider: str) -> str:
 
 
 def deepseek_key() -> str:
-    """DeepSeek 的 API Key：优先模型配置，其次环境变量。
+    """DeepSeek 的 API Key：优先模型配置，其次 DEEPSEEK_API_KEY 环境变量。
 
     供联网搜索 / DeepSeek Fetch 等旁路能力复用，用户无需重复填写。
     """
     key = provider_key("deepseek")
     if key:
         return key
-    key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    if key:
-        return key
-    # 纯 .env 用法：主接口地址指向 DeepSeek 时，主 Key 就是 DeepSeek 的 Key
-    if "deepseek" in os.environ.get("OPENAI_BASE_URL", "").lower():
-        return os.environ.get("OPENAI_API_KEY", "").strip()
-    return ""
+    return os.environ.get("DEEPSEEK_API_KEY", "").strip()
 
 
 def resolve_model(mid: str | None = None) -> dict:
     """按 id 解析一份模型配置；id 为空 / 已被删掉 → 回退全局 active。
-    返回 {model_id, provider, name, base_url, api_key, model}，空字段回退环境变量。
+    返回 {model_id, provider, name, base_url, api_key, model}。
     供会话层（webui._Session.ensure_agent）按会话维度取模型。
     """
     w = get_entry(mid) if mid else None
@@ -304,9 +336,9 @@ def resolve_model(mid: str | None = None) -> dict:
         "model_id": w.get("id") or "",
         "provider": w.get("provider", "custom"),
         "name": w.get("name", ""),
-        "base_url": w.get("base_url") or os.environ.get("OPENAI_BASE_URL", ""),
-        "api_key": w.get("api_key") or os.environ.get("OPENAI_API_KEY", ""),
-        "model": w.get("model") or os.environ.get("OPENAI_MODEL", ""),
+        "base_url": w.get("base_url", ""),
+        "api_key": w.get("api_key", ""),
+        "model": w.get("model", ""),
     }
 
 
@@ -332,20 +364,21 @@ def list_public() -> list[dict]:
 def resolve_active() -> dict:
     """交给 agent 的三个值：base_url / api_key / model。
 
-    记录里的字段若为空，回退到环境变量 —— 这样「只填一半」的配置
-    以及「没写配置文件、纯用 .env」的老用法都能正常工作。
+    只认 models.json（Web UI 配置）；字段为空就是空，不再回退环境变量 ——
+    否则界面里删掉的 Key 还会被旧 .env 复活，用户会以为删除没生效。
     """
     w = active_entry() or {}
     return {
         "name": w.get("name", ""),
-        "base_url": w.get("base_url") or os.environ.get("OPENAI_BASE_URL", ""),
-        "api_key": w.get("api_key") or os.environ.get("OPENAI_API_KEY", ""),
-        "model": w.get("model") or os.environ.get("OPENAI_MODEL", ""),
+        "base_url": w.get("base_url", ""),
+        "api_key": w.get("api_key", ""),
+        "model": w.get("model", ""),
     }
 
 
 # ---------------------------------------------------------------- 变更
 
+@_locked
 def create_entry(provider: str, name: str, base_url: str, api_key: str, model: str) -> dict:
     provider = provider if provider in PROVIDER_TEMPLATES else "custom"
     tpl = PROVIDER_TEMPLATES[provider]
@@ -373,6 +406,7 @@ def create_entry(provider: str, name: str, base_url: str, api_key: str, model: s
     return item
 
 
+@_locked
 def update_entry(
     pid: str,
     name: str | None = None,
@@ -402,6 +436,7 @@ def update_entry(
     return target
 
 
+@_locked
 def delete_entry(pid: str) -> None:
     data = _normalize(_load_raw())
     if len(data["providers"]) <= 1:
@@ -415,6 +450,7 @@ def delete_entry(pid: str) -> None:
     _save_raw(data)
 
 
+@_locked
 def set_reasoning(level: str) -> str:
     """设置全局推理档位；非法值抛 ValueError。"""
     if level not in REASONING_LEVELS:
@@ -425,6 +461,7 @@ def set_reasoning(level: str) -> str:
     return level
 
 
+@_locked
 def set_active(pid: str) -> dict:
     data = _normalize(_load_raw())
     if not any(w["id"] == pid for w in data["providers"]):
@@ -444,6 +481,27 @@ def test_entry(pid: str, timeout: float = 8.0) -> dict:
     return test_values(w["base_url"], w["api_key"], timeout=timeout)
 
 
+def _checked_base(base_url: str) -> str:
+    """校验并规范化接口地址，只允许 http/https。
+
+    为什么要卡 scheme：连接测试会把 api_key 塞进 Authorization 头去请求这个地址。
+    如果接受 `file://` / `ftp://` 等协议，前端传一个 `file:///C:/Users/x/.ssh/id_rsa`
+    就能把本机文件内容直接回显到浏览器；这既是 SSRF，也是任意文件读取。
+    """
+    import urllib.parse
+
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        raise ValueError("接口地址为空")
+    parsed = urllib.parse.urlsplit(base)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"接口地址必须是 http/https（当前：{scheme or '空'}）")
+    if not parsed.hostname:
+        raise ValueError("接口地址缺少主机名")
+    return base
+
+
 def test_values(base_url: str, api_key: str, timeout: float = 8.0) -> dict:
     """按裸参数做连接测试（供「保存前先测」用）。
 
@@ -454,9 +512,10 @@ def test_values(base_url: str, api_key: str, timeout: float = 8.0) -> dict:
     import urllib.error
     import urllib.request
 
-    base = (base_url or "").strip().rstrip("/")
-    if not base:
-        return {"ok": False, "error": "接口地址为空"}
+    try:
+        base = _checked_base(base_url)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
     url = base + "/models"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     if api_key:

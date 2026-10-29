@@ -16,8 +16,6 @@ import uuid
 
 import bootstrap  # noqa: F401  —— 必须最先导入：铺 sys.path + 定工作区
 
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-
 import agent as agent_mod  # noqa: E402
 from core import events  # noqa: E402
 from core.cancel import Cancelled  # noqa: E402
@@ -169,24 +167,121 @@ def test_append_only_and_seq():
 # ---------------------------------------------------------------- 用例 7
 
 def test_truncation_marked():
-    """超 value_limit 的字符串被显式标记截断，len / sha256 / head / tail 正确。"""
+    """超 value_limit 的非事实字段被显式标记截断，len / sha256 / head / tail 正确。"""
     sid = _new_sid()
     try:
         limit = 4096
         w = events.EventWriter(sid, value_limit=limit)
         big = "字" * (limit + 500)
-        w.emit(events.SYSTEM_PROMPT, source=events.SRC_SYSTEM, phase=events.PH_RUN_START,
-               content=big)
+        w.emit(events.TOOL_RESULT, source=events.SRC_TOOL, phase=events.PH_TURN, turn=1,
+               id="call_1", name="t", ok=True, content="ok", preview=big)
         w.close()
 
         payload = _lines(sid)[0]["payload"]
-        mark = payload["content"]
+        mark = payload["preview"]
         assert mark.get("__truncated__") is True, mark
         assert mark["len"] == len(big)
         assert mark["sha256"] == events.sha256_text(big)
         assert mark["head"] == big[:2048]
         assert mark["tail"] == big[-2048:]
-        print("✓ 事件流：超限字符串被显式标记截断（len/sha256/head/tail 均可校验）")
+        print("✓ 事件流：超限字段被显式标记截断（len/sha256/head/tail 均可校验）")
+    finally:
+        _cleanup(sid)
+
+
+def test_truncate_honors_limit():
+    """limit 是单字段字符上限：head/tail 合计不超过它；默认上限下维持各 2048。"""
+    big = "x" * 1000
+    small = events._truncate(big, 100)
+    assert len(small["head"]) + len(small["tail"]) <= 100, small
+    assert small["head"] == big[:50]
+    assert small["tail"] == big[-50:]
+
+    default = events._truncate("y" * 70000, events.DEFAULT_VALUE_LIMIT)
+    assert len(default["head"]) == 2048 and len(default["tail"]) == 2048
+    print("✓ 事件流：截断按 limit 收口，默认上限下产物不变")
+
+
+def test_image_canon_keeps_detail_and_tolerates_bad_url():
+    """图片分片规范化：保留 detail（digest 可区分）；url 非 str 时原样透传、不抛异常。"""
+    url = "data:image/png;base64,AAAA"
+    with_detail = [{"type": "image_url", "image_url": {"url": url, "detail": "high"}}]
+    plain = [{"type": "image_url", "image_url": {"url": url}}]
+
+    canon = events.canonical_message({"role": "user", "content": with_detail})
+    assert canon["content"][0]["image_url"]["detail"] == "high", canon
+    assert canon["content"][0]["image_url"]["url"].startswith(events.IMG_PREFIX)
+    assert (
+        events.message_digest({"role": "user", "content": with_detail})["sha256"]
+        != events.message_digest({"role": "user", "content": plain})["sha256"]
+    ), "detail 不同应当得到不同 digest"
+
+    for bad in ({"__truncated__": True, "len": 1}, None, 123):
+        got = events._canon_content([{"type": "image_url", "image_url": {"url": bad}}])
+        assert got[0]["image_url"]["url"] == bad, got
+        events.message_digest({"role": "user", "content": got})
+    print("✓ 事件流：图片分片保留 detail；非 str url 不炸、原样透传")
+
+
+def test_bad_seq_tolerated():
+    """文件里混入非 int 的 seq：rebuild_messages / last_seq 照常工作（不 TypeError）。"""
+    sid = _new_sid()
+    try:
+        w = events.EventWriter(sid)
+        w.set_run("r-1")
+        w.emit(events.SYSTEM_PROMPT, source=events.SRC_SYSTEM, phase=events.PH_RUN_START,
+               content="S", chars=1, sha256=events.sha256_text("S"))
+        w.emit(events.USER_MESSAGE, source=events.SRC_USER, phase=events.PH_RUN_START,
+               content="hi")
+        msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "hi"}]
+        w.emit(events.LLM_REQUEST, source=events.SRC_MODEL, phase=events.PH_TURN, turn=1,
+               model="stub", temperature=0.0, tools=[],
+               message_count=len(msgs), chars=0,
+               system_sha256=events.sha256_text("S"),
+               messages=[events.message_digest(m) for m in msgs])
+        w.close()
+
+        with open(events.events_path(sid), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"v": events.VERSION, "seq": "bad",
+                                "type": "llm_request", "payload": {}}) + "\n")
+
+        assert events.last_seq(sid) == 3
+        assert events.rebuild_messages(sid) == msgs
+        print("✓ 事件流：坏 seq 被跳过，重放与 last_seq 不抛异常")
+    finally:
+        _cleanup(sid)
+
+
+def test_fact_body_not_truncated_keeps_rebuild():
+    """事实层正文（系统/用户/回复/工具结果）不截断：截断会让 I1 重建校验失败。"""
+    sid = _new_sid()
+    try:
+        limit = 512
+        sys_text = "S" * (limit * 3)
+        big_result = "R" * (limit * 3)
+        reg = ToolRegistry()
+
+        @tool("big_out", "返回一段固定长度的大文本（测试用）。", registry=reg)
+        def big_out(tag: str = "") -> str:
+            return big_result
+
+        script = [_Msg(tool_calls=[_TC(1, "big_out", '{"tag": ""}')]),
+                  _Msg(content="好了。")]
+        a = agent_mod.Agent(verbose=False, client=_StubClient(script),
+                            system_prompt=sys_text, registry=reg)
+        w = events.EventWriter(sid, value_limit=limit)
+        a.event_writer = w
+        a.run("跑一下")
+        w.close()
+
+        # 正文原样保留；超限的仍以字符串形式存在，不是截断标记
+        sys_ev = _events_of(sid, events.SYSTEM_PROMPT)[-1]["payload"]
+        assert sys_ev["content"] == sys_text, sys_ev["content"][:80]
+        tool_ev = _events_of(sid, events.TOOL_RESULT)[-1]["payload"]
+        assert tool_ev["content"] == big_result
+        # 关键：每条 llm_request 仍可重放校验（本次修复的回归点）
+        _assert_all_requests_rebuild(sid)
+        print("✓ 事件流：事实层正文豁免截断，超限正文下 I1 仍可重建")
     finally:
         _cleanup(sid)
 
@@ -511,6 +606,20 @@ def test_rebuild_display_fallback():
 
 # ---------------------------------------------------------------- 入口
 
+def test_invalid_sid_rejected():
+    """会话 id 会拼进文件名：空值 / 分隔符 / `..` / 超长必须被拒，不落目录外。"""
+    for bad in ("../evil", "a/b", "a\\b", "", "..", "." , "x" * 65, "中文"):
+        assert not events.valid_sid(bad), bad
+        try:
+            events.events_path(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"非法会话 id 不应生成路径：{bad!r}")
+    assert events.valid_sid("ok-1_A.b")
+    assert events.events_path("ok-1_A.b").endswith("ok-1_A.b.events.jsonl")
+    print("✓ 事件流：非法会话 id 被拒（不会拼出目录外路径）")
+
+
 if __name__ == "__main__":
     test_append_only_and_seq()
     test_rebuild_invariant()
@@ -519,8 +628,13 @@ if __name__ == "__main__":
     test_cancel_event()
     test_events_disabled_noop()
     test_truncation_marked()
+    test_truncate_honors_limit()
+    test_image_canon_keeps_detail_and_tolerates_bad_url()
+    test_bad_seq_tolerated()
+    test_fact_body_not_truncated_keeps_rebuild()
     test_rebuild_manual_stream()
     test_rebuild_detects_corruption()
     test_rebuild_display_fallback()
+    test_invalid_sid_rejected()
     print("---")
     print("全部通过 ✅")

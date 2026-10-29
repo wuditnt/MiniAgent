@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar, Token
 from typing import Callable
 
 from .registry import REGISTRY, Tool, ToolRegistry
@@ -47,16 +48,31 @@ def _clean_options(options: object) -> list[str]:
 
 # ---------------------------------------------------------------- 询问通道
 
-_asker: Callable[..., str] | None = None
+# 为什么用 ContextVar 而不是全局变量：Web UI 每个会话一个线程、可并发跑
+# agent.run()。全局槽位会让 A 会话的提问弹到 B 会话，且 A 结束时把还在跑的
+# B 的通道清空。ContextVar 按「运行上下文」隔离，互不干扰。
+# 工具在工作线程里执行 —— agent 提交任务时会 copy_context，所以这里读得到。
+_asker: ContextVar[Callable[..., str] | None] = ContextVar("ask_asker", default=None)
 
 
-def set_asker(fn: Callable[..., str] | None) -> None:
-    """注入「向用户提问」的实现（agent.run 时设置，结束后置空）。
+def set_asker(fn: Callable[..., str] | None) -> Token:
+    """注入「向用户提问」的实现，返回可交给 reset_asker 的 token。
 
     签名约定：fn(question, options, allow_free_text, multi) -> str
     """
-    global _asker
-    _asker = fn
+    return _asker.set(fn)
+
+
+def reset_asker(token: Token) -> None:
+    """恢复到注入前的状态；token 跨上下文无效时退化为清空本上下文。"""
+    try:
+        _asker.reset(token)
+    except (ValueError, LookupError):
+        _asker.set(None)
+
+
+def has_asker() -> bool:
+    return _asker.get() is not None
 
 
 def ask_user(
@@ -70,7 +86,7 @@ def ask_user(
     allow = bool(allow_free_text)
     many = bool(multi)
 
-    asker = _asker
+    asker = _asker.get()
     if asker is None:
         # 无 UI 桥（脚本/测试直调）：不替用户编答案，明确告知拿不到答复
         return f"{UNANSWERED} 当前环境没有人工问答通道，无法获取用户答复。"
@@ -80,7 +96,7 @@ def ask_user(
         return f"{UNANSWERED} 问答通道故障，未能拿到答复。请改用其它方式获取信息。"
     if not answer:
         return (
-            f"{UNANSWERED} 用户未作答（超时或跳过）。"
+            f"{UNANSWERED} 用户未作答（跳过或任务已停止）。"
             "请基于已有信息继续，或明确说明你采用的假设。"
         )
     return f"[answer] {answer}"

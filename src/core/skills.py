@@ -25,6 +25,7 @@ import json
 import os
 from dataclasses import dataclass, field
 
+from core import envs
 from core._paths import data_dir
 from core.registry import Tool, ToolRegistry
 from core.schema import schema_from_callable
@@ -70,9 +71,9 @@ def default_dirs() -> list[str]:
 
     设 AGENT_NO_SKILLS=1 可完全关闭技能加载。
     """
-    if os.environ.get("AGENT_NO_SKILLS") == "1":
+    if envs.get_bool("MINI_AGENT_NO_SKILLS", False, alias="AGENT_NO_SKILLS"):
         return []
-    raw = os.environ.get("AGENT_SKILL_DIRS", "").strip()
+    raw = envs.get_str("MINI_AGENT_SKILL_DIRS", alias="AGENT_SKILL_DIRS")
     if not raw:
         return list(DEFAULT_SKILL_DIRS)
     return [d.strip() for d in raw.replace(";", ",").split(",") if d.strip()]

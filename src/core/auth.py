@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import os
@@ -91,6 +92,40 @@ class AuthError(Exception):
 
 # ---------------------------------------------------------------- 连接
 
+_schema_lock = threading.Lock()
+_schema_paths: set[str] = set()
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """同一 DB 文件只跑一次建表 DDL。
+
+    ThreadingHTTPServer 是一请求一线程、HTTP/1.0 一请求一断连，线程本地连接缓存
+    几乎不命中；若每条连接都 executescript(_SCHEMA)，每个请求都要拿一次写锁做 DDL。
+    """
+    path = _DB_PATH
+    if path in _schema_paths:
+        return
+    with _schema_lock:
+        if path in _schema_paths:
+            return
+        conn.executescript(_SCHEMA)
+        _schema_paths.add(path)
+
+
+@contextlib.contextmanager
+def _write_tx():
+    """写事务（BEGIN IMMEDIATE）：判断与修改在同一把写锁内，避免并发 check-then-act。"""
+    conn = _conn()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except BaseException:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
+
+
 def _conn() -> sqlite3.Connection:
     """每线程一个连接（ThreadingHTTPServer 是一请求一线程，连接不能跨线程共享）。"""
     cached = getattr(_local, "conn", None)
@@ -108,8 +143,8 @@ def _conn() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
-    # 新连接顺手确保表存在：直接构造 WebServer（测试、嵌入调用）也不会踩「no such table」
-    conn.executescript(_SCHEMA)
+    # 首次连接顺手建表（每个 DB 文件只跑一次，直接构造 WebServer 也不会踩「no such table」）
+    _ensure_schema(conn)
     _local.conn = conn
     _local.path = _DB_PATH
     return conn
@@ -254,11 +289,15 @@ def get_user_by_name(username: str) -> dict | None:
     return _row_to_user(row) if row else None
 
 
-def _superadmin_count() -> int:
-    row = _conn().execute(
+def _superadmin_count_in(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
         "SELECT COUNT(*) AS n FROM users WHERE role = 'superadmin' AND disabled = 0"
     ).fetchone()
     return int(row["n"])
+
+
+def _superadmin_count() -> int:
+    return _superadmin_count_in(_conn())
 
 
 def create_user(
@@ -316,8 +355,14 @@ def update_user(
             raise AuthError("SELF_FORBIDDEN", "不能修改当前登录账号的角色")
     if role is not None and role not in ROLES:
         raise AuthError("BAD_ROLE", f"角色只能是 {ROLES[0]} 或 {ROLES[1]}")
-    if (role is not None and role != ROLE_SUPERADMIN) or disabled:
-        if user["role"] == ROLE_SUPERADMIN and _superadmin_count() <= 1:
+    if (
+        ((role is not None and role != ROLE_SUPERADMIN) or bool(disabled))
+        and user["role"] == ROLE_SUPERADMIN
+        and not user["disabled"]
+    ):
+        # 只有「这次变更会让启用的超管数量降到 0」时才拦；目标本身已禁用时不算。
+        # 真正的判断放在事务内（见下），这里只是提前挡掉明显非法的请求。
+        if _superadmin_count() <= 1:
             raise AuthError("LAST_SUPERADMIN", "必须至少保留一个启用的超级管理员")
 
     fields: list[str] = []
@@ -342,12 +387,24 @@ def update_user(
     fields.append("updated_at = ?")
     values.append(_now())
     values.append(uid)
-    conn = _conn()
-    with conn:
+    with _write_tx() as conn:
+        # 判断与修改必须在同一事务里：否则并发管理请求可能双双通过，把超管清空
+        row = conn.execute(
+            "SELECT role, disabled FROM users WHERE id = ?", (uid,)
+        ).fetchone()
+        if row is None:
+            raise AuthError("NOT_FOUND", "账号不存在")
+        removes_enabled_superadmin = (
+            ((role is not None and role != ROLE_SUPERADMIN) or bool(disabled))
+            and row["role"] == ROLE_SUPERADMIN
+            and not row["disabled"]
+        )
+        if removes_enabled_superadmin and _superadmin_count_in(conn) <= 1:
+            raise AuthError("LAST_SUPERADMIN", "必须至少保留一个启用的超级管理员")
         conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", values)
-    if password is not None:
-        # 改密后踢掉该账号的其他会话；keep_token 用于「自己改自己的密码」保留当前会话
-        delete_user_sessions(uid, keep_token=keep_token)
+        if password is not None:
+            # 改密与踢会话同事务：中途失败就整体回滚，绝不出现「密码已改、旧 token 仍有效」
+            _delete_sessions(conn, uid, keep_token)
     updated = get_user(uid)
     assert updated is not None
     return updated
@@ -359,10 +416,18 @@ def delete_user(uid: int, *, actor_id: int | None = None) -> None:
         raise AuthError("NOT_FOUND", "账号不存在")
     if actor_id is not None and actor_id == uid:
         raise AuthError("SELF_FORBIDDEN", "不能删除当前登录的账号")
-    if user["role"] == ROLE_SUPERADMIN and _superadmin_count() <= 1:
-        raise AuthError("LAST_SUPERADMIN", "必须至少保留一个启用的超级管理员")
-    conn = _conn()
-    with conn:
+    with _write_tx() as conn:
+        row = conn.execute(
+            "SELECT role, disabled FROM users WHERE id = ?", (uid,)
+        ).fetchone()
+        if row is None:
+            raise AuthError("NOT_FOUND", "账号不存在")
+        if (
+            row["role"] == ROLE_SUPERADMIN
+            and not row["disabled"]
+            and _superadmin_count_in(conn) <= 1
+        ):
+            raise AuthError("LAST_SUPERADMIN", "必须至少保留一个启用的超级管理员")
         conn.execute("DELETE FROM users WHERE id = ?", (uid,))
 
 
@@ -432,7 +497,8 @@ def resolve_session(token: str) -> dict | None:
 
     now_ts = time.time()
     expires_ts = _ts(row["sess_expires"])
-    if expires_ts is not None and expires_ts <= now_ts:
+    if expires_ts is None or expires_ts <= now_ts:
+        # 解析失败按已过期处理（fail closed）：损坏的 expires_at 不能换来永久有效
         with conn:
             conn.execute("DELETE FROM sessions WHERE token_hash = ?", (_token_hash(token),))
         return None
@@ -442,7 +508,7 @@ def resolve_session(token: str) -> dict | None:
     # 两件事合并成一次 UPDATE：到期前 1 天内续期；last_seen 按 60 秒节流。
     sets: list[str] = []
     values: list = []
-    if expires_ts is None or expires_ts <= now_ts + SESSION_RENEW_BEFORE:
+    if expires_ts <= now_ts + SESSION_RENEW_BEFORE:
         sets.append("expires_at = ?")
         values.append(_after(SESSION_TTL))
     seen_ts = _ts(row["sess_seen"])
@@ -476,17 +542,24 @@ def delete_session(token: str) -> None:
         conn.execute("DELETE FROM sessions WHERE token_hash = ?", (_token_hash(token),))
 
 
+def _delete_sessions(
+    conn: sqlite3.Connection, user_id: int, keep_token: str | None
+) -> None:
+    """在调用方的事务里删除会话（改密时与密码更新同事务）。"""
+    if keep_token:
+        conn.execute(
+            "DELETE FROM sessions WHERE user_id = ? AND token_hash != ?",
+            (user_id, _token_hash(keep_token)),
+        )
+    else:
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+
+
 def delete_user_sessions(user_id: int, keep_token: str | None = None) -> None:
     """删除该账号的全部会话；keep_token 指定的那条保留（用于改密不踢自己）。"""
     conn = _conn()
     with conn:
-        if keep_token:
-            conn.execute(
-                "DELETE FROM sessions WHERE user_id = ? AND token_hash != ?",
-                (user_id, _token_hash(keep_token)),
-            )
-        else:
-            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        _delete_sessions(conn, user_id, keep_token)
 
 
 def cleanup_expired() -> int:

@@ -74,32 +74,15 @@ function humanDesc(info: ConfirmInfo): string {
 interface Props {
   info: ConfirmInfo | null;
   onAnswer: (approve: boolean) => void;
-  /** 审批等待上限（秒）：来自 /api/state 的 confirm_timeout，超时自动按拒绝处理 */
-  timeout?: number;
 }
 
-export default function ConfirmPanel({ info, onAnswer, timeout = 120 }: Props) {
+export default function ConfirmPanel({ info, onAnswer }: Props) {
   const [expanded, setExpanded] = useState(false);
-  const [remaining, setRemaining] = useState(timeout);
 
-  // 换一条确认请求：收起详细区、重置倒计时并开始读秒；归零即按拒绝处理
+  // 换一条确认请求：收起详细区（不做倒计时 —— 批准前不会自动放行/拒绝）
   useEffect(() => {
     if (!info) return;
     setExpanded(false);
-    const total = timeout > 0 ? timeout : 120;
-    setRemaining(total);
-    const startedAt = Date.now();
-    const timer = setInterval(() => {
-      const left = Math.max(0, total - Math.floor((Date.now() - startedAt) / 1000));
-      setRemaining(left);
-      if (left <= 0) {
-        clearInterval(timer);
-        onAnswer(false);
-      }
-    }, 250);
-    return () => clearInterval(timer);
-    // 只在换请求时重建定时器；onAnswer 语义稳定，不进依赖避免反复重置
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [info?.id]);
 
   if (!info) return null;
@@ -111,7 +94,7 @@ export default function ConfirmPanel({ info, onAnswer, timeout = 120 }: Props) {
     <div className={`confirm-panel${expanded ? " expanded" : ""}`}>
       <div className="confirm-header">
         <div className="confirm-badge">{isApproval ? "等待授权" : "等待审批"}</div>
-        <div className="confirm-countdown">你需要在 {remaining} 秒进行审批，否则默认拒绝。</div>
+        <div className="confirm-hint">等待你的审批：不点「允许执行」不会继续；离开此页会自动拒绝。</div>
       </div>
       <div className="confirm-desc">{humanDesc(info)}</div>
 

@@ -254,7 +254,7 @@ const OTHER = "\u0000other";
  * 内联提问卡片：ask_user 工具让 Agent 在助手气泡里直接摆出问题与候选。
  * 两种形态：
  *  · pending：可交互 —— 单选（multi=false）/ 多选（multi=true）+ 可选「其他」自由输入，点提交即回传；
- *  · record：只读留存 —— 已回答显示所选，超时/停止显示「未回答」。
+ *  · record：只读留存 —— 已回答显示所选，停止/断连导致失效时显示「未回答」。
  */
 function AskCard({
   pending,
@@ -278,7 +278,7 @@ function AskCard({
       <div className={`ask-card ask-card-settled${answered ? "" : " ask-card-expired"}`}>
         <span className="ask-settled-label">{answered ? "已选择" : "未回答"}</span>
         <span className="ask-settled-value">
-          {answered ? src.answer : "（超时或任务已停止，Agent 按未回答继续）"}
+          {answered ? src.answer : "（任务已停止或连接已断开，Agent 按未回答继续）"}
         </span>
       </div>
     );
@@ -475,8 +475,6 @@ interface Props {
   /** 权限审批：正在等待作答的确认请求（覆盖在输入框位置上） */
   confirm?: ConfirmInfo | null;
   onAnswerConfirm?: (approve: boolean) => void;
-  /** 审批等待上限（秒），来自 /api/state 的 confirm_timeout */
-  confirmTimeout?: number;
   /** 模型选择器：列表 / 服务商展示名映射 / 当前激活 id / 当前模型名 */
   models: ModelProvider[];
   providerNames: Record<string, string>;
@@ -683,7 +681,6 @@ export default function Chat({
   onAnswerAsk,
   confirm,
   onAnswerConfirm,
-  confirmTimeout,
   models,
   providerNames,
   activeModelId,
@@ -1318,7 +1315,7 @@ export default function Chat({
               }}
             />
           </div>
-          <ConfirmPanel info={confirm ?? null} timeout={confirmTimeout} onAnswer={(a) => onAnswerConfirm?.(a)} />
+          <ConfirmPanel info={confirm ?? null} onAnswer={(a) => onAnswerConfirm?.(a)} />
           </div>
           {/* 「+」菜单用的文件选择框：视觉隐藏而非 display:none，
               保证手机浏览器通过 label 激活时能正常弹出选图面板 */}

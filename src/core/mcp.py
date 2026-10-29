@@ -232,6 +232,12 @@ class MCPStdioClient:
 
     def _dispatch(self, msg: dict) -> None:
         """按 id 把响应投递给等它的那个线程；其余（通知等）进公共队列。"""
+        # 合法的 JSON 行不一定是对象：server 可能往 stdout 打一个裸字面量
+        # （[] / 123 / "ok" / null）。直接 msg.get(...) 会抛 AttributeError，
+        # 把读线程打死 —— 之后所有请求都只能等超时。这类行按噪声收起来。
+        if not isinstance(msg, dict):
+            self._stdout_noise.append(json.dumps(msg, ensure_ascii=False))
+            return
         rid = msg.get("id")
         if isinstance(rid, int):
             waiter = self._waiters.get(rid)
@@ -558,7 +564,12 @@ class MCPManager:
                 )
                 state.server_info = client.server_info
                 state.status = "ready"
+                old = self.clients.get(name)
                 self.clients[name] = client
+                if old is not None and old is not client:
+                    # 重载/重启同名 server：旧连接已没人持有，必须关掉 ——
+                    # 否则子进程与读线程会一直挂着（每次 reload 泄漏一个）。
+                    old.stop()
             except MCPError as e:
                 state.status = "failed"
                 state.error = str(e)
@@ -573,11 +584,14 @@ class MCPManager:
 
             report.servers[name] = state
 
-        # 关掉不再需要的连接
+        # 关掉不再需要的连接，并摘掉它们的工具：
+        # 服务被禁用（enabled:false）或启动失败时，旧工具若留在注册表里，
+        # 模型仍会看到并调用一个已经没有后端的工具 —— 必须随连接一起下线。
         for name in list(self.clients):
             if name not in report.servers or report.servers[name].status != "ready":
                 self.clients[name].stop()
                 self.clients.pop(name, None)
+                self.registry.remove_module(f"mcp:{name}")
 
         self.report = report
         return report

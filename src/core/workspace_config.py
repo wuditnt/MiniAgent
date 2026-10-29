@@ -128,8 +128,13 @@ def resolve_path(wid: str) -> str:
 
 def _validate_path(path: str) -> str:
     """校验并规范化路径：必须是非空、存在的目录。"""
-    p = os.path.abspath(os.path.expanduser((path or "").strip()))
-    if not p or not os.path.isdir(p):
+    raw = (path or "").strip()
+    # 空串不能交给 abspath：os.path.abspath("") 返回当前工作目录，
+    # 于是 isdir 永远成立 —— 一个没填路径的请求会静默把进程 cwd 变成工作区。
+    if not raw:
+        raise ValueError("工作区路径不能为空")
+    p = os.path.abspath(os.path.expanduser(raw))
+    if not os.path.isdir(p):
         raise ValueError(f"工作区路径不存在或不是目录：{path}")
     return p
 
@@ -168,13 +173,26 @@ def update_workspace(wid: str, name: str | None = None, path: str | None = None)
         target["name"] = name
 
     if path is not None:
-        p = _validate_path(path)
-        for w in data["workspaces"]:
-            if w.get("id") == wid:
-                continue
-            if os.path.normcase(os.path.abspath(w.get("path", ""))) == os.path.normcase(p):
-                raise ValueError("该路径已被另一个工作区使用")
-        target["path"] = p
+        # 默认工作区的 path 由运行位置（AGENT_WORKSPACE/_paths.ROOT）决定，
+        # _ensure_default() 每次加载都会重置它。旧实现照样写入并返回新路径，
+        # 用户看到的「保存成功」下次启动就消失了 —— 与其静默丢弃，不如明确拒绝。
+        if wid == DEFAULT_ID:
+            raw = str(path or "").strip()
+            same = bool(raw) and os.path.normcase(
+                os.path.abspath(os.path.expanduser(raw))
+            ) == os.path.normcase(_default_path())
+            if not same:
+                raise ValueError("默认工作区的路径由运行位置决定，不能修改（可以改名）")
+            # 前端编辑弹窗会把原路径一起提交：与当前一致就当没传，只处理改名
+            path = None
+        else:
+            p = _validate_path(path)
+            for w in data["workspaces"]:
+                if w.get("id") == wid:
+                    continue
+                if os.path.normcase(os.path.abspath(w.get("path", ""))) == os.path.normcase(p):
+                    raise ValueError("该路径已被另一个工作区使用")
+            target["path"] = p
 
     _save_raw(data)
     return target

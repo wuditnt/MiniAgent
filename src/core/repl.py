@@ -196,7 +196,15 @@ class Console:
             if not line:
                 continue
             if line.startswith("/"):
-                if not self.dispatch(line):
+                try:
+                    keep = self.dispatch(line)
+                except Exception as e:  # noqa: BLE001 —— 单条命令失败不该结束整个 REPL
+                    self._print(
+                        f"[red]命令执行失败：{type(e).__name__}[/red] "
+                        f"[dim]{self._escape(str(e))}[/dim]"
+                    )
+                    continue
+                if not keep:
                     self._print("[dim]再见。[/dim]")
                     return 0
                 continue
@@ -522,7 +530,9 @@ class Console:
             scope = head
             text = text.split(None, 1)[1].strip()
         result = memory.remember(scope, text)
-        self._print(f"[green]{result}[/green]")
+        # remember() 的结果以 [ok]/[error]/[skipped] 开头，正文也可能带方括号：
+        # 不转义的话 rich 会把它当颜色标记吞掉，用户看到的是「没有标签的句子」。
+        self._print(f"[green]{self._escape(result)}[/green]")
 
     def cmd_memory(self) -> None:
         """展示当前工作区下三层记忆的位置与内容概览。"""
@@ -535,9 +545,11 @@ class Console:
         topics = memory.list_topics(ws)
         self._print(f"[bold]工作区[/bold]：{ws}")
         self._print(f"[bold]用户画像[/bold]：{memory.user_profile_path()}")
-        self._print(up or "[dim]（空）[/dim]")
+        # 记忆正文是用户/模型写的自由文本，里面出现 [xxx] 的概率很高：
+        # 原样交给 rich 会被当成标记解析（内容直接消失），必须先转义。
+        self._print(self._escape(up) if up else "[dim]（空）[/dim]")
         self._print(f"\n[bold]项目记忆[/bold]：{memory.project_path(ws)}")
-        self._print(pj or "[dim]（空）[/dim]")
+        self._print(self._escape(pj) if pj else "[dim]（空）[/dim]")
         self._print(f"\n[bold]主题摘要[/bold]：{len(topics)} 条（保留最近 {memory.TOPICS_KEEP} 条）")
         for it in topics[:10]:
             self._print(f"  · {it['session']}  ({it['size']} B)")

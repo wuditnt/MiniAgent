@@ -1,10 +1,11 @@
 """
 内联提问（ask_user）测试 —— 免费用例：纯函数 + 假 asker，不碰网络、不烧 token。
 
-覆盖三件事：
+覆盖四件事：
   · ask_user 的返回协议：无通道 / 有答案 / 未作答 / 通道故障，四种都不抛异常；
   · 工具与注册表契约：exclusive（必须串行，避免并发弹多张卡片）、幂等注册；
-  · 等待桥的唤醒语义：_Session.answer_ask 按 cid 精确匹配，不匹配不动别人的等待。
+  · 等待桥的唤醒语义：_Session.answer_ask 按 cid 精确匹配，不匹配不动别人的等待；
+  · 关闭 UI（enabled=False）时危险确认不提问、不阻塞 stdin，直接按默认值否决。
 """
 
 from __future__ import annotations
@@ -165,3 +166,50 @@ def test_deny_pending_ask_wakes_with_blank():
     session.deny_pending_ask()
     assert event.is_set()
     assert holder["answer"] == ""       # 空答案 = 未作答，交给 agent 按未回答继续
+
+
+# ---------------------------------------------------------------- 关闭 UI 时不得交互
+
+class _DangerTool:
+    name = "run_shell"
+
+
+def test_ask_confirm_disabled_does_not_prompt():
+    """enabled=False（管道 / 后台）：不提问、不阻塞 stdin，直接按默认值（否决）返回。"""
+    import builtins
+
+    from core.ui import PlainUI, RichUI
+
+    def _no_input(*_a, **_k):
+        raise AssertionError("关闭 UI 时不该读 stdin")
+
+    class _NoConsole:
+        def print(self, *_a, **_k):
+            raise AssertionError("关闭 UI 时不该输出")
+
+        def input(self, *_a, **_k):
+            raise AssertionError("关闭 UI 时不该提问")
+
+    real = builtins.input
+    builtins.input = _no_input
+    try:
+        args = {"command": "rm -rf /"}
+        assert PlainUI(enabled=False).ask_confirm(_DangerTool(), args) is False
+        assert RichUI(enabled=False, console=_NoConsole()).ask_confirm(_DangerTool(), args) is False
+    finally:
+        builtins.input = real
+    print("✓ 关闭 UI 时危险工具确认：不提问、不阻塞，默认否决")
+
+
+if __name__ == "__main__":
+    for _t in (
+        test_no_channel, test_answered, test_answer_is_stripped,
+        test_blank_answer_is_unanswered, test_asker_failure_is_unanswered,
+        test_asker_receives_normalized_args, test_blank_question_falls_back,
+        test_multi_passed_through, test_options_clean, test_options_capped,
+        test_tool_flags, test_register_is_idempotent, test_answer_ask_matches_cid,
+        test_answer_ask_without_pending, test_deny_pending_ask_wakes_with_blank,
+        test_ask_confirm_disabled_does_not_prompt,
+    ):
+        _t()
+    print("✓ 内联提问 16 项通过")

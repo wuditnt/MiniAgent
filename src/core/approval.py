@@ -13,18 +13,29 @@
 
 request_approval 的询问通道是进程级 asker（由 agent 在 run 时注入
 UI 桥），这样工具函数本身保持无状态、可在任意工作线程里执行。
+
+安全默认：没有确认通道时一律按「未批准」处理（fail-closed）。脚本/无头
+批处理确实需要自动放行时，必须显式设置 MINI_AGENT_ALLOW_NO_ASKER=1 ——
+「没有通道」不能被解释成「用户点了同意」。
 """
 
 from __future__ import annotations
 
+import os
+from contextvars import ContextVar, Token
 from typing import Callable
 
+from . import envs
 from .registry import REGISTRY, Tool, ToolRegistry
 
 ASK = "ask"
 AUTO = "auto"
 FULL = "full"
 MODES = (ASK, AUTO, FULL)
+
+#: 无确认通道时的放行开关（仅用于脚本/无头批处理，需显式 opt-in）
+_NO_ASKER_ENV = "MINI_AGENT_ALLOW_NO_ASKER"
+_TRUTHY = ("1", "true", "yes", "on")
 
 # auto 模式追加到 system prompt 的责任准则
 AUTO_RESPONSIBILITY_PROMPT = """\
@@ -49,13 +60,27 @@ def normalize(mode: str | None) -> str:
 
 # ---------------------------------------------------------------- 询问通道
 
-_asker: Callable[[str], bool] | None = None
+# ContextVar 而非全局变量：Web UI 允许多个会话并发运行，全局槽位会让
+# 「A 结束清空通道」把仍在跑的 B 变成无通道状态（进而触发拒绝），也会把
+# A 的审批弹到 B 的界面上。按运行上下文隔离即可根治。
+_asker: ContextVar[Callable[[str], bool] | None] = ContextVar("approval_asker", default=None)
 
 
-def set_asker(fn: Callable[[str], bool] | None) -> None:
-    """注入「向用户申请授权」的实现（agent.run 时设置，结束后置空）。"""
-    global _asker
-    _asker = fn
+def set_asker(fn: Callable[[str], bool] | None) -> Token:
+    """注入「向用户申请授权」的实现，返回可交给 reset_asker 的 token。"""
+    return _asker.set(fn)
+
+
+def reset_asker(token: Token) -> None:
+    """恢复到注入前的状态；token 跨上下文无效时退化为清空本上下文。"""
+    try:
+        _asker.reset(token)
+    except (ValueError, LookupError):
+        _asker.set(None)
+
+
+def has_asker() -> bool:
+    return _asker.get() is not None
 
 
 def register(reg: ToolRegistry | None = None) -> None:
@@ -69,10 +94,19 @@ def register(reg: ToolRegistry | None = None) -> None:
 
 def request_approval(reason: str) -> str:
     text = (reason or "").strip() or "(未填写理由)"
-    asker = _asker
+    asker = _asker.get()
     if asker is None:
-        # 无 UI 桥（脚本/测试直调）：不替用户做拒绝决定，默认放行并留痕
-        return "[approved] 当前环境没有人工确认通道，默认放行。"
+        # 审批是安全控制：没有确认通道 ≠ 用户同意。默认按拒绝处理；
+        # 脚本/无头批处理确需放行时，用 MINI_AGENT_ALLOW_NO_ASKER=1 显式声明。
+        if envs.get_bool(_NO_ASKER_ENV, False, alias="AGENT_ALLOW_NO_ASKER"):
+            return (
+                "[approved] 当前无人工确认通道，已按 "
+                f"{_NO_ASKER_ENV}=1 的显式配置放行。"
+            )
+        return (
+            "[denied] 当前环境没有人工确认通道，为安全起见按未获批准处理。"
+            "请向用户说明方案让其自行执行，或在支持确认的界面中重试。"
+        )
     try:
         ok = asker(text)
     except Exception:  # noqa: BLE001 —— 询问桥故障时按拒绝处理更安全

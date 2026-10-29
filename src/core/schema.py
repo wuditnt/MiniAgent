@@ -16,6 +16,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
+import types
 import typing
 
 # Python 类型 -> JSON Schema 类型
@@ -64,7 +65,8 @@ def json_type(annotation: object) -> str | None:
     # 字符串注解：Optional[str] / str | None / List[int] ...
     if isinstance(annotation, str):
         s = annotation.strip()
-        s = re.sub(r"^typing\.", "", s)
+        # 去掉所有 typing. 前缀（不限于最外层：Optional[typing.List[int]] 的内层也要剥）
+        s = re.sub(r"typing\.", "", s)
         s = re.sub(r"\s*\|\s*None\s*$", "", s)      # X | None -> X
         s = re.sub(r"^Optional\[(.*)\]$", r"\1", s)  # Optional[X] -> X
         # 去掉容器参数：List[int] -> List
@@ -72,7 +74,8 @@ def json_type(annotation: object) -> str | None:
         return _STR_TO_JSON.get(s)
 
     origin = typing.get_origin(annotation)
-    if origin is typing.Union:  # Optional[X]
+    # Optional[X]（typing.Union）与 PEP 604 的 X | None（types.UnionType）都要处理
+    if origin is typing.Union or origin is types.UnionType:
         args = [a for a in typing.get_args(annotation) if a is not type(None)]
         return json_type(args[0]) if args else None
     if origin in (list, tuple, set, frozenset):
@@ -190,13 +193,17 @@ def merge_params(auto: dict, override: dict | None, required_override: list | No
             result["required"] = list(required_override)
         return result
 
-    # 旧写法：直接给完整 schema
+    # 旧写法：直接给完整 schema —— 除 properties/required 之外的键（title、
+    # description、additionalProperties 等）也要原样带上，required_override 优先。
     if override.get("type") == "object" and "properties" in override:
-        return {
-            "type": "object",
-            "properties": dict(override["properties"]),
-            "required": list(override.get("required", [])),
-        }
+        result = dict(override)
+        result["properties"] = dict(override["properties"])
+        result["required"] = (
+            list(required_override)
+            if required_override is not None
+            else list(override.get("required", []))
+        )
+        return result
 
     properties: dict[str, dict] = {}
     required: list[str] = []

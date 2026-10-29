@@ -328,7 +328,7 @@ export default function App({
     ),
   });
 
-  /** 把待答卡片折叠进它所在的助手气泡；无答案（超时/停止）标记为失效 */
+  /** 把待答卡片折叠进它所在的助手气泡；无答案（停止/断连）标记为失效 */
   const foldAsk = (asstId: string, answer?: string) => {
     const cur = askRef.current;
     if (!cur) return;
@@ -1088,7 +1088,6 @@ export default function App({
           onAnswerAsk={handleAnswerAsk}
           confirm={confirm}
           onAnswerConfirm={handleAnswerConfirm}
-          confirmTimeout={state?.confirm_timeout ?? 120}
           models={models}
           providerNames={providerNames}
           activeModelId={effModelId || undefined}

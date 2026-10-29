@@ -16,6 +16,7 @@ import sys
 import traceback
 from dataclasses import dataclass, field
 
+from core import envs
 from core.logging_setup import get_logger
 from core.registry import REGISTRY, ToolRegistry, use_registry
 
@@ -32,9 +33,9 @@ def default_dirs() -> list[str]:
 
     设 AGENT_NO_PLUGINS=1 可完全关闭插件加载（调试核心循环时有用）。
     """
-    if os.environ.get("AGENT_NO_PLUGINS") == "1":
+    if envs.get_bool("MINI_AGENT_NO_PLUGINS", False, alias="AGENT_NO_PLUGINS"):
         return []
-    raw = os.environ.get("AGENT_PLUGIN_DIRS", "").strip()
+    raw = envs.get_str("MINI_AGENT_PLUGIN_DIRS", alias="AGENT_PLUGIN_DIRS")
     if not raw:
         return list(DEFAULT_PLUGIN_DIRS)
     return [d.strip() for d in raw.replace(";", ",").split(",") if d.strip()]
@@ -135,6 +136,10 @@ class PluginLoader:
     def _import(self, module_name: str, report: LoadReport) -> None:
         self._ensure_on_path()
         importlib.invalidate_caches()
+        # 重载前先把旧工具摘下来（否则同名注册会撞车），但留一份快照：
+        # 重载失败（语法错 / 导入期异常）时要把它们原样装回去 ——
+        # 一次失败的 /reload 不该把插件的能力整片清空。
+        snapshot = [t for t in self.registry.all() if t.module == module_name]
         try:
             # 关键：在导入/重载期间把默认注册表切到 self.registry，
             # 插件里的 `@tool` 才会注册进我们指定的注册表。
@@ -149,10 +154,23 @@ class PluginLoader:
             self._loaded[module_name] = module
             self._record(module_name, report)
         except Exception as e:  # noqa: BLE001 —— 插件炸了不能带走主程序
+            self._restore(module_name, snapshot)
             tb = traceback.format_exc().strip().splitlines()
             report.failed[module_name] = f"{type(e).__name__}: {e}"
             self._last_traceback = "\n".join(tb)
             _log.error("plugin.load_failed module=%s\n%s", module_name, self._last_traceback)
+
+    def _restore(self, module_name: str, tools: list) -> None:
+        """把重载前的旧工具装回去（只在本模块已被注册表接纳时生效）。"""
+        if not tools:
+            return
+        for t in tools:
+            try:
+                self.registry.add(t)
+            except ValueError:
+                # 重载过程中已经注册出同名工具（半成功）→ 以新的为准
+                continue
+        _log.warning("plugin.reload_restored module=%s tools=%d", module_name, len(tools))
 
     # ------------------------------------------------------------ 热重载
 
@@ -165,6 +183,9 @@ class PluginLoader:
         for gone in [m for m in self._loaded if m not in on_disk]:
             self.registry.remove_module(gone)
             self._loaded.pop(gone, None)
+            # 同时清掉 sys.modules：否则用户把同名文件加回来时，_import 会拿到
+            # 上一次的旧模块对象（既不重新执行文件，也不注册新工具）。
+            sys.modules.pop(gone, None)
             report.removed.append(gone)
 
         targets = [module_name] if module_name else sorted(on_disk)

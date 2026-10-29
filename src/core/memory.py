@@ -88,7 +88,14 @@ _lock = threading.RLock()
 # ---------------------------------------------------------------- 路径
 
 def _norm(path: str) -> str:
-    return os.path.normcase(os.path.abspath(path))
+    """保护区判定的归一化：解析符号链接 + 统一大小写。
+
+    · realpath：工作区里一个指向 .memory 的链接、或 .memory 内部指向外的链接，
+      只有解析链接后才判得准；
+    · casefold：normcase 在 POSIX 上是空操作，而 macOS 默认文件系统不区分大小写，
+      `.MEMORY/project.md` 会真的打开同一批文件。多判一些只是在多隐藏，安全方向。
+    """
+    return os.path.normcase(os.path.realpath(os.path.expanduser(path))).casefold()
 
 
 def memory_dir(workspace: str | None = None) -> str:

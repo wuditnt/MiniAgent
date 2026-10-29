@@ -50,30 +50,33 @@ PKG = os.path.join(SRC, "core")
 
 # (文件名, 说明, 是否需要 API Key) —— 路径相对于本文件所在的 tests/
 #
-# 免费用例 15 个 + 真实用例 1 个。真实用例默认跳过（加 --real 才跑，会消耗 token）。
+# 免费用例 22 个 + 真实用例 1 个。真实用例默认跳过（加 --real 才跑，会消耗 token）。
 # 关于真实用例只有一个：它的价值是「端到端验真」—— 真模型 + 真 MCP 子进程，
 # 一次性覆盖「本端立刻停 + 通知真的发出去 + 服务端真的收手」这条完整链路，
 # 比拆成两个半覆盖的用例更省 token，也不会有「两个都跑一半」的重复开销。
 SUITES: list[tuple[str, str, bool]] = [
     ("test_loop.py", "循环层 6 项：假客户端，不碰网络", False),
-    ("test_plugins.py", "插件层 + MCP 层 11 项", False),
+    ("test_plugins.py", "插件层 + MCP 层 12 项", False),
     ("test_skills.py", "技能层 9 项：frontmatter / 加载 / 冲突 / 热重载 / use_skill / 来源分类 / 消息解析 / 本轮注入", False),
     ("test_vision.py", "图片输入 5 项：嗅探 / 附件通道 / 拒绝 / 循环集成", False),
     ("test_stream_parallel.py", "流式聚合 + 并行执行 + MCP 并发 19 项", False),
-    ("test_cancel.py", "取消机制 10 项：令牌 / 杀进程 / 流中断 / 消息补齐 / 原因送达", False),
+    ("test_cancel.py", "取消机制 11 项：令牌 / 杀进程 / 组隔离 / 流中断 / 消息补齐 / 原因送达", False),
     ("test_mcp_cancel.py", "MCP 取消通知 8 项：送达 / 停手 / 迟到响应 / 幂等 / 定向", False),
     ("test_http_e2e.py", "本地 mock HTTP（支持 SSE）：流式三条降级路径 + 并行收益", False),
-    ("test_webui.py", "Web UI 端到端 17 项：SSE 事件序列 / 双模式工具表 / 轨迹回放 / 停止 / 确认 / 409 / 用户指令记忆 / keep-alive", False),
+    ("test_robustness.py", "健壮性回归 4 项：迁移不覆盖 / NaN 配置 / 工作区路径校验 / MCP 非对象 JSON", False),
+    ("test_webui.py", "Web UI 端到端 22 项：SSE 事件序列 / 双模式工具表 / 轨迹回放 / 停止 / 确认 / 409 / 用户指令记忆 / 重启后会话模型恢复 / keep-alive / 接口兜底与限权", False),
     ("test_sys_monitor.py", "系统监控插件 8 项：CPU / 内存 / 磁盘 / 网络 / 开机时长 / 端口占用", False),
     ("test_memory.py", "记忆系统 15 项：存储 / 保护区 / 工具不可见 / prelude / shell / 注入 / 分级淘汰 / 提炼过滤 / 检索合并 / 显式指令", False),
     ("test_logging.py", "文件日志 6 项：按日目录 / 错误聚合 / 幂等重配 / 关闭 / 配置 / 清理", False),
     ("test_workbench.py", "工作台文件接口 9 项：目录 / 安全 / 编码 / 图片 / HTML / MHTML", False),
-    ("test_events.py", "事件流 8 项：只追加 / 请求可重建 / 裁剪留痕 / 开关 / 兜底", False),
-    ("test_model_config.py", "推理等级通用化 8 项：厂家 spec（low/high/max）/ 三种参数风格与 values 重映射 / 迁移 / 会话解析", False),
+    ("test_events.py", "事件流 10 项：只追加 / 请求可重建 / 正文不截断 / 裁剪留痕 / 开关 / 兜底 / 非法 id", False),
+    ("test_model_config.py", "模型配置 10 项：厂家 spec（low/high/max）/ 三种参数风格与 values 重映射 / 迁移 / 会话解析 / 地址协议校验 / 密钥文件权限", False),
     ("test_web_search.py", "联网搜索 3 项：后端选择 / DeepSeek Key 复用 / 请求与解析", False),
-    ("test_auth.py", "登录与账号 9 项：建库 / 默认超管 / 哈希 / 会话 / 限流 / 保护规则 / 改密 / 写入节流", False),
+    ("test_auth.py", "登录与账号 10 项：建库 / 默认超管 / 哈希 / 会话 / 限流 / 保护规则 / 已禁用超管降级 / 改密 / 写入节流", False),
     ("test_net_tools.py", "网络工具 4 项：云端/本地分派 / 失败回退 / 协议校验 / Fetch 请求解析", False),
-    ("test_ask.py", "内联提问 12 项：返回协议 / 选项规范化 / 工具契约 / 等待桥", False),
+    ("test_ask.py", "内联提问 16 项：返回协议 / 选项规范化 / 工具契约 / 等待桥 / 关闭 UI 不阻塞", False),
+    ("test_approval.py", "审批默认值 4 项：无通道默认拒绝 / 显式 opt-in / 批准拒绝 / 桥故障", False),
+    ("test_concurrency.py", "并发与全局状态 4 项：询问通道隔离 / copy_context 传播 / 注册表切换 / 配置并发写", False),
     ("test_real_mcp_cancel.py", "真实模型 + 真 MCP server：取消通知全链路", True),
 ]
 
@@ -83,7 +86,7 @@ def _env() -> dict[str, str]:
 
     三件事必须做对，否则测试会莫名其妙地失败：
 
-    1. AGENT_WORKSPACE 指向项目根 —— 沙箱根目录。不设的话它会取
+    1. MINI_AGENT_WORKSPACE 指向项目根 —— 沙箱根目录。不设的话它会取
        os.getcwd()，从别的目录调用 run_tests.py 就会「路径越界」。
     2. sys.executable 必须是最外层解释器，所以要让它一路传到底：
        测试进程用 sys.executable 拉起 mcp 子进程；
@@ -95,7 +98,7 @@ def _env() -> dict[str, str]:
        `from core import ...` / `import tools` 这些裸模块名写法。
     """
     env = os.environ.copy()
-    env["AGENT_WORKSPACE"] = ROOT
+    env["MINI_AGENT_WORKSPACE"] = ROOT
     env["MINI_AGENT_ROOT"] = ROOT
     env["MINI_AGENT_PYTHON"] = sys.executable
     # 子进程输出别用花哨编码，Windows 控制台容易看不懂
@@ -177,10 +180,15 @@ def main() -> int:
         print("没有匹配的套件。用 --list 看看有哪些。")
         return 2
 
-    has_key = bool(os.environ.get("OPENAI_API_KEY"))
+    try:
+        import core.model_config as _mc
+
+        has_key = bool(_mc.resolve_active().get("api_key"))
+    except Exception:
+        has_key = False
     print(f"解释器：{sys.executable}")
     print(f"项目根：{ROOT}")
-    print(f"工作区：{os.environ.get('AGENT_WORKSPACE', ROOT)}")
+    print(f"工作区：{os.environ.get('MINI_AGENT_WORKSPACE') or os.environ.get('AGENT_WORKSPACE', ROOT)}")
     print(f"套件数：{len(selected)}"
           f"{'' if args.real else '（免费用例；加 --real 可包含真实 API 用例）'}")
     skipped = [n for n, _d, need in SUITES if need and not args.real]
@@ -218,7 +226,7 @@ def main() -> int:
     if passed != total:
         print("\n失败详情见上方各套件的完整输出。")
         if not has_key:
-            print("提示：真实 API 用例需要 .env 里的 OPENAI_API_KEY。")
+            print("提示：真实 API 用例需要先在 Web UI 配置模型（models.json）。")
         return 1
     print("\n全部通过 ✓")
     return 0

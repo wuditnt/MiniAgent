@@ -27,14 +27,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import bootstrap  # noqa: F401  —— 必须最先导入：铺 sys.path + 定工作区
 from bootstrap import PACKAGE_ROOT as HERE
 
-os.environ["AGENT_WORKSPACE"] = HERE
-os.environ["OPENAI_API_KEY"] = "mock-key-not-real"
-os.environ["OPENAI_MODEL"] = "mock-gpt"
+os.environ["MINI_AGENT_WORKSPACE"] = HERE
 PORT = 8771
-os.environ["OPENAI_BASE_URL"] = f"http://127.0.0.1:{PORT}/v1"
 
 # 隔离模型配置：若本机 web_data/models.json 里有用户保存的服务商，
-# 它会盖过环境变量，导致本测试打到真实接口。这里强制走环境变量（mock 服务）。
+# 会打到真实接口。这里指到临时文件，并造一条指向本文件 mock 服务的记录。
 import tempfile  # noqa: E402
 
 import core.model_config as _model_config  # noqa: E402
@@ -42,6 +39,14 @@ import core.model_config as _model_config  # noqa: E402
 _model_config._MODELS_FILE = os.path.join(
     tempfile.mkdtemp(prefix="miniagent-e2e-"), "models.json"
 )
+_mock = _model_config.create_entry(
+    provider="custom",
+    name="mock",
+    base_url=f"http://127.0.0.1:{PORT}/v1",
+    api_key="mock-key-not-real",
+    model="mock-gpt",
+)
+_model_config.set_active(_mock["id"])
 
 # ---------------------------------------------------------------- mock 模型策略
 # 一个「确定性脚本」：根据已发生的工具调用次数，决定下一步调哪个工具。

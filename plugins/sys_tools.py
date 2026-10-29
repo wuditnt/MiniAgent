@@ -130,10 +130,10 @@ def list_processes(keyword: str = "", limit: int = 50) -> str:
 )
 def env_info() -> str:
     keys = [
-        "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL",
-        "AGENT_WORKSPACE", "AGENT_NO_PLUGINS", "AGENT_PLUGIN_DIRS",
-        "AGENT_NO_SKILLS", "AGENT_SKILL_DIRS", "AGENT_STREAM",
-        "AGENT_PARALLEL", "AGENT_MAX_WORKERS", "AGENT_MAX_OUTPUT",
+        "MINI_AGENT_HOST", "MINI_AGENT_PORT",
+        "MINI_AGENT_WORKSPACE", "MINI_AGENT_NO_PLUGINS", "MINI_AGENT_PLUGIN_DIRS",
+        "MINI_AGENT_NO_SKILLS", "MINI_AGENT_SKILL_DIRS", "MINI_AGENT_STREAM",
+        "MINI_AGENT_PARALLEL", "MINI_AGENT_MAX_WORKERS", "MINI_AGENT_MAX_OUTPUT",
     ]
     out = []
     for k in keys:

@@ -198,7 +198,7 @@ python -m mini_agent --workers 8          # 最多 8 个工具同时跑
 ```
 
 控制台里：`/stream on|off`、`/parallel on|off`、`/workers 8`。
-环境变量 `AGENT_STREAM` / `AGENT_PARALLEL` / `AGENT_MAX_WORKERS`。
+环境变量 `MINI_AGENT_STREAM` / `MINI_AGENT_PARALLEL` / `MINI_AGENT_MAX_WORKERS`（旧名 `AGENT_*` 仍可读）。
 
 ---
 

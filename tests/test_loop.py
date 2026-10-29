@@ -11,8 +11,6 @@ import os
 
 import bootstrap  # noqa: F401  —— 必须最先导入：铺 sys.path + 定工作区
 
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-
 import agent as agent_mod  # noqa: E402
 
 
@@ -200,15 +198,18 @@ def test_context_window_keeps_tool_pairing():
     print("✓ 上下文：滑动窗口不会破坏 tool_calls/tool 配对")
 
 
-def test_max_turns_wrapup_appends_summary_into_one_bubble():
-    """轮数用尽：额外一次「不带工具」的收尾调用，把失败原因总结并入最终回答。
+def test_max_turns_wrapup_starts_new_bubble():
+    """轮数用尽：收尾总结必须另起一条 assistant 消息，不能改写上一轮回答。
 
-    关键约束（用户诉求）：整轮任务在展示上只算一个回复气泡 —— 收尾文字必须并进
-    最后一条 assistant 回答，而不是另起一条 assistant 消息，否则会裂成两个气泡。
+    回归点：历史末尾是「content 为空 + tool_calls」的 assistant 与工具结果，
+    反向扫描找「最后一条有正文的 assistant」会越过它们，把收尾塞进早已结束的
+    上一轮回答里（改旧轮语义、展示串轮）。所以只许追加，不许改写。
     """
     script = [
-        _Msg(tool_calls=[_TC(1, "list_dir", '{"path": "."}')]),      # 第 1 轮：调工具
-        _Msg(tool_calls=[_TC(2, "list_dir", '{"path": "."}')]),      # 第 2 轮：又调工具
+        _Msg(content="我先看看目录。",
+             tool_calls=[_TC(1, "list_dir", '{"path": "."}')]),      # 第 1 轮：正文 + 工具
+        _Msg(content="再看一层。",
+             tool_calls=[_TC(2, "list_dir", '{"path": "."}')]),      # 第 2 轮：正文 + 工具
         _Msg(content="结论：已完成 A；未完成 B，原因为轮数不够。",       # 收尾轮：总结
              usage=type("U", (), {"prompt_tokens": 3, "completion_tokens": 2,
                                   "total_tokens": 5})()),
@@ -219,9 +220,10 @@ def test_max_turns_wrapup_appends_summary_into_one_bubble():
 
     assert "已达最大轮次（2 轮），任务未完成" in out, out
     assert "结论：已完成 A" in out, out
-    # 收尾并进了最后一条 assistant：assistant 消息数 = 2 轮工具 + 1 条合成回答
-    assert a.messages[-1]["role"] == "assistant"
-    assert a.messages[-1]["content"] == out
+    # 收尾是末尾新增的一条 assistant：旧的两轮回答内容必须原样保留
+    assert a.messages[-1] == {"role": "assistant", "content": out}, a.messages[-1]
+    earlier = [m["content"] for m in a.messages if m["role"] == "assistant"][:-1]
+    assert earlier == ["我先看看目录。", "再看一层。"], earlier
     assert sum(1 for m in a.messages if m["role"] == "assistant") == 3, a.messages
     # 收尾提示只服务于那一次调用，不能留在历史里（否则会被当成用户说过的话）
     assert not any(m.get("_injected") == "max_turns_wrapup" for m in a.messages)
@@ -232,7 +234,7 @@ def test_max_turns_wrapup_appends_summary_into_one_bubble():
     assert a.usage["llm_calls"] == 3, a.usage
     # 收尾那次调用的用量也计入本轮统计（README 承诺）
     assert a.usage["total_tokens"] == 5, a.usage
-    print("✓ 触顶收尾：一次无工具调用生成总结，并入最终回答（单气泡）")
+    print("✓ 触顶收尾：一次无工具调用生成总结，另起一条 assistant（不改写旧轮）")
 
 
 def test_max_turns_wrapup_falls_back_when_call_fails():
@@ -319,7 +321,7 @@ if __name__ == "__main__":
     test_context_summary_rolls_and_keeps_recent()
     test_context_hard_window_when_summary_fails()
     test_context_window_keeps_tool_pairing()
-    test_max_turns_wrapup_appends_summary_into_one_bubble()
+    test_max_turns_wrapup_starts_new_bubble()
     test_max_turns_wrapup_falls_back_when_call_fails()
     test_extract_hands_model_title_to_ui()
     test_binary_file_is_not_force_decoded()

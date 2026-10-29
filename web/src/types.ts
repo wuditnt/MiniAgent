@@ -107,7 +107,7 @@ export interface AskRecord {
   multi: boolean;
   /** 用户答案；空 = 未回答 */
   answer?: string;
-  /** true = 超时 / 停止任务导致的失效 */
+  /** true = 停止任务 / 连接断开导致的失效（本系统不设超时） */
   expired?: boolean;
 }
 
@@ -142,7 +142,6 @@ export interface AgentState {
   workspace: string;
   tools: number;
   search_backend: string;
-  confirm_timeout: number;
   max_context_chars?: number;
   sessions: { id: string; busy: boolean }[];
   /** true = 当前客户端是远程访问（非回环地址），主机配置类操作被后端禁用 */

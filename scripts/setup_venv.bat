@@ -51,10 +51,10 @@ echo ==^> installing this project (optional, provides the mini-agent command)
 "%PY%" -m pip install -e "%ROOT%" -q
 if errorlevel 1 echo [i] editable install failed; running from source still works
 
-REM ---- .env: create from template if missing, so the first run has a key slot ----
+REM ---- .env: create from template if missing (system config only; model goes in Web UI) ----
 if not exist "%ROOT%\.env" if exist "%ROOT%\.env.example" (
   copy /y "%ROOT%\.env.example" "%ROOT%\.env" >nul
-  echo [i] created .env from .env.example - fill in OPENAI_API_KEY
+  echo [i] created .env from .env.example (listen address / port)
 )
 
 echo ==^> tool-layer self-test (no API key needed)
@@ -62,7 +62,7 @@ echo ==^> tool-layer self-test (no API key needed)
 
 echo.
 echo ==^> done. Next steps:
-echo     1) edit .env and fill in OPENAI_API_KEY
+echo     1) start --web and configure the model in Settings -^> Models (API key stays in local models.json)
 echo     2) dev: startup_dev.bat   prod: startup.bat
 echo     3) or run: .venv\Scripts\python.exe src\core\main.py --web
 goto :eof

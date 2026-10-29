@@ -9,40 +9,49 @@
 
 from __future__ import annotations
 
+import contextvars
 import os
 import re
 import subprocess
 import sys
 import time
 
+from . import envs
 from ._paths import DEFAULT_WORKSPACE
 from .cancel import current_token, kill_tree
 
 # ---------------------------------------------------------------- 可调参数
 
-# 没设 AGENT_WORKSPACE 时的兜底。为什么不是 os.getcwd()？
+# 没设 MINI_AGENT_WORKSPACE 时的兜底。为什么不是 os.getcwd()？
 #   因为 cwd 取决于「用户在哪敲的命令」，而从任意目录跑 `python -m core`
 #   都是合法用法。锚到 DEFAULT_WORKSPACE（用户数据目录），行为才可预测。
-#   （测试通过 AGENT_WORKSPACE 把它指回项目根，好让 demo_case/ 里的用例生效。）
-_WORKSPACE = os.path.abspath(os.environ.get("AGENT_WORKSPACE") or DEFAULT_WORKSPACE)
-MAX_OUTPUT_CHARS = int(os.environ.get("AGENT_MAX_OUTPUT", "8000"))
-ALLOW_DANGEROUS = os.environ.get("AGENT_ALLOW_DANGEROUS") == "1"
+#   （测试通过 MINI_AGENT_WORKSPACE 把它指回项目根，好让 demo_case/ 里的用例生效。）
+#
+# 用 ContextVar 而不是模块全局：Web 层每个会话一个 worker 线程，
+# 并发会话各用各的工作区根；并行工具线程由 agent 用 copy_context 传播。
+_WORKSPACE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "agent_workspace",
+    default=os.path.abspath(
+        envs.get_str("MINI_AGENT_WORKSPACE", alias="AGENT_WORKSPACE") or DEFAULT_WORKSPACE
+    ),
+)
+MAX_OUTPUT_CHARS = envs.get_int("MINI_AGENT_MAX_OUTPUT", 8000, alias="AGENT_MAX_OUTPUT")
+ALLOW_DANGEROUS = envs.get_bool("MINI_AGENT_ALLOW_DANGEROUS", False, alias="AGENT_ALLOW_DANGEROUS")
 
-# 兼容老写法：`tools.WORKSPACE`（导入时快照）
-WORKSPACE = _WORKSPACE
+# 兼容老写法：`tools.WORKSPACE`（导入时快照，运行期切换不会改它）
+WORKSPACE = _WORKSPACE.get()
 
 
 def workspace() -> str:
-    """当前工作区根目录 —— 唯一可信来源。"""
-    return _WORKSPACE
+    """当前工作区根目录 —— 唯一可信来源（按运行上下文隔离）。"""
+    return _WORKSPACE.get()
 
 
 def set_workspace(path: str) -> str:
-    """运行时切换工作区。请在加载插件之前调用。"""
-    global _WORKSPACE, WORKSPACE
-    _WORKSPACE = os.path.abspath(path)
-    WORKSPACE = _WORKSPACE
-    return _WORKSPACE
+    """切换当前上下文的工作区（只影响本线程/本 run）。"""
+    ap = os.path.abspath(path)
+    _WORKSPACE.set(ap)
+    return ap
 
 
 def set_max_output_chars(n: int) -> int:
@@ -81,16 +90,31 @@ def read_mode() -> str:
     return _READ_MODE
 
 
+def _real(p) -> str:
+    """把路径规范化成「可比较的真实路径」：展开 ~ 、解析符号链接、按系统规则统一大小写。
+
+    为什么必须 realpath：abspath 只是字符串折叠 —— 工作区里放一个指向外部的
+    符号链接，abspath 结果仍在工作区前缀内，边界判定就整个失效了。
+    realpath 不要求路径存在（不存在的尾部按字面保留），新建文件同样可判定。
+    """
+    return os.path.normcase(os.path.realpath(os.path.expanduser(os.fspath(p))))
+
+
+def _under(t: str, r: str) -> bool:
+    """t 是否等于 r 或位于 r 之下；按目录边界比较，避免 `ws` 误配 `ws-evil`。"""
+    if t == r:
+        return True
+    return t.startswith(r if r.endswith(os.sep) else r + os.sep)
+
+
 def _within(target: str, root: str) -> bool:
-    """target 是否等于 root 或位于 root 之内（大小写按操作系统规范化）。"""
-    t = os.path.normcase(os.path.abspath(target))
-    r = os.path.normcase(os.path.abspath(root))
-    return t == r or t.startswith(r + os.sep)
+    """target 是否等于 root 或位于 root 之内（解析符号链接后比较）。"""
+    return _under(_real(target), _real(root))
 
 
 def _whitelisted(ap: str) -> bool:
-    target = os.path.normcase(os.path.abspath(ap))
-    return any(target == w or target.startswith(w + os.sep) for w in _READ_WHITELIST)
+    target = _real(ap)
+    return any(_under(target, _real(w)) for w in _READ_WHITELIST)
 
 
 # ---------------------------------------------------------------- 路径沙箱
@@ -105,7 +129,7 @@ def _protected(ap: str) -> bool:
     延迟导入避免 sandbox ↔ memory 模块循环；memory 自身不依赖 sandbox 运行期状态。
     """
     from .memory import is_memory_path
-    return is_memory_path(ap, _WORKSPACE)
+    return is_memory_path(ap, workspace())
 
 
 def safe_path(p: str) -> str:
@@ -116,10 +140,11 @@ def safe_path(p: str) -> str:
     工作区内的系统保护区（.memory）在两个通道里都不可访问 —— 记忆只能由
     core.memory 模块自己读写。
     """
-    raw = p if os.path.isabs(p) else os.path.join(_WORKSPACE, p)
+    ws = workspace()
+    raw = p if os.path.isabs(p) else os.path.join(ws, p)
     ap = os.path.abspath(raw)
-    if not _within(ap, _WORKSPACE):
-        raise SandboxError(f"路径越界：{ap} 不在工作区 {_WORKSPACE} 内")
+    if not _within(ap, ws):
+        raise SandboxError(f"路径越界：{ap} 不在工作区 {ws} 内")
     if _protected(ap):
         raise PermissionError(f".memory 是系统记忆目录，禁止工具访问：{ap}")
     return ap
@@ -132,9 +157,10 @@ def read_path(p: str) -> str:
       · 工作区外：strict 拦截 / whitelist 仅白名单 / open 全部只读放开。
     返回解析后的绝对路径；越界时抛 SandboxError。
     """
-    raw = p if os.path.isabs(p) else os.path.join(_WORKSPACE, p)
+    ws = workspace()
+    raw = p if os.path.isabs(p) else os.path.join(ws, p)
     ap = os.path.abspath(raw)
-    if _within(ap, _WORKSPACE):
+    if _within(ap, ws):
         if _protected(ap):
             raise PermissionError(f".memory 是系统记忆目录，禁止工具访问：{ap}")
         return ap
@@ -144,10 +170,10 @@ def read_path(p: str) -> str:
         return ap
     if _READ_MODE == "whitelist":
         raise SandboxError(
-            f"路径越界：{ap} 不在工作区 {_WORKSPACE} 或只读白名单内"
+            f"路径越界：{ap} 不在工作区 {ws} 或只读白名单内"
         )
     raise SandboxError(
-        f"路径越界：{ap} 不在工作区 {_WORKSPACE} 内"
+        f"路径越界：{ap} 不在工作区 {ws} 内"
         f"（沙箱外默认只读关闭，可在「通用配置」放开白名单/只读模式）"
     )
 
@@ -159,9 +185,10 @@ def assert_can_write(p: str) -> str:
     错误信息面向「脚本越权」场景。返回规范化绝对路径。
     """
     ap = os.path.abspath(os.path.expanduser(p))
-    if not _within(ap, _WORKSPACE):
+    ws = workspace()
+    if not _within(ap, ws):
         raise PermissionError(
-            f"沙箱外路径只读，禁止写入/删除：{ap}（工作区 {_WORKSPACE}）"
+            f"沙箱外路径只读，禁止写入/删除：{ap}（工作区 {ws}）"
         )
     if _protected(ap):
         raise PermissionError(f".memory 是系统记忆目录，禁止写入/删除：{ap}")
@@ -194,14 +221,28 @@ def read_bytes(path: str, max_bytes: int = 4 * 1024 * 1024) -> bytes:
         return f.read(max_bytes)
 
 
+#: UTF-16 字节序标记（LE / BE）—— 用于把「夹着 NUL 的文本」和真二进制区分开。
+_UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
+
+
 def looks_binary(data: bytes) -> bool:
-    """含 NUL 字节基本就判定为二进制。"""
+    """含 NUL 字节基本就判定为二进制；带 UTF-16 BOM 的文本除外（NUL 是编码产物）。"""
+    if data.startswith(_UTF16_BOMS):
+        return False
     return b"\x00" in data[:8192]
 
 
 def decode_bytes(data: bytes) -> tuple[str, str]:
-    """按 UTF-8 → GBK → Latin-1 顺序尝试解码，返回 (文本, 实际编码)。"""
-    for enc in ("utf-8-sig", "gbk", "latin-1"):
+    """按 UTF-8 → UTF-16(BOM) → GBK → Latin-1 顺序尝试解码，返回 (文本, 实际编码)。
+
+    Windows 上不少老工具（配置生成器、记事本「Unicode」）会写出 UTF-16 LE + BOM，
+    这类文件每个字符都夹着 0x00，如果不先按 BOM 识别，会被当成二进制而无法预览。
+    """
+    encodings = ["utf-8-sig"]
+    if data.startswith(_UTF16_BOMS):
+        encodings.append("utf-16")
+    encodings += ["gbk", "latin-1"]
+    for enc in encodings:
         try:
             return data.decode(enc), enc
         except UnicodeDecodeError:
@@ -245,7 +286,7 @@ def check_command(command: str) -> str | None:
         if re.search(pat, command, re.I):
             return (
                 f"该命令命中危险模式 `{pat}`，已被拦截。\n"
-                f"确认要执行请设置环境变量 AGENT_ALLOW_DANGEROUS=1 后重试。"
+                f"确认要执行请设置环境变量 MINI_AGENT_ALLOW_DANGEROUS=1 后重试。"
             )
     return None
 
@@ -259,37 +300,71 @@ _SHELL_WRITE_ALL = ("del", "erase", "rmdir", "rd", "move", "ren", "rename",
 _SHELL_WRITE_DST = ("copy", "xcopy", "robocopy", "cp", "mv")
 
 _PATH_TOKEN = re.compile(r'^([A-Za-z]:[\\/]|\\\\)')  # 盘符绝对路径 / UNC
-_REDIRECT = re.compile(r'(?<![\w\d])>{1,2}\s*("?)([^\s&|<>"]+)\1')
+# 重定向目标：允许引号包裹（路径可含空格），也允许 `echo x>/etc/passwd` 这种紧贴写法
+_REDIRECT = re.compile(r'>{1,2}\s*(?:"([^"]+)"|\'([^\']+)\'|([^\s&|<>"\' ]+))')
+# 语句分隔：&& || & | ; 与换行（原来只拆 & 系列，`;` 后的写动词整个被漏检）
+_STMT_SEP = re.compile(r"&&|\|\||[&|;\r\n]")
+# Windows 单字母开关（/F、/s、-f）：只在 Windows 下当开关，POSIX 的 /etc 是绝对路径
+_WIN_SWITCH = re.compile(r"^[/-][A-Za-z]$")
+
+
+def _strip_env_prefix(s: str) -> str:
+    """剥掉命令前的环境变量赋值（`FOO=bar rm -rf X` → `rm -rf X`）。
+
+    原来按 `=` 取首 token 会把动词认成 FOO，整句写操作检查直接跳过。
+    """
+    while True:
+        m = re.match(r"^\s*[\w.]+=[^\s]*\s+", s)
+        if not m:
+            return s
+        s = s[m.end():]
+
+
+def _clean_token(token: str) -> str:
+    """去掉引号与空白；`--output=PATH` 只保留 PATH，纯开关返回空串。"""
+    t = str(token).strip().strip('"').strip("'")
+    if not t:
+        return ""
+    if t.startswith("-"):
+        if "=" not in t:
+            return ""
+        t = t.split("=", 1)[1].strip().strip('"').strip("'")
+    return t
+
+
+def _looks_like_path(t: str) -> bool:
+    """是否可能是文件系统路径：绝对路径 / 盘符 / UNC / 含 ..。
+
+    普通相对名（`normal.txt`）锚定在 cwd=工作区，不可能越界，不算路径候选。
+    """
+    if not t:
+        return False
+    if os.name == "nt" and _WIN_SWITCH.match(t):
+        return False
+    return os.path.isabs(t) or bool(_PATH_TOKEN.match(t)) or ".." in t
+
+
+def _abs_token(t: str) -> str:
+    """token → 绝对路径：相对锚定工作区，并展开 ~ / 环境变量（$HOME、%USERPROFILE%）。"""
+    raw = t if (os.path.isabs(t) or _PATH_TOKEN.match(t)) else os.path.join(workspace(), t)
+    return os.path.abspath(os.path.expandvars(os.path.expanduser(raw)))
 
 
 def _token_escapes(token: str) -> bool:
-    """路径 token 是否写到工作区外。只识别绝对路径与含 .. 的相对路径，
-    普通相对路径（锚定 cwd=工作区）不会越界，不拦。"""
-    t = token.strip().strip('"')
-    if not t:
+    """路径 token 是否写到工作区外。"""
+    t = _clean_token(token)
+    if not _looks_like_path(t):
         return False
-    if t.startswith("-") or re.match(r"^/[A-Za-z]", t):
-        return False  # -f /F 之类的命令开关
-    if _PATH_TOKEN.match(t):
-        raw = t
-    elif ".." in t:
-        raw = os.path.join(_WORKSPACE, t)  # 相对路径只有含 .. 才可能逃逸
-    else:
-        return False
-    return not _within(os.path.abspath(raw), _WORKSPACE)
+    return not _within(_abs_token(t), workspace())
 
 
 def _token_hits_memory(token: str) -> bool:
     """路径 token 是否指向工作区的 .memory 保护区（相对/绝对都查）。"""
-    t = token.strip().strip('"')
-    if not t or t.startswith("-") or re.match(r"^/[A-Za-z]", t):
+    t = _clean_token(token)
+    if not t:
         return False
-    if _PATH_TOKEN.match(t):
-        raw = t
-    else:
-        raw = os.path.join(_WORKSPACE, t)
     from .memory import is_memory_path
-    return is_memory_path(os.path.abspath(raw), _WORKSPACE)
+    return is_memory_path(_abs_token(t), workspace())
 
 
 def check_command_write(command: str) -> str | None:
@@ -299,29 +374,29 @@ def check_command_write(command: str) -> str | None:
     拦不住 powershell -c、程序内部写文件等混淆形式 —— 与 run_python 护栏
     同属「提高随手绕过成本」，不是强隔离边界。
     """
-    # 1) 重定向目标（2>&1 这类目标是 &1，会被路径判定自然放过）
+    # 1) 重定向目标（2>&1 这类目标是 &1，正则本身就不会把它当路径）
     for m in _REDIRECT.finditer(command):
-        tok = m.group(2)
-        if tok in ("&1", "&2", "NUL", "/dev/null"):
+        tok = m.group(1) or m.group(2) or m.group(3) or ""
+        if tok in ("&1", "&2", "NUL", "nul", "/dev/null"):
             continue
         if _token_escapes(tok):
             return f"检测到重定向写入工作区外路径：{tok}（沙箱外只读，请改写到工作区内）"
         if _token_hits_memory(tok):
             return f"检测到重定向写入系统记忆目录：{tok}（.memory 受保护，禁止工具访问）"
 
-    # 2) 按 & 拆语句，看句首写动词
-    for stmt in re.split(r"&&|&|\|\|", command):
-        s = stmt.strip()
+    # 2) 按语句分隔符拆开，逐句看句首写动词
+    for stmt in _STMT_SEP.split(command):
+        s = _strip_env_prefix(stmt.strip())
         if not s:
             continue
-        head = re.split(r"[\s=]", s, 1)[0].strip('"').lower()
-        head = os.path.basename(head)  # 兼容 C:\Windows\System32\xcopy.exe 形态
+        head_raw = re.split(r"[\s=]", s, 1)[0].strip('"').lower()
+        head = os.path.basename(head_raw)  # 兼容 C:\Windows\System32\xcopy.exe 形态
         head = os.path.splitext(head)[0]
         if head not in _SHELL_WRITE_ALL and head not in _SHELL_WRITE_DST:
             continue
         # 粗分词：去引号，只保留像路径的 token（绝对路径 / 含 .. / .memory）
-        tokens = [t.strip('"') for t in re.split(r"\s+", s)[1:] if t.strip()]
-        path_like = [t for t in tokens if _PATH_TOKEN.match(t) or ".." in t]
+        tokens = [t.strip('"').strip("'") for t in re.split(r"\s+", s)[1:] if t.strip()]
+        path_like = [t for t in tokens if _looks_like_path(_clean_token(t))]
         if head in _SHELL_WRITE_DST and path_like:
             path_like = [path_like[-1]]  # copy/xcopy/robocopy：只管目标
         for tok in path_like:
