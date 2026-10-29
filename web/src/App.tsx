@@ -92,6 +92,9 @@ export default function App({
   const [state, setState] = useState<AgentState | null>(null);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [busy, setBusy] = useState(false);
+  // 「编辑重发」的目标消息 id：点击编辑只进入编辑态、不删任何内容，
+  // 真正替换旧轮次发生在用户再次发送时（见 send）。
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmInfo | null>(null);
   // 内联提问卡片：正在等用户作答的 ask_user 提问（回答/失效后折叠进助手气泡）
   const [ask, setAsk] = useState<PendingAsk | null>(null);
@@ -238,6 +241,7 @@ export default function App({
   useEffect(() => {
     localStorage.setItem(SESSION_KEY, session);
     setItems([]);
+    setEditingId(null);   // 切换会话时退出编辑态，避免把编辑目标带到别的会话
     fetchHistory(session)
       .then((h) => {
         setItems(
@@ -377,6 +381,25 @@ export default function App({
     const msg = text.trim();
     if (!msg && !(attachments && attachments.length)) return;
     if (busy) return;
+    // 编辑态下发送 = 用这条新内容替换旧轮次（旧 user 及之后全部截掉），
+    // 与「点击编辑」解耦：点错编辑但没发送，对话内容不会丢。
+    if (editingId) {
+      const idx = items.findIndex((it) => it.id === editingId);
+      setEditingId(null);
+      if (idx >= 0 && items[idx].role === "user") {
+        // keep = 该 user 消息之前所有非 notice 消息（不含这条 user 本身）
+        const keep = items.slice(0, idx).filter((it) => it.role !== "notice").length;
+        truncateSession(session, keep)
+          .then(() => {
+            setItems((prev) => prev.slice(0, idx));
+            send(msg, attachments, skipUserItem);
+          })
+          .catch((e: unknown) =>
+            message.error(e instanceof Error ? e.message : "编辑重发失败")
+          );
+        return;
+      }
+    }
     const asstId = `a-${Date.now()}`;
     curAsstRef.current = asstId;
     // 技能在消息里用不可见字符包裹：气泡只显示名字
@@ -547,17 +570,11 @@ export default function App({
       .catch((e: unknown) => message.error(e instanceof Error ? e.message : "重新生成失败"));
   };
 
-  /** 编辑重发：截掉该 user 消息及之后的内容，原文由 Chat 回填输入框 */
+  /** 编辑重发：先把原文回填输入框并进入编辑态（不删消息，取消即恢复原样） */
   const handleEditResend = (msgId: string) => {
     const idx = items.findIndex((it) => it.id === msgId);
     if (idx < 0 || items[idx].role !== "user") return;
-    // keep = 该 user 消息之前所有非 notice 消息（不含这条 user 本身）
-    const keep = items.slice(0, idx).filter((it) => it.role !== "notice").length;
-    truncateSession(session, keep)
-      .then(() => {
-        setItems((prev) => prev.slice(0, idx));
-      })
-      .catch((e: unknown) => message.error(e instanceof Error ? e.message : "编辑重发失败"));
+    setEditingId(msgId);
   };
 
   /** 开一个未落盘的草稿会话（前端先占位），真正聊天时才由后端落盘 */
@@ -1080,6 +1097,8 @@ export default function App({
           workspaceLocked={!!currentSession && currentSession.message_count > 0}
           onRegenerate={busy ? undefined : handleRegenerate}
           onEditResend={busy ? undefined : handleEditResend}
+          editing={!!editingId}
+          onCancelEdit={() => setEditingId(null)}
           onDelete={busy ? undefined : handleDeleteMessage}
           onTrajectory={() => openTrajectory(session)}
           contextUsage={contextUsage}

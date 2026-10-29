@@ -211,6 +211,31 @@ body,
   line-height: 1.7;
 }
 
+/* 「编辑历史消息」提示条：只提示，不删任何内容（取消即恢复原样） */
+.edit-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  border: 1px solid #ffe0b2;
+  border-radius: 8px;
+  background: #fff8e6;
+  color: #8a6100;
+  font-size: 12.5px;
+}
+
+.edit-banner-cancel {
+  margin-left: auto;
+  color: #1677ff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.edit-banner-cancel:hover {
+  text-decoration: underline;
+}
+
 .hint {
   text-align: center;
   color: #bbb;
@@ -534,6 +559,14 @@ body,
 
 .msg-toolbar-spacer {
   flex: 1;
+}
+
+/* 用户气泡的小工具栏：挂在 Bubble footer 上（气泡外侧），按钮复用 .msg-tool，
+   仅对齐与宽度按「贴着右侧气泡下沿」调整，保证和助手那排长得一样 */
+.msg-toolbar-user {
+  justify-content: flex-end;
+  min-width: 0;
+  margin-top: 0;
 }
 
 .msg-tool {

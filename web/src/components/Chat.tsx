@@ -463,8 +463,11 @@ interface Props {
   contextLimit?: number;
   /** 重新生成（assistant 消息）：截掉该条及之后的内容，重发对应的 user 消息 */
   onRegenerate?: (msgId: string) => void;
-  /** 编辑重发（user 消息）：截掉该条及之后的内容，把原文填回输入框 */
+  /** 编辑重发（user 消息）：把原文填回输入框并进入编辑态；发送时才替换旧轮次 */
   onEditResend?: (msgId: string) => void;
+  /** 是否处于编辑态（输入框上方提示，可取消） */
+  editing?: boolean;
+  onCancelEdit?: () => void;
   /** 删除消息：截掉该条及之后的内容 */
   onDelete?: (msgId: string) => void;
   /** 打开本会话的运行轨迹抽屉（P0 事实层） */
@@ -673,6 +676,8 @@ export default function Chat({
   workspaceLocked,
   onRegenerate,
   onEditResend,
+  editing,
+  onCancelEdit,
   onDelete,
   onTrajectory,
   contextUsage,
@@ -1060,30 +1065,32 @@ export default function Chat({
         <span id={`msg-${it.id}`}>
           {it.content}
           <AttachmentPreview attachments={it.attachments} workspaceId={workspaceId} />
-          {onEditResend && !busy && (
-            <div className="msg-toolbar" style={{ marginTop: 6 }}>
-              <Tooltip title="编辑重发">
-                <span
-                  className="msg-tool"
-                  onClick={() => {
-                    setInput(it.content);
-                    onEditResend(it.id);
-                  }}
-                >
-                  <EditOutlined />
-                </span>
-              </Tooltip>
-              {onDelete && (
-                <Tooltip title="删除此条及之后消息">
-                  <span className="msg-tool" onClick={() => onDelete(it.id)}>
-                    <DeleteOutlined />
-                  </span>
-                </Tooltip>
-              )}
-            </div>
-          )}
         </span>
       ),
+      // 小工具栏放气泡下方（Bubble 的 footer），而不是塞进蓝色气泡里：
+      // 这样按钮尺寸、颜色、hover 与助手气泡下方那排完全一致。
+      footer: onEditResend && !busy ? (
+        <div className="msg-toolbar msg-toolbar-user">
+          <Tooltip title="编辑重发">
+            <span
+              className="msg-tool"
+              onClick={() => {
+                setInput(it.content);
+                onEditResend(it.id);
+              }}
+            >
+              <EditOutlined />
+            </span>
+          </Tooltip>
+          {onDelete && (
+            <Tooltip title="删除此条及之后消息">
+              <span className="msg-tool" onClick={() => onDelete(it.id)}>
+                <DeleteOutlined />
+              </span>
+            </Tooltip>
+          )}
+        </div>
+      ) : undefined,
     };
   }), [
     items,
@@ -1118,6 +1125,21 @@ export default function Chat({
       </div>
       <div className="composer">
         <div className="composer-inner">
+          {editing && (
+            <div className="edit-banner">
+              <EditOutlined />
+              <span>正在编辑历史消息：发送后才会替换该轮及其之后的对话</span>
+              <span
+                className="edit-banner-cancel"
+                onClick={() => {
+                  setInput("");
+                  onCancelEdit?.();
+                }}
+              >
+                取消编辑
+              </span>
+            </div>
+          )}
           <div className="composer-body">
           <div className="composer-top">
             <WorkspaceChip

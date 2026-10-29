@@ -307,6 +307,7 @@ class Agent:
         # 上一轮 run() 的最终回答是否已经「边生成边打印」过了。
         # 控制台/一次性模式据此决定要不要再 print 一遍，避免同一段文字出现两次。
         self.last_answer_streamed = False
+        self._empty_answer_retried = False   # 「空回答」重试标记（每轮 run 重置，只重试一次）
 
         # 取消提示是否已经由 UI 层显示过（同上：避免控制台重复打印）。
         self.last_cancel_notice_shown = False
@@ -788,9 +789,11 @@ class Agent:
     def _net_hint(self) -> str:
         return self._NET_HINT.get(self.net_mode or "", "")
 
-    #: 联网开启时的**每轮末尾提醒**：只进请求体、不落盘。
+    #: 联网开启时的**每轮末尾提醒**：只进请求体、不落盘，且必须是 system 角色。
     #: 历史对话里模型可能反复说过「没有联网」，那段上下文会压制本轮的系统提示词
     #: （实测会直接拒绝调用 web_search），所以把本轮状态放在消息列表最末尾再强调一次。
+    #: 为什么不能用 user 角色：那会让「最后一条用户消息」变成一段没有任务的系统说明，
+    #: 模型会把它当成用户的最新发言，进而回答「你这条消息没有内容」。
     _NET_REMINDER = (
         "【系统提示，不是用户发言】本轮联网已开启，工具列表里的 web_search 可用。"
         "遇到需要实时信息的请求请直接调用它检索，不要声称自己无法联网或没有联网工具；"
@@ -1132,6 +1135,7 @@ class Agent:
         client = self._get_client()
         schemas = self.registry.schemas()
         self.last_answer_streamed = False
+        self._empty_answer_retried = False   # 本轮是否已因「空回答」重试过（只重试一次）
 
         for turn in range(1, self.max_turns + 1):
             tok = self.cancel_token
@@ -1147,9 +1151,11 @@ class Agent:
             msgs = [
                 {k: v for k, v in m.items() if not k.startswith("_")} for m in self.messages
             ]
+            # 提醒必须是 system 角色：以 user 角色追加会让「最后一条用户消息」变成
+            # 一段没有任务内容的系统说明，模型会误判成「用户这条消息是空的」。
             reminder = self._net_reminder()
             if reminder:
-                msgs.append({"role": "user", "content": reminder})
+                msgs.append({"role": "system", "content": reminder})
             payload = {
                 "model": self.model,
                 "messages": msgs,
@@ -1170,7 +1176,7 @@ class Agent:
             )
             # 取消钩子关掉客户端时，卡住的请求会报各种异常（ReadError/
             # RuntimeError…）—— 由 _request_or_cancel 统一转成 Cancelled。
-            resp = self._request_or_cancel(client, payload, tok)
+            resp = self._request_or_cancel(client, payload, tok, tail_system=reminder)
 
             # 流式与普通模式的分叉点。
             # 判定用 __next__ 而不是 __iter__：openai 的 ChatCompletion 是 pydantic 模型，
@@ -1199,7 +1205,7 @@ class Agent:
                         tok.check()   # 别把「取消导致的空流」误判成服务端问题
                     self.stream = False   # 别每轮都白试一次
                     t0 = time.time()
-                    resp = self._request_or_cancel(client, payload, tok)
+                    resp = self._request_or_cancel(client, payload, tok, tail_system=reminder)
                     content, tool_calls, usage = self._consume(resp)
                 else:
                     content, tool_calls, usage, shown = got
@@ -1246,6 +1252,15 @@ class Agent:
 
             # 没有工具调用 → 本轮就是最终答案
             if not tool_calls:
+                # 正文空白说明这是坏响应（网关截断、推理挤占输出额度…），不是用户要的答案。
+                # 静默返回空会让用户看到一次「什么都没发生」的回复，所以给一次重试机会。
+                if not (content or "").strip() and not self._empty_answer_retried:
+                    self._empty_answer_retried = True
+                    _llm_log.warning(
+                        "empty.answer turn=%d model=%s，重试本轮", turn, self.model
+                    )
+                    self._ui_call("notice", "[yellow]· 模型返回空回答，正在重试本轮[/yellow]")
+                    continue
                 self.last_answer_streamed = shown
                 return content or ""
 
@@ -1380,13 +1395,34 @@ class Agent:
 
     # ------------------------------------------------------------ 请求与解析
 
-    def _request_or_cancel(self, client, payload: dict, token: CancellationToken | None) -> Any:
-        """发请求并把「取消钩子导致的异常」统一归一化成 Cancelled。"""
+    def _request_or_cancel(
+        self, client, payload: dict, token: CancellationToken | None,
+        tail_system: str = "",
+    ) -> Any:
+        """发请求并把「取消钩子导致的异常」统一归一化成 Cancelled。
+
+        tail_system 是本轮追加在消息末尾的临时 system 提醒（见 _net_reminder）。
+        多数服务商接受对话中间的 system 消息，但少数只允许第一条 —— 一旦
+        它们因此报错，就去掉这条提醒重发，别让整轮对话失败。
+        """
         try:
             return self._request(client, payload)
         except Exception as e:  # noqa: BLE001
             if token is not None and token.cancelled():
                 raise Cancelled("LLM 请求被取消") from None
+            msgs = payload.get("messages") or []
+            if (
+                tail_system
+                and msgs
+                and msgs[-1].get("role") == "system"
+                and msgs[-1].get("content") == tail_system
+            ):
+                _llm_log.warning(
+                    "服务端不接受对话中间的 system 提醒，已去掉重试：%s", type(e).__name__
+                )
+                retry = dict(payload)
+                retry["messages"] = msgs[:-1]
+                return self._request(client, retry)
             # 兜底：服务商不认识思考参数（reasoning_effort / thinking / enable_thinking）
             # 时把相关参数全部摘掉重试一次，别让普通对话失败
             hit_keys = [k for k in _REASONING_KEYS if k in payload]

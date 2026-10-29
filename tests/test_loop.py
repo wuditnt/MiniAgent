@@ -312,6 +312,72 @@ def test_dangerous_command_blocked():
     print("✓ 安全：危险命令被黑名单拦截")
 
 
+def test_net_reminder_is_system_role():
+    """联网提醒必须是 system 角色，且最后一条 user 必须仍是用户真正说的话。
+
+    回归点：线上出现「你这条消息似乎没有带上内容」——请求末尾曾以 role=user
+    追加一条「【系统提示，不是用户发言】…」的联网提醒，模型把它当成用户的最新
+    发言，于是回答「你的消息是空的」。
+    """
+    script = [_Msg(content="答。")]
+    a = agent_mod.Agent(verbose=False, client=_StubClient(script))
+    a.net_mode = "cloud"
+    a.run("问题")
+
+    sent = a._client.chat.completions.calls[0]["messages"]
+    assert sent[-1]["role"] == "system", sent[-1]
+    assert sent[-1]["content"] == agent_mod.Agent._NET_REMINDER, sent[-1]
+    users = [m["content"] for m in sent if m["role"] == "user"]
+    assert users == ["问题"], f"最后一条 user 必须是用户的真实输入，实际 {users}"
+    print("✓ 联网提醒：以 system 角色追加，不伪造用户消息")
+
+
+def test_tail_system_rejected_falls_back():
+    """服务商只允许第一条 system 时，去掉末尾提醒重发，而不是整轮失败。"""
+    msg = _Msg(content="答。")
+
+    class _RejectTail:
+        def __init__(self):
+            self.calls = []
+            self.chat = type("Chat", (), {"completions": self})()
+
+        def create(self, **kw):
+            self.calls.append(kw)
+            msgs = kw["messages"]
+            if len(msgs) > 1 and msgs[-1].get("role") == "system":
+                raise ValueError("system message must be the first message")
+            return _Resp(msg)
+
+    client = _RejectTail()
+    a = agent_mod.Agent(verbose=False, client=client)
+    a.net_mode = "cloud"
+    out = a.run("问题")
+
+    assert out == "答。", out
+    assert len(client.calls) == 2, client.calls
+    assert client.calls[1]["messages"][-1]["role"] == "user", client.calls[1]["messages"][-1]
+    print("✓ 联网提醒：服务端拒绝中间 system 时自动去除重发")
+
+
+def test_empty_answer_retried_once():
+    """模型返回空正文且不调工具时，先重试一轮；仍为空则如实返回空，不无限重试。"""
+    script = [_Msg(content=""), _Msg(content="补上的答案。")]
+    a = agent_mod.Agent(verbose=False, client=_StubClient(script))
+    out = a.run("问题")
+    assert out == "补上的答案。", out
+    assert len(a._client.chat.completions.calls) == 2, a._client.chat.completions.calls
+    roles = [m["role"] for m in a.messages]
+    assert roles == ["system", "user", "assistant", "assistant"], roles
+    print("✓ 空回答：先重试一轮再返回")
+
+    script = [_Msg(content=""), _Msg(content="")]
+    b = agent_mod.Agent(verbose=False, client=_StubClient(script))
+    out = b.run("问题")
+    assert out == "", out
+    assert len(b._client.chat.completions.calls) == 2, "只重试一次"
+    print("✓ 空回答：只重试一次，不反复空转")
+
+
 if __name__ == "__main__":
     print("工作区:", agent_mod.tools.WORKSPACE)
     print("---")
@@ -327,5 +393,8 @@ if __name__ == "__main__":
     test_binary_file_is_not_force_decoded()
     test_sandbox_blocks_escape()
     test_dangerous_command_blocked()
+    test_net_reminder_is_system_role()
+    test_tail_system_rejected_falls_back()
+    test_empty_answer_retried_once()
     print("---")
     print("全部通过 ✅")
