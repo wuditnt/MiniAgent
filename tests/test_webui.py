@@ -398,11 +398,12 @@ def scenario_chat_and_history() -> None:
     SCRIPT = []
     events = collect({"message": "你好", "mode": "chat", "web": False, "session": "t-chat"})
     # trace 帧是事件流的实时镜像（P0 新增，可选）；剥离它们后才是原 SSE 契约。
-    # 首事件仍是 turn —— 界面渲染指令不受事件流影响（D7/D8）。
+    # 首帧 run_start 带服务端起点（计时归后端），其后的 turn 仍是界面渲染指令。
     frames = [e for e in events if e["type"] != "trace"]
     types = [e["type"] for e in frames]
-    assert "turn" in types and frames[0]["type"] == "turn", f"首事件应为 turn：{types}"
-    assert frames[0]["mode"] == "chat"
+    assert types[:2] == ["run_start", "turn"], f"应先发 run_start 再 turn：{types}"
+    assert frames[0]["started_at"] > 0 and frames[0]["actions"], f"run_start 应带起点与首个动作：{frames[0]}"
+    assert frames[1]["mode"] == "chat"
     # 实时镜像（可选能力）确实挂上了：首帧 trace 就是本轮的 run_start
     trace = [e for e in events if e["type"] == "trace"]
     assert trace and trace[0]["event"]["type"] == "run_start", f"应有实时轨迹帧：{trace[:1]}"
@@ -599,6 +600,16 @@ def scenario_running_indicator() -> None:
     _s, lst = api("GET", "/api/sessions")
     item = next((x for x in lst["sessions"] if x["id"] == sid), None)
     assert item and item.get("running") is False, f"结束后应标非运行：{item}"
+    # 本轮执行记录随历史回放：起止时间由后端定稿，动作时间线可展开
+    _s, hist = api("GET", f"/api/history?session={sid}")
+    run = next((r for r in (hist.get("runs") or []) if r.get("turn") == 2), None)
+    assert run, f"history 应带回本轮执行记录：{hist.get('runs')}"
+    assert run["status"] == "done" and (run.get("elapsed_ms") or 0) > 0, run
+    acts = run["actions"]
+    assert acts and acts[0]["kind"] == "step", acts
+    tool = next((a for a in acts if a["kind"] == "tool"), None)
+    assert tool and tool["status"] == "ok" and (tool.get("dur_ms") or 0) >= 1000, acts
+    assert hist.get("server_now"), "history 应带服务端时间"
     print("  [7] 运行中指示器通过（/api/running、列表、历史三者一致）")
 
 

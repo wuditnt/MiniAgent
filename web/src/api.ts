@@ -13,6 +13,7 @@ import type {
   MemoryData,
   Mode,
   ModelsInfo,
+  RunInfo,
   SessionItem,
   SettingsInfo,
   SkillDetail,
@@ -64,7 +65,12 @@ export async function fetchState(): Promise<AgentState> {
 
 export async function fetchHistory(
   session: string
-): Promise<{ session: string; messages: HistoryMessage[] }> {
+): Promise<{
+  session: string;
+  messages: HistoryMessage[];
+  runs?: RunInfo[];
+  server_now?: number;
+}> {
   const res = await req(`/api/history?session=${encodeURIComponent(session)}`);
   if (!res.ok) throw new Error(await readError(res));
   return res.json();

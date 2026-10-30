@@ -36,6 +36,8 @@ import type {
   ModelProvider,
   PendingAsk,
   ReasoningLevel,
+  RunAction,
+  RunInfo,
   SessionItem,
   SSEEvent,
   SkillItem,
@@ -44,6 +46,7 @@ import type {
   WorkspaceItem,
 } from "./types";
 import Chat from "./components/Chat";
+import { syncServerNow, serverNowMs } from "./serverClock";
 import { skillsInSent, stripSkillMarks } from "./components/composer/skillMarks";
 import Sidebar from "./components/Sidebar";
 import WorkspaceModal from "./components/WorkspaceModal";
@@ -75,18 +78,65 @@ function loadSession(): string {
 }
 
 /** 历史消息 → 聊天气泡：历史回放与「接入后台任务」的快照共用同一口径 */
-function toItems(messages: HistoryMessage[]): ChatItem[] {
-  return messages.map((m, i) => ({
-    id: `h-${i}`,
-    role: m.role === "user" ? "user" : "assistant",
-    content: m.content,
-    status: "done" as const,
-    // 落盘时一并保存的用量/耗时，回放时原样恢复脚注
-    usage: m.usage,
-    sec: m.sec,
-    // 附件元数据：发送时写入，历史回放原样展示
-    attachments: m.attachments,
-  }));
+function toItems(messages: HistoryMessage[], runs?: RunInfo[]): ChatItem[] {
+  // run 按「第几个用户轮次」挂到对应的助手气泡（一轮一条，后端保证顺序）
+  const byTurn = new Map<number, RunInfo>();
+  (runs || []).forEach((r) => byTurn.set(r.turn, r));
+  let turn = 0;
+  return messages.map((m, i) => {
+    if (m.role === "user") turn += 1;
+    return {
+      id: `h-${i}`,
+      role: m.role === "user" ? "user" : "assistant",
+      content: m.content,
+      status: "done" as const,
+      // 落盘时一并保存的用量/耗时，回放时原样恢复脚注
+      usage: m.usage,
+      sec: m.sec,
+      // 附件元数据：发送时写入，历史回放原样展示
+      attachments: m.attachments,
+      run: m.role === "user" ? undefined : byTurn.get(turn),
+    };
+  });
+}
+
+/** 工具参数压成一行摘要（运行时间线里显示「最后动作」用） */
+function briefArgs(args?: Record<string, unknown>): string {
+  if (!args) return "";
+  const s = Object.entries(args)
+    .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+    .join(" ");
+  return s.length > 80 ? `${s.slice(0, 80)}…` : s;
+}
+
+/** 往本轮时间线追加一条动作（没有 run 的历史气泡直接跳过） */
+function pushAction(it: ChatItem, action: RunAction): ChatItem {
+  if (!it.run) return it;
+  return { ...it, run: { ...it.run, actions: [...it.run.actions, action] } };
+}
+
+/** 按 id 收尾一条工具动作（状态 + 耗时） */
+function updateAction(it: ChatItem, id: string, patch: Partial<RunAction>): ChatItem {
+  if (!it.run) return it;
+  return {
+    ...it,
+    run: {
+      ...it.run,
+      actions: it.run.actions.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+    },
+  };
+}
+
+/** 本轮终态：用时优先取服务端定稿值，缺失时用对齐后的服务端时间兜底 */
+function endRun(
+  it: ChatItem,
+  status: RunInfo["status"],
+  elapsedMs?: number | null
+): ChatItem {
+  if (!it.run) return it;
+  const ms =
+    elapsedMs ?? Math.max(0, Math.round(serverNowMs() - it.run.started_at * 1000));
+  return { ...it, run: { ...it.run, status, elapsed_ms: ms } };
 }
 
 export default function App({
@@ -317,7 +367,8 @@ export default function App({
     setEditingId(null);   // 切换会话时退出编辑态，避免把编辑目标带到别的会话
     fetchHistory(session)
       .then((h) => {
-        setItems(toItems(h.messages));
+        syncServerNow(h.server_now);
+        setItems(toItems(h.messages, h.runs));
         // 若本次是从搜索结果点进来的，定位到命中那条消息并闪烁
         const hit = pendingHit.current;
         pendingHit.current = null;
@@ -428,12 +479,20 @@ export default function App({
       (ev) => {
         switch (ev.type) {
           case "snapshot": {
-            const base = toItems(ev.messages);
+            syncServerNow(ev.server_now);
+            const base = toItems(ev.messages, ev.runs);
             if (ev.running) {
-              // 本轮还没结束：快照之后再挂一条流式气泡接收后续帧
+              // 本轮还没结束：快照之后再挂一条流式气泡接收后续帧（带上已有时间线）
               setItems([
                 ...base,
-                { id: asstId, role: "assistant", content: "", status: "streaming", mode },
+                {
+                  id: asstId,
+                  role: "assistant",
+                  content: "",
+                  status: "streaming",
+                  mode,
+                  run: ev.run || undefined,
+                },
               ]);
               curAsstRef.current = asstId;
             } else {
@@ -448,19 +507,49 @@ export default function App({
                 : { ...it, content: it.content + ev.text }
             );
             break;
-          case "tool_start":
+          case "run_start":
+            syncServerNow(ev.server_now);
             patchAssistant(asstId, (it) => ({
               ...it,
-              tools: [...(it.tools || []), { id: ev.id, name: ev.name, args: ev.args }],
+              run: {
+                turn: ev.turn,
+                started_at: ev.started_at,
+                ended_at: null,
+                elapsed_ms: null,
+                status: "running",
+                actions: ev.actions,
+              },
             }));
             break;
+          case "tool_start":
+            patchAssistant(asstId, (it) =>
+              pushAction(
+                { ...it, tools: [...(it.tools || []), { id: ev.id, name: ev.name, args: ev.args }] },
+                {
+                  ts: ev.ts ?? 0,
+                  kind: "tool",
+                  id: ev.id,
+                  name: ev.name,
+                  detail: briefArgs(ev.args),
+                  status: "running",
+                  dur_ms: null,
+                }
+              )
+            );
+            break;
           case "tool_end":
-            patchAssistant(asstId, (it) => ({
-              ...it,
-              tools: (it.tools || []).map((t) =>
-                t.id === ev.id ? { ...t, ok: ev.ok, sec: ev.sec, result: ev.result } : t
-              ),
-            }));
+            patchAssistant(asstId, (it) =>
+              updateAction(
+                {
+                  ...it,
+                  tools: (it.tools || []).map((t) =>
+                    t.id === ev.id ? { ...t, ok: ev.ok, sec: ev.sec, result: ev.result } : t
+                  ),
+                },
+                ev.id,
+                { status: ev.ok ? "ok" : "fail", dur_ms: ev.sec * 1000 }
+              )
+            );
             break;
           case "confirm_request":
             setConfirm({ id: ev.id, tool: ev.tool, args: ev.args });
@@ -476,15 +565,17 @@ export default function App({
             setAsk(askRef.current);
             break;
           case "notice":
-            setItems((prev) => [
-              ...prev,
-              {
-                id: `n-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
-                role: "notice",
-                content: ev.text,
-                status: "done",
-              },
-            ]);
+            // 降级/重试提示进本轮时间线，不再单独占一条对话气泡
+            patchAssistant(asstId, (it) =>
+              pushAction(it, {
+                ts: ev.ts ?? 0,
+                kind: "notice",
+                name: "降级提示",
+                detail: ev.text,
+                status: "info",
+                dur_ms: null,
+              })
+            );
             break;
           case "done":
             patchAssistant(asstId, (it) => ({
@@ -500,7 +591,11 @@ export default function App({
             break;
           case "error":
             patchAssistant(asstId, (it) =>
-              finalizeTools({ ...it, status: "error", error: ev.message, usage: ev.usage })
+              endRun(
+                finalizeTools({ ...it, status: "error", error: ev.message, usage: ev.usage }),
+                "error",
+                ev.elapsed_ms
+              )
             );
             foldAsk(asstId);
             setConfirm(null);
@@ -609,6 +704,24 @@ export default function App({
       content: "",
       status: "streaming",
       mode,
+      // 起点先用本地时间占位，收到 run_start 后换成服务端的 started_at
+      run: {
+        turn: 0,
+        started_at: Date.now() / 1000,
+        ended_at: null,
+        elapsed_ms: null,
+        status: "running",
+        actions: [
+          {
+            ts: 0,
+            kind: "step",
+            name: "开始本轮任务",
+            detail: "读取会话上下文，注入工具表",
+            status: "ok",
+            dur_ms: null,
+          },
+        ],
+      },
     };
     if (skipUserItem) {
       // 重新生成场景：user 消息已保留在列表里，只需追加 assistant 气泡
@@ -641,19 +754,49 @@ export default function App({
                 : { ...it, content: it.content + ev.text }
             );
             break;
-          case "tool_start":
+          case "run_start":
+            syncServerNow(ev.server_now);
             patchAssistant(asstId, (it) => ({
               ...it,
-              tools: [...(it.tools || []), { id: ev.id, name: ev.name, args: ev.args }],
+              run: {
+                turn: ev.turn,
+                started_at: ev.started_at,
+                ended_at: null,
+                elapsed_ms: null,
+                status: "running",
+                actions: ev.actions,
+              },
             }));
             break;
+          case "tool_start":
+            patchAssistant(asstId, (it) =>
+              pushAction(
+                { ...it, tools: [...(it.tools || []), { id: ev.id, name: ev.name, args: ev.args }] },
+                {
+                  ts: ev.ts ?? 0,
+                  kind: "tool",
+                  id: ev.id,
+                  name: ev.name,
+                  detail: briefArgs(ev.args),
+                  status: "running",
+                  dur_ms: null,
+                }
+              )
+            );
+            break;
           case "tool_end":
-            patchAssistant(asstId, (it) => ({
-              ...it,
-              tools: (it.tools || []).map((t) =>
-                t.id === ev.id ? { ...t, ok: ev.ok, sec: ev.sec, result: ev.result } : t
-              ),
-            }));
+            patchAssistant(asstId, (it) =>
+              updateAction(
+                {
+                  ...it,
+                  tools: (it.tools || []).map((t) =>
+                    t.id === ev.id ? { ...t, ok: ev.ok, sec: ev.sec, result: ev.result } : t
+                  ),
+                },
+                ev.id,
+                { status: ev.ok ? "ok" : "fail", dur_ms: ev.sec * 1000 }
+              )
+            );
             break;
           case "confirm_request":
             setConfirm({ id: ev.id, tool: ev.tool, args: ev.args });
@@ -670,15 +813,17 @@ export default function App({
             setAsk(askRef.current);
             break;
           case "notice":
-            setItems((prev) => [
-              ...prev,
-              {
-                id: `n-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
-                role: "notice",
-                content: ev.text,
-                status: "done",
-              },
-            ]);
+            // 降级/重试提示进本轮时间线，不再单独占一条对话气泡
+            patchAssistant(asstId, (it) =>
+              pushAction(it, {
+                ts: ev.ts ?? 0,
+                kind: "notice",
+                name: "降级提示",
+                detail: ev.text,
+                status: "info",
+                dur_ms: null,
+              })
+            );
             break;
           case "memory":
             // 用户显式「请帮我记住 XXX」：写入成功/重复/被开关拦截都给一条轻提示
@@ -690,13 +835,19 @@ export default function App({
             break;
           case "done":
             // answer 是服务端合并后的最终回答，比逐帧拼接更可靠
-            patchAssistant(asstId, (it) => ({
-              ...it,
-              status: "done",
-              content: ev.answer || it.content,
-              sec: ev.sec,
-              usage: ev.usage,
-            }));
+            patchAssistant(asstId, (it) =>
+              endRun(
+                {
+                  ...it,
+                  status: "done",
+                  content: ev.answer || it.content,
+                  sec: ev.sec,
+                  usage: ev.usage,
+                },
+                "done",
+                ev.elapsed_ms
+              )
+            );
             foldAsk(asstId); // 若有未答的卡片，随本轮结束标记失效
             // 标题没被用户命名过：记忆提炼会在后台再补一个模型标题，但它晚于
             // done 才落盘（那时这条 SSE 连接已经关了），所以稍后自己再拉一次列表
@@ -704,7 +855,11 @@ export default function App({
             break;
           case "error":
             patchAssistant(asstId, (it) =>
-              finalizeTools({ ...it, status: "error", error: ev.message, usage: ev.usage })
+              endRun(
+                finalizeTools({ ...it, status: "error", error: ev.message, usage: ev.usage }),
+                "error",
+                ev.elapsed_ms
+              )
             );
             foldAsk(asstId);
             setConfirm(null);
@@ -712,7 +867,11 @@ export default function App({
           case "cancelled":
             // 串行路径取消时 agent 不发 tool_end：这里把挂着的 pending 节点收尾，避免永远转圈
             patchAssistant(asstId, (it) =>
-              finalizeTools({ ...it, status: "cancelled", reason: ev.reason, usage: ev.usage })
+              endRun(
+                finalizeTools({ ...it, status: "cancelled", reason: ev.reason, usage: ev.usage }),
+                "cancelled",
+                ev.elapsed_ms
+              )
             );
             foldAsk(asstId);
             setConfirm(null);

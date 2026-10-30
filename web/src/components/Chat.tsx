@@ -45,6 +45,7 @@ import type {
 import { fetchSkills, uploadFile } from "../api";
 import Markdown from "./Markdown";
 import ToolChain from "./ToolChain";
+import RunHeader from "./RunHeader";
 import WelcomePane from "./WelcomePane";
 import SkillInput from "./composer/SkillInput";
 import SkillPicker from "./composer/SkillPicker";
@@ -393,7 +394,15 @@ function AssistantBodyInner({
           ]}
         />
       ) : null}
-      {item.tools && item.tools.length > 0 ? (
+      {item.run ? (
+        // 运行头行：计时 + 最后动作固定在正文上方；展开是本轮动作时间线
+        <RunHeader
+          run={item.run}
+          tools={item.tools}
+          streaming={item.status === "streaming"}
+        />
+      ) : item.tools && item.tools.length > 0 ? (
+        // 老会话没有 run 记录 → 退回原来的工具折叠块
         <Collapse
           ghost
           size="small"

@@ -256,6 +256,11 @@ class _Session:
         self._meta_loaded = False            # 是否已从磁盘恢复过会话元数据
         self._session_data: dict | None = None   # 磁盘数据缓存（meta 与历史共用一次读取）
         self._force_stale = False            # 全局换模型时给「运行中」会话打的标记
+        # 执行记录：每轮一条（开始/结束时刻 + 动作时间线），随会话落盘。
+        # 计时归后端所有 —— 前端关掉页面、断线重连后读到的仍是同一份起止时间。
+        self.run: dict | None = None         # 正在执行的这一轮（begin_run 创建）
+        self.runs: list[dict] = []           # 已结束的各轮（供历史回放）
+        self.run_meta_lock = threading.Lock()
 
     def ensure_agent(self):
         if self.agent is None:
@@ -323,6 +328,7 @@ class _Session:
         self.web = bool(data.get("web", False))
         self.created_at = data.get("created_at") or self.created_at
         self.updated_at = data.get("updated_at") or self.updated_at
+        self.runs = data.get("runs") or []
 
     def _inject_history(self) -> None:
         """首次创建 Agent 时，把磁盘上的 user/assistant 消息灌入。"""
@@ -395,6 +401,7 @@ class _Session:
             "reasoning": self.reasoning,     # 本会话的推理等级（None = 跟全局默认）
             "web": self.web,                 # 本会话的联网搜索开关
             "messages": messages,
+            "runs": self.runs[-50:],        # 最近 50 轮的执行时间线（有上限，避免文件无限增长）
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -423,6 +430,77 @@ class _Session:
             subs = list(self.subscribers)
         for q in subs:
             q.put(event)
+
+    # ---------------------------------------------------------- 执行记录
+    # 一轮 = 一段时间线：开始时刻由后端写，动作（工具/提示）逐条追加，
+    # 结束时定稿 elapsed_ms。前端只渲染，不在本地起算 —— 关页、重连都不丢。
+
+    MAX_ACTIONS = 100        # 单轮最多记 100 个动作，超出直接丢弃（防止异常循环撑爆文件）
+
+    def begin_run(self, turn: int) -> dict:
+        """开始一轮执行：创建时间线并把 running_since 置为同一时刻。"""
+        now = time.time()
+        run = {
+            "turn": turn,            # 第几个用户轮次（前端据此把 run 挂到对应气泡）
+            "started_at": now,       # 服务端时间，前端用它与 server_now 计算已用时
+            "ended_at": None,
+            "elapsed_ms": None,
+            "status": "running",
+            "actions": [],
+        }
+        with self.run_meta_lock:
+            self.run = run
+            self.running_since = now
+        return run
+
+    def run_ts(self) -> int:
+        """当前轮已执行的毫秒数（无运行中任务时为 0）。"""
+        with self.run_meta_lock:
+            run = self.run
+            return int((time.time() - run["started_at"]) * 1000) if run else 0
+
+    def record_action(self, kind: str, name: str, detail: str = "",
+                      status: str = "running", aid: str | None = None) -> None:
+        """追加一条动作（tool / notice / step），ts 为相对本轮起点的毫秒数。"""
+        with self.run_meta_lock:
+            run = self.run
+            if not run or len(run["actions"]) >= self.MAX_ACTIONS:
+                return
+            run["actions"].append({
+                "ts": int((time.time() - run["started_at"]) * 1000),
+                "kind": kind, "id": aid, "name": name, "detail": detail,
+                "status": status, "dur_ms": None,
+            })
+
+    def finish_action(self, aid: str, status: str, dur_ms: int | None) -> None:
+        """按 id 收尾一条工具动作（ok / fail + 耗时）。"""
+        with self.run_meta_lock:
+            run = self.run
+            if not run:
+                return
+            for a in reversed(run["actions"]):
+                if a.get("id") == aid:
+                    a["status"] = status
+                    a["dur_ms"] = dur_ms
+                    return
+
+    def end_run(self, status: str) -> int | None:
+        """结束本轮：定稿用时并归档到 runs。返回 elapsed_ms（重复调用返回已定稿值）。"""
+        with self.run_meta_lock:
+            run = self.run
+            if not run:
+                return None
+            if run["status"] != "running":
+                return run["elapsed_ms"]
+            now = time.time()
+            run["status"] = status
+            run["ended_at"] = now
+            run["elapsed_ms"] = int((now - run["started_at"]) * 1000)
+            self.runs.append({**run, "actions": [dict(a) for a in run["actions"]]})
+            self.runs = self.runs[-50:]
+            self.run = None
+            self.running_since = None
+            return run["elapsed_ms"]
 
     def answer_confirm(self, cid: str, approve: bool) -> bool:
         """浏览器对 confirm_request 的应答。返回是否真的匹配到了待确认项。"""
@@ -515,7 +593,10 @@ class WebUI:
     # ---------------------------------------------------------- 9 个回调
 
     def notice(self, text: str) -> None:
-        self._push({"type": "notice", "text": _RICH_TAG.sub("", text or "")})
+        clean = _RICH_TAG.sub("", text or "")
+        # 降级/重试提示进时间线，不再单独占用对话区（刷新后也能回看）
+        self.session.record_action("notice", "降级提示", clean, status="info")
+        self._push({"type": "notice", "text": clean, "ts": self.session.run_ts()})
 
     def session_title(self, title: str) -> None:
         """模型产出的会话标题（搭记忆提炼那次调用的顺风车，零额外开销）。
@@ -554,15 +635,17 @@ class WebUI:
             for tool, args in items:
                 tid = f"{turn}-{tool.name}-{uuid.uuid4().hex[:6]}"
                 self._pending_ids.setdefault(tool.name, []).append(tid)
+                self.session.record_action("tool", tool.name, _brief_args(args), aid=tid)
                 self._push({"type": "tool_start", "id": tid, "name": tool.name,
-                            "args": _brief_args(args)})
+                            "args": _brief_args(args), "ts": self.session.run_ts()})
 
     def tool_start(self, turn: int, tool, args: dict) -> None:
         with self._lock:
             tid = f"{turn}-{tool.name}-{uuid.uuid4().hex[:6]}"
             self._pending_ids.setdefault(tool.name, []).append(tid)
+        self.session.record_action("tool", tool.name, _brief_args(args), aid=tid)
         self._push({"type": "tool_start", "id": tid, "name": tool.name,
-                    "args": _brief_args(args)})
+                    "args": _brief_args(args), "ts": self.session.run_ts()})
 
     def tool_end(self, turn: int, tool, result: str, seconds: float) -> None:
         with self._lock:
@@ -570,11 +653,13 @@ class WebUI:
             tid = ids.pop(0) if ids else f"{turn}-{tool.name}-?"
             if ids is not None and not ids:
                 self._pending_ids.pop(tool.name, None)
+        ok = not result.startswith(("[error]", "[denied]", "[cancelled]"))
+        self.session.finish_action(tid, "ok" if ok else "fail", int(seconds * 1000))
         self._push({
-            "type": "tool_end", "id": tid,
-            "ok": not result.startswith(("[error]", "[denied]", "[cancelled]")),
+            "type": "tool_end", "id": tid, "ok": ok,
             "sec": round(seconds, 2),
             "result": result[:HISTORY_RESULT_LIMIT],
+            "ts": self.session.run_ts(),
         })
 
     def _bridge_ask(self, payload: dict, holder: dict, kind: str) -> bool:
@@ -2155,14 +2240,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
         session = self.web.session(sid)
         if session.agent is not None:
             src = session.agent.messages[1:]          # [0] 是 system
+            runs = session.runs
         else:
-            src = (_load_session_file(sid) or {}).get("messages", [])
+            data = _load_session_file(sid) or {}
+            src = data.get("messages", [])
+            runs = data.get("runs") or []
         # 同一轮 ReAct 的多个 assistant 文本段合并成一个气泡（_end 是内部字段，不外发）
         messages = [
             {k: v for k, v in it.items() if k != "_end"}
             for it in _display_items(src)
         ]
         self._json({"session": sid, "messages": messages,
+                    "runs": runs[-50:], "server_now": time.time(),
                     "running": session.running_since is not None})
 
     def _handle_trajectory(self, params: dict) -> None:
@@ -2224,7 +2313,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
         侧栏「运行中」指示器的轮询源 —— 只读内存、不带消息，开销与磁盘无关。
         """
         running = self.web.running_sessions()
-        self._json({"sessions": {sid: {"since": since} for sid, since in running.items()}})
+        self._json({"sessions": {sid: {"since": since} for sid, since in running.items()},
+                    "server_now": time.time()})
 
     def _handle_chat_stream(self, params: dict) -> None:
         """接入一条正在后台执行的任务：先发快照，再实时广播后续事件。
@@ -2241,16 +2331,25 @@ class _RequestHandler(BaseHTTPRequestHandler):
         try:
             if session.agent is not None:
                 src = session.agent.messages[1:]
+                runs = session.runs
             else:
-                src = (_load_session_file(sid) or {}).get("messages", [])
+                data = _load_session_file(sid) or {}
+                src = data.get("messages", [])
+                runs = data.get("runs") or []
             messages = [
                 {k: v for k, v in it.items() if k != "_end"}
                 for it in _display_items(src)
             ]
+            run = session.run
             self._sse_headers()
             self.close_connection = True
             if not self._sse_frame({
                 "type": "snapshot", "session": sid, "messages": messages,
+                "runs": runs[-50:],
+                # 正在跑的这轮带完整时间线：重连/刷新后计时与动作一条不丢
+                "run": ({**run, "actions": [dict(a) for a in run["actions"]]}
+                        if run else None),
+                "server_now": time.time(),
                 "running": session.running_since is not None,
             }):
                 return
@@ -3454,9 +3553,22 @@ class _RequestHandler(BaseHTTPRequestHandler):
             session.mode, session.web = mode, web
             session.approval_mode = approval
             session.busy = True
-            session.running_since = time.time()
+            # 执行记录归后端：起止时间与动作时间线都写在这里，前端只渲染
+            turn = sum(
+                1 for m in agent.messages[1:]
+                if m.get("role") == "user" and not _is_injected(m)
+            ) + 1
+            run = session.begin_run(turn)
+            session.record_action("step", "开始本轮任务", "读取会话上下文，注入工具表", status="ok")
             q = session.subscribe()
             session.queue = q
+            # 先告诉前端服务端起点（前端用它 + server_now 计算已用时，不受本地时钟影响）
+            session.emit({
+                "type": "run_start",
+                "turn": run["turn"], "started_at": run["started_at"],
+                "actions": [dict(a) for a in run["actions"]],
+                "server_now": time.time(),
+            })
             # 用户显式「请帮我记住 XXX」：在 run 之前写入用户画像，
             # 这样本轮重建 system prompt 时记忆块里就已经包含它
             mem_event = _remember_from_message(message)
@@ -3518,7 +3630,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             # 否则用户回来发新消息会和还在跑的那一轮撞车。
             if not started:
                 session.busy = False
-                session.running_since = None
+                if session.run:
+                    session.end_run("error")
                 session.queue = None
                 session.run_lock.release()
             if not alive and q is not None:
@@ -3588,6 +3701,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     break
             # 先落盘再发终态：前端收到 done 就会刷新会话列表，
             # 反过来的话文件还没写完，新会话/新标题会漏掉一拍
+            elapsed_ms = session.end_run("done")
             session.save()
             _log.info(
                 "chat.done session=%s sec=%.1f llm_calls=%d tool_calls=%d "
@@ -3597,6 +3711,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             )
             session.emit({"type": "done", "answer": answer,
                           "sec": sec,
+                          "elapsed_ms": elapsed_ms,
                           # 标题还没被用户命名 → 记忆提炼可能在几秒后补一个模型标题，
                           # 前端据此在稍后再拉一次会话列表（这个事件发完连接就关了）
                           "title_pending": not session.title_custom,
@@ -3605,6 +3720,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             # cancel / run_end{status:"cancelled"} 已由 agent.run() 的取消路径发出，
             # 这里不重复记，避免事件流里出现两条取消书签。
             _log.info("chat.cancelled session=%s reason=%s", session.id, e)
+            elapsed_ms = session.end_run("cancelled")
             # 取消也要落盘：本轮已产生的消息（含补齐的 tool 回复）必须留下，
             # 否则页面关掉/停止之后再重启，这一轮会整段消失。
             try:
@@ -3614,13 +3730,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
             # ui.cancelled 已发过 cancelled 事件（终态，泵会停）；没发过才补发
             if not getattr(agent, "last_cancel_notice_shown", False):
                 session.emit({"type": "cancelled", "reason": str(e),
+                              "elapsed_ms": elapsed_ms,
                               "usage": _usage_delta(before, agent.usage)})
         except Exception as e:  # noqa: BLE001 —— 任何异常都转成 error 事件
             _log.exception("chat.error session=%s", session.id)
             # Agent 不吞一般异常（按原样上抛），所以 error 事件只能在这里补记
             writer.emit(events.ERROR, source=events.SRC_LOOP, phase=events.PH_RUN_END,
                         kind=type(e).__name__, message=f"{type(e).__name__}: {e}")
+            elapsed_ms = session.end_run("error")
             session.emit({"type": "error", "message": f"{type(e).__name__}: {e}",
+                          "elapsed_ms": elapsed_ms,
                           "usage": _usage_delta(before, agent.usage)})
         finally:
             net_mode.reset()
@@ -3629,7 +3748,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
             # 会话的「忙」与锁由工作线程收尾（页面断开时请求线程已退出）：
             # 谁真正跑完谁解锁，避免出现「还在跑但已被标空闲」的撞车。
             session.busy = False
-            session.running_since = None
+            # 兜底：任何没走终态分支的退出，也要把本轮定稿，避免 running_since 永久为真
+            if session.run:
+                session.end_run("error")
             session.queue = None
             try:
                 session.run_lock.release()

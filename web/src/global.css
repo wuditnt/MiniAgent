@@ -3928,3 +3928,132 @@ body,
   font-size: 12px;
   color: #999;
 }
+
+/* ---------- 运行头行：计时 + 最后动作 + 动作时间线 ---------- */
+.runbox {
+  margin: 6px 0 12px;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  background: #fafafa;
+  overflow: hidden;
+}
+
+.run-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  font-size: 13px;
+  color: #333;
+  text-align: left;
+  cursor: pointer;
+  flex-wrap: wrap;
+}
+
+.run-row:hover {
+  background: #f2f2f2;
+}
+
+.run-icon {
+  display: inline-flex;
+  font-size: 12px;
+  color: #999;
+  flex: none;
+}
+
+.run-icon.live { color: #1677ff; }
+.run-icon.done { color: #52c41a; }
+.run-icon.cancelled,
+.run-icon.error { color: #ff4d4f; }
+
+.run-state {
+  font-weight: 500;
+  flex: none;
+}
+
+.run-time {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  color: #1677ff;
+  flex: none;
+}
+
+.run-sep { color: #bbb; flex: none; }
+
+.run-last {
+  flex: 1 1 140px;
+  min-width: 0;
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-chev {
+  margin-left: auto;
+  color: #999;
+  font-size: 11px;
+  flex: none;
+}
+
+.run-timeline {
+  padding: 4px 12px 10px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.run-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.run-item-time {
+  width: 36px;
+  flex: none;
+  color: #999;
+  font-variant-numeric: tabular-nums;
+}
+
+.run-item-dot {
+  width: 6px;
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: #d9d9d9;
+  flex: none;
+}
+
+.run-item-dot.done { background: #bfbfbf; }
+.run-item-dot.live { background: #1677ff; }
+.run-item-dot.fail { background: #ff4d4f; }
+.run-item-dot.info { background: #faad14; }
+
+.run-item-body {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.run-item-name { color: #333; font-weight: 500; flex: none; }
+
+.run-item-detail {
+  color: #999;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-item-dur {
+  color: #999;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+.run-detail-tools { margin-top: 8px; }

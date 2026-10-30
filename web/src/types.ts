@@ -40,25 +40,57 @@ export interface Usage {
   cached_tokens?: number;
 }
 
+/** 执行时间线上的一个动作（工具 / 降级提示 / 起点） */
+export interface RunAction {
+  /** 相对本轮起点的毫秒偏移 */
+  ts: number;
+  kind: "step" | "tool" | "notice";
+  id?: string | null;
+  name: string;
+  detail?: string;
+  status: "running" | "ok" | "fail" | "info";
+  dur_ms?: number | null;
+}
+
+/** 一轮执行记录：起止时间由后端写入，前端只渲染（关页/重连不丢） */
+export interface RunInfo {
+  /** 第几个用户轮次（1 起），前端据此把 run 挂到对应气泡 */
+  turn: number;
+  started_at: number;
+  ended_at?: number | null;
+  elapsed_ms?: number | null;
+  status: "running" | "done" | "cancelled" | "error";
+  actions: RunAction[];
+}
+
 /** SSE 事件（/api/chat 响应流；终态 = done / error / cancelled） */
 export type SSEEvent =
   | { type: "turn"; turn: number; mode: Mode }
+  | { type: "run_start"; turn: number; started_at: number; actions: RunAction[]; server_now: number }
   | { type: "delta"; text: string; kind: "content" | "reasoning" }
   | { type: "llm_done"; sec: number; streamed: boolean }
-  | { type: "tool_start"; id: string; name: string; args: Record<string, unknown> }
-  | { type: "tool_end"; id: string; ok: boolean; sec: number; result: string }
+  | { type: "tool_start"; id: string; name: string; args: Record<string, unknown>; ts?: number }
+  | { type: "tool_end"; id: string; ok: boolean; sec: number; result: string; ts?: number }
   | { type: "confirm_request"; id: string; tool: string; args: Record<string, unknown> }
   | { type: "ask_request"; id: string; question: string; options: string[]; allow_free_text: boolean; multi: boolean }
-  | { type: "notice"; text: string }
+  | { type: "notice"; text: string; ts?: number }
   /** 用户显式「请帮我记住 XXX」的写入结果（两种模式都会发） */
   | { type: "memory"; ok: boolean; note: string; duplicate?: boolean; error?: string }
-  | { type: "cancelled"; reason: string; usage?: Usage }
-  | { type: "done"; answer: string; sec: number; title_pending?: boolean; usage?: Usage }
-  | { type: "error"; message: string; usage?: Usage }
+  | { type: "cancelled"; reason: string; usage?: Usage; elapsed_ms?: number | null }
+  | { type: "done"; answer: string; sec: number; title_pending?: boolean; usage?: Usage; elapsed_ms?: number | null }
+  | { type: "error"; message: string; usage?: Usage; elapsed_ms?: number | null }
   /** 事件流的实时镜像（P0 可选能力）：event 为一条完整轨迹事件信封 */
   | { type: "trace"; event: TraceEvent }
-  /** 接入后台任务时的首帧：当前全部消息 + 是否仍在运行 */
-  | { type: "snapshot"; session: string; messages: HistoryMessage[]; running: boolean };
+  /** 接入后台任务时的首帧：当前全部消息 + 是否仍在运行 + 当前这轮的时间线 */
+  | {
+      type: "snapshot";
+      session: string;
+      messages: HistoryMessage[];
+      runs?: RunInfo[];
+      run?: RunInfo | null;
+      server_now?: number;
+      running: boolean;
+    };
 
 /** 轨迹事件的来源（决定 Trajectory 视图的着色） */
 export type TraceSource =
@@ -137,6 +169,8 @@ export interface ChatItem {
   attachments?: Attachment[];
   /** assistant 消息里折叠留存的提问卡片（answered / expired） */
   ask?: AskRecord;
+  /** 本轮执行记录（后端时间线）：计时、最后动作、可展开的动作列表 */
+  run?: RunInfo;
 }
 
 /** GET /api/state 返回 */
