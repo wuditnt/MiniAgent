@@ -78,6 +78,7 @@ SUITES: list[tuple[str, str, bool]] = [
     ("test_approval.py", "审批默认值 4 项：无通道默认拒绝 / 显式 opt-in / 批准拒绝 / 桥故障", False),
     ("test_concurrency.py", "并发与全局状态 4 项：询问通道隔离 / copy_context 传播 / 注册表切换 / 配置并发写", False),
     ("test_tool_search.py", "工具检索 6 项：档位矩阵 / 按需加载 / 无命中清单 / 下轮回可见 / 缓存统计 / schema 稳定", False),
+    ("test_subagent.py", "子智能体 13 项：任务包隔离 / 只读工具 / 请求一致 / 截断 / 取消传导 / 超时 / 失败降级 / 触发规则 / 开关", False),
     ("test_real_mcp_cancel.py", "真实模型 + 真 MCP server：取消通知全链路", True),
 ]
 

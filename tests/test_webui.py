@@ -229,6 +229,7 @@ def scenario_registry_matrix() -> None:
     assert need <= std, f"standard 少了常用工具：{sorted(need - std)}"
     assert "random_int" not in std and "zip_create" not in std, "standard 应裁掉低频工具"
     assert "search_tools" in std, "standard 必须带检索工具，否则低频能力对模型不可见"
+    assert "delegate" in std, "标准档应提供子智能体委派工具"
     print("  [1] 会话工具表矩阵（chat±web / agent±web / 档位）通过")
 
 

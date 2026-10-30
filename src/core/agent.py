@@ -1248,6 +1248,14 @@ class Agent:
             self._trim_context()
             self._ui_call("turn_start", turn)
             self._turn = turn
+            # 给 delegate 提供「当前上下文吃不吃紧」的参考值（只用于委派提示，
+            # 不参与任何安全判断；子代理运行期间会被它自己的小上下文覆盖）。
+            try:
+                from core import subagent
+
+                subagent.set_parent_context(self._context_chars(), self.max_context_chars)
+            except Exception:  # noqa: BLE001 —— 提示性信息，失败不影响主流程
+                pass
 
             t0 = time.time()
             # 过滤内部字段（_trimmed 等），只把合法消息发给接口；

@@ -349,6 +349,12 @@ export interface GeneralSettings {
   memory_budget_chars: number;
   /** 智能体模式的工具档位：standard=只加载常用工具（省 token），full=全部工具 */
   tool_profile: "standard" | "full";
+  /** 子智能体（委派）：开启后 delegate 工具进会话工具表 */
+  subagent_enabled: boolean;
+  /** 单个子任务最多跑几轮 */
+  subagent_max_turns: number;
+  /** 单个子任务的墙钟超时（秒） */
+  subagent_timeout: number;
   /** 是否写本地文件日志（logs/ 下按类别分文件） */
   log_enabled: boolean;
   /** 文件日志级别；DEBUG 才能看到 HTTP 访问日志 */

@@ -101,6 +101,23 @@ const FIELDS: {
     max: 16,
     group: "perf",
   },
+  {
+    key: "subagent_max_turns",
+    label: "子任务轮次上限",
+    help: "单个子任务最多跑几轮（子代理只做一件事，不需要很多轮）",
+    min: 1,
+    max: 30,
+    group: "perf",
+  },
+  {
+    key: "subagent_timeout",
+    label: "子任务超时（秒）",
+    help: "单个子任务的墙钟上限，到点由看门狗中断，结论按失败返回",
+    min: 10,
+    max: 600,
+    step: 10,
+    group: "perf",
+  },
 ];
 
 /** 左侧导航的分组与条目（顺序即展示顺序） */
@@ -299,6 +316,16 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
               <span className="gs-help">同一轮的多个工具一起跑，关闭则改为串行</span>
             </div>
             <div className="gs-control">{renderField("parallel_tools")}</div>
+          </div>
+          <div className="gs-row">
+            <div className="gs-label">
+              <span className="gs-label-text">子智能体（委派）</span>
+              <span className="gs-help">
+                调查类长任务可交给只读子代理执行，只把结论带回主对话，
+                中间过程不占上下文；关闭后 delegate 工具不再提供给模型
+              </span>
+            </div>
+            <div className="gs-control">{renderField("subagent_enabled")}</div>
           </div>
         </>
       )}

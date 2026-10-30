@@ -682,12 +682,15 @@ def _session_registry(mode: str, approval: str = "ask", web: bool = False,
         except Exception:  # noqa: BLE001 —— 配置层异常按标准档
             profile = "standard"
 
-    # 记忆总开关关闭时，remember 工具也不进会话工具表（模型看不到就不会调）
+    # 记忆总开关 / 子智能体开关关闭时，对应工具也不进会话工具表
+    # （模型看不到就不会调；关掉的是入口，不是实现）
     try:
         from core import settings
         memory_on = bool(settings.get("memory_enabled"))
+        subagent_on = bool(settings.get("subagent_enabled"))
     except Exception:  # noqa: BLE001
         memory_on = True
+        subagent_on = True
 
     reg = ToolRegistry()
     for t in REGISTRY.all():
@@ -705,6 +708,8 @@ def _session_registry(mode: str, approval: str = "ask", web: bool = False,
         if t.name == "request_approval" and approval != "auto":
             continue
         if t.name == "remember" and not memory_on:
+            continue
+        if t.name == "delegate" and not subagent_on:
             continue
         reg.add(t)
     return reg

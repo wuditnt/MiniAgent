@@ -65,6 +65,12 @@ DEFAULTS: dict = {
     #           模型需要时用 search_tools 检索，命中后加载进本会话即可调用。
     # full：暴露全部工具（原来的行为），适合需要冷门工具的场景。
     "tool_profile": "standard",
+    # ---- 子智能体（委派）----
+    # 开启后 delegate 工具进会话工具表：模型可把一个自包含的只读子任务交给
+    # 子代理执行，只把结论带回主对话（中间过程不占主上下文）。
+    "subagent_enabled": True,
+    "subagent_max_turns": 6,       # 单个子任务最多几轮（只做一件事，不需要很多轮）
+    "subagent_timeout": 120,       # 单个子任务墙钟超时（秒），到点中断
 }
 
 
@@ -80,15 +86,18 @@ RANGES: dict[str, tuple] = {
     "log_retention_days": (1, 90),
     "events_value_limit": (4_096, 1_048_576),
     "events_keep_runs": (0, 1_000),
+    "subagent_max_turns": (1, 30),
+    "subagent_timeout": (10, 600),
 }
 
 #: 整数字段（其余数值字段按浮点处理）
 INT_KEYS = ("max_turns", "max_context_chars", "keep_recent_turns", "max_output_chars",
             "max_workers", "memory_budget_chars", "log_retention_days",
-            "events_value_limit", "events_keep_runs")
+            "events_value_limit", "events_keep_runs", "subagent_max_turns",
+            "subagent_timeout")
 #: 布尔字段
 BOOL_KEYS = ("stream", "parallel_tools", "memory_enabled", "memory_auto_extract",
-             "log_enabled", "events_enabled")
+             "log_enabled", "events_enabled", "subagent_enabled")
 #: 枚举字符串字段：允许的取值
 ENUM_KEYS: dict[str, tuple[str, ...]] = {
     "sandbox_read": ("strict", "whitelist", "open"),
