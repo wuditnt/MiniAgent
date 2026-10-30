@@ -637,8 +637,28 @@ export async function chatStream(
     signal,
   });
   if (!res.ok || !res.body) throw new Error(await readError(res));
+  await readSSE(res, onEvent);
+}
 
-  const reader = res.body.getReader();
+/**
+ * 接入一条正在后台执行的任务（刷新页面 / 换标签页 / 断线回来后用）。
+ *
+ * 服务端先推一帧 `snapshot`（当前全部消息 + 是否仍在运行），随后继续
+ * 实时广播本轮事件；任务已结束就只发快照，函数随即返回。
+ */
+export async function reconnectStream(
+  session: string,
+  onEvent: (ev: SSEEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const res = await req(`/api/chat/stream?session=${encodeURIComponent(session)}`, { signal });
+  if (!res.ok || !res.body) throw new Error(await readError(res));
+  await readSSE(res, onEvent);
+}
+
+/** 逐帧解析 SSE 响应（chatStream / reconnectStream 共用） */
+async function readSSE(res: Response, onEvent: (ev: SSEEvent) => void): Promise<void> {
+  const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buf = "";
   for (;;) {

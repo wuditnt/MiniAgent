@@ -56,7 +56,9 @@ export type SSEEvent =
   | { type: "done"; answer: string; sec: number; title_pending?: boolean; usage?: Usage }
   | { type: "error"; message: string; usage?: Usage }
   /** 事件流的实时镜像（P0 可选能力）：event 为一条完整轨迹事件信封 */
-  | { type: "trace"; event: TraceEvent };
+  | { type: "trace"; event: TraceEvent }
+  /** 接入后台任务时的首帧：当前全部消息 + 是否仍在运行 */
+  | { type: "snapshot"; session: string; messages: HistoryMessage[]; running: boolean };
 
 /** 轨迹事件的来源（决定 Trajectory 视图的着色） */
 export type TraceSource =

@@ -842,8 +842,10 @@ body,
    呼吸节奏 1.2s，比常见的 2s 快一点 —— 它表示「有活正在干」。 */
 .session-running-dot {
   position: absolute;
-  left: 3px;
-  top: 15px;
+  /* 与工作区文件夹图标同一列（图标在 .ws-head 的 4px 内边距处，
+     会话项自己还有 16px 缩进，所以这里取负值）；离标题留出约 12px。 */
+  left: -8px;
+  top: 14px;
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -865,6 +867,36 @@ body,
 /* 用户要求减少动效 → 退化为静态圆点（保留「在跑」的信息，只是不闪） */
 @media (prefers-reduced-motion: reduce) {
   .session-running-dot {
+    animation: none;
+  }
+}
+
+/* 顶栏运行状态条：会话标题旁边的「执行中 / 后台执行中」 */
+.header-running {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #f0f5ff;
+  color: #1677ff;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.header-running-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #1677ff;
+  animation: session-running-pulse 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .header-running-dot {
     animation: none;
   }
 }

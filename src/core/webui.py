@@ -12,6 +12,9 @@ Web UI 后端：把 Agent 的 9 个 UI 回调翻译成 SSE 事件流，浏览器
   · 取消：POST /api/stop → agent.interrupt()，复用 core/cancel 全链路
   · 断连：页面关掉只停止推送，任务继续在后台跑完并落盘（执行归后端，前端只负责看）；
     期间待确认 / 待提问按「拒绝 / 未回答」立即解除 —— 没人能答就不该继续等
+  · 多订阅 + 接入：本轮事件由 session.emit 广播给所有订阅者；GET /api/chat/stream
+    先推 snapshot（已有消息 + running），再续播实时事件 —— 刷新 / 换标签页 / 断线回来
+    都能把正在跑的那一轮重新接上；还有别的订阅者时，确认/提问继续等它作答
 """
 
 from __future__ import annotations
@@ -225,6 +228,10 @@ class _Session:
         # 本轮开始执行的时刻（None = 空闲）。与 busy 同步维护：
         # 侧栏「运行中」指示器靠它判断，不依赖前端是否还连着这条 SSE。
         self.running_since: float | None = None
+        # 这次运行的 SSE 订阅者。发起 /api/chat 的连接 + 之后「接入查看」
+        # 打开的 /api/chat/stream 连接都在这里；事件由 emit 广播给所有人。
+        self.subscribers: set[queue.Queue] = set()
+        self.sub_lock = threading.Lock()
         self.run_lock = threading.Lock()
         self.confirm_lock = threading.Lock()
         # 询问槽位：同一会话同一时刻只挂一张确认/提问卡（前端是单卡 UI）。
@@ -393,6 +400,30 @@ class _Session:
         }
         _save_session_file(self.id, data)
 
+    def subscribe(self) -> queue.Queue:
+        """挂一个 SSE 订阅者，返回它专属的队列。"""
+        q: queue.Queue = queue.Queue()
+        with self.sub_lock:
+            self.subscribers.add(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        with self.sub_lock:
+            self.subscribers.discard(q)
+
+    @property
+    def watching(self) -> bool:
+        """是否还有人连着这次运行（决定确认/提问要不要等）。"""
+        with self.sub_lock:
+            return bool(self.subscribers)
+
+    def emit(self, event: dict) -> None:
+        """把事件广播给所有订阅者（没人看也不报错，事件直接丢弃）。"""
+        with self.sub_lock:
+            subs = list(self.subscribers)
+        for q in subs:
+            q.put(event)
+
     def answer_confirm(self, cid: str, approve: bool) -> bool:
         """浏览器对 confirm_request 的应答。返回是否真的匹配到了待确认项。"""
         with self.confirm_lock:
@@ -452,13 +483,13 @@ class _Session:
         while True:
             if self.ask_slot.acquire(timeout=0.2):
                 with self.confirm_lock:
-                    aborted = self.ask_epoch != epoch or self.queue is None
+                    aborted = self.ask_epoch != epoch or not self.watching
                 if not aborted:
                     return True
                 self.ask_slot.release()
                 return False
             with self.confirm_lock:
-                if self.ask_epoch != epoch or self.queue is None:
+                if self.ask_epoch != epoch or not self.watching:
                     return False
 
 
@@ -478,9 +509,8 @@ class WebUI:
         self._lock = threading.RLock()
 
     def _push(self, event: dict) -> None:
-        q = self.session.queue
-        if q is not None:
-            q.put(event)
+        # 广播：发起这次运行的连接和后来「接入查看」的连接都收到
+        self.session.emit(event)
 
     # ---------------------------------------------------------- 9 个回调
 
@@ -555,13 +585,13 @@ class WebUI:
         返回 True 表示拿到了应答（holder 里是内容），False 表示被中止。
         """
         session = self.session
-        if session.queue is None:      # 没有 SSE 消费者：没人能答，直接按默认值返回
+        if not session.watching:      # 没有 SSE 消费者：没人能答，直接按默认值返回
             return False
         epoch = session.ask_epoch
         if not session.acquire_ask_slot(epoch):
             return False
         try:
-            if session.queue is None:  # 排队期间连接断了
+            if not session.watching:  # 排队期间连接断了
                 return False
             cid = uuid.uuid4().hex[:12]
             event = threading.Event()
@@ -581,7 +611,7 @@ class WebUI:
                 from core.cancel import current_token
 
                 token = current_token()
-                if session.queue is None or (token is not None and token.cancelled()):
+                if not session.watching or (token is not None and token.cancelled()):
                     break
                 with session.confirm_lock:
                     if session.ask_epoch != epoch:
@@ -1786,6 +1816,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_sessions_list(parse_qs(parsed.query))
         elif route == "/api/running":
             self._handle_running()
+        elif route == "/api/chat/stream":
+            self._handle_chat_stream(parse_qs(parsed.query))
         elif route == "/api/workspaces":
             self._handle_workspaces_list()
         elif route == "/api/models":
@@ -2193,6 +2225,53 @@ class _RequestHandler(BaseHTTPRequestHandler):
         """
         running = self.web.running_sessions()
         self._json({"sessions": {sid: {"since": since} for sid, since in running.items()}})
+
+    def _handle_chat_stream(self, params: dict) -> None:
+        """接入一条正在后台执行的任务：先发快照，再实时广播后续事件。
+
+        GET /api/chat/stream?session=<sid> —— 刷新页面 / 换标签页 / 断线回来时用。
+        任务没在跑就只发一条 running=false 的快照并关闭，前端据此回落到历史。
+        """
+        sid = self._sid_or_fail((params.get("session") or ["default"])[0])
+        if sid is None:
+            return
+        session = self.web.session(sid)
+        # 先订阅再取快照：中间产生的事件排队等着，不会丢（顺序上最多重复一次）
+        q = session.subscribe()
+        try:
+            if session.agent is not None:
+                src = session.agent.messages[1:]
+            else:
+                src = (_load_session_file(sid) or {}).get("messages", [])
+            messages = [
+                {k: v for k, v in it.items() if k != "_end"}
+                for it in _display_items(src)
+            ]
+            self._sse_headers()
+            self.close_connection = True
+            if not self._sse_frame({
+                "type": "snapshot", "session": sid, "messages": messages,
+                "running": session.running_since is not None,
+            }):
+                return
+            if session.running_since is None:
+                return          # 空闲会话：快照即全量，不需要继续等事件
+            while True:
+                try:
+                    event = q.get(timeout=PUMP_IDLE)
+                except queue.Empty:
+                    try:
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                    except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
+                        return
+                    continue
+                if not self._sse_frame(event):
+                    return
+                if event.get("type") in ("done", "error", "cancelled"):
+                    return
+        finally:
+            session.unsubscribe(q)
 
     def _handle_session_create(self) -> None:
         """新建一个空会话，归属指定工作区（缺省用默认工作区）。"""
@@ -3376,17 +3455,17 @@ class _RequestHandler(BaseHTTPRequestHandler):
             session.approval_mode = approval
             session.busy = True
             session.running_since = time.time()
-            q = queue.Queue()
+            q = session.subscribe()
             session.queue = q
             # 用户显式「请帮我记住 XXX」：在 run 之前写入用户画像，
             # 这样本轮重建 system prompt 时记忆块里就已经包含它
             mem_event = _remember_from_message(message)
             if mem_event:
-                q.put(mem_event)
+                session.emit(mem_event)
 
             worker = threading.Thread(
                 target=self._run_worker,
-                args=(session, agent, message, mode, q, attachments, approval, web, skill_context),
+                args=(session, agent, message, mode, attachments, approval, web, skill_context),
                 daemon=True,
                 name=f"web-chat-{sid}",
             )
@@ -3407,18 +3486,22 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
                         alive = False
                         # 页面关掉只是「没人看」：执行归后端，任务照常跑完并落盘。
-                        # 但确认/提问必须立刻解锁 —— 现在没人能应答，继续等就是死等。
-                        session.queue = None
-                        session.deny_pending_confirm()
-                        session.deny_pending_ask()
+                        # 还有别的订阅者（另一个标签页接了进来）时，确认/提问继续等它。
+                        session.unsubscribe(q)
+                        if not session.watching:
+                            session.queue = None
+                            session.deny_pending_confirm()
+                            session.deny_pending_ask()
                         _log.info("chat.detached session=%s reason=sse_broken", sid)
                         break
                     continue
                 if not self._sse_frame(event):
                     alive = False
-                    session.queue = None
-                    session.deny_pending_confirm()
-                    session.deny_pending_ask()
+                    session.unsubscribe(q)
+                    if not session.watching:
+                        session.queue = None
+                        session.deny_pending_confirm()
+                        session.deny_pending_ask()
                     _log.info("chat.detached session=%s reason=sse_write", sid)
                     break
                 if event.get("type") in ("done", "error", "cancelled"):
@@ -3428,6 +3511,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if not pumping:
                 self._fail(500, f"{type(e).__name__}: {e}")
         finally:
+            if q is not None:
+                session.unsubscribe(q)
             # 工作线程已启动时，busy / queue / run_lock 由它负责收尾：
             # 页面关掉不影响执行，请求线程退出时不能把会话标成空闲，
             # 否则用户回来发新消息会和还在跑的那一轮撞车。
@@ -3446,7 +3531,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _run_worker(
-        session: _Session, agent, message: str, mode: str, q: queue.Queue,
+        session: _Session, agent, message: str, mode: str,
         attachments: list[dict] | None = None, approval: str = "ask",
         web: bool = False, skill_context: str = "",
     ) -> None:
@@ -3468,7 +3553,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             session.id,
             enabled=bool(settings.get("events_enabled")),
             value_limit=int(settings.get("events_value_limit") or events.DEFAULT_VALUE_LIMIT),
-            mirror=lambda ev: q.put({"type": "trace", "event": ev}),
+            mirror=lambda ev: session.emit({"type": "trace", "event": ev}),
         )
         agent.event_writer = writer
         writer.set_run(f"r-{uuid.uuid4().hex[:6]}")
@@ -3510,12 +3595,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 session.id, sec, usage["llm_calls"], usage["tool_calls"],
                 usage["prompt_tokens"], usage["completion_tokens"], len(answer or ""),
             )
-            q.put({"type": "done", "answer": answer,
-                   "sec": sec,
-                   # 标题还没被用户命名 → 记忆提炼可能在几秒后补一个模型标题，
-                   # 前端据此在稍后再拉一次会话列表（这个事件发完连接就关了）
-                   "title_pending": not session.title_custom,
-                   "usage": usage})
+            session.emit({"type": "done", "answer": answer,
+                          "sec": sec,
+                          # 标题还没被用户命名 → 记忆提炼可能在几秒后补一个模型标题，
+                          # 前端据此在稍后再拉一次会话列表（这个事件发完连接就关了）
+                          "title_pending": not session.title_custom,
+                          "usage": usage})
         except Cancelled as e:
             # cancel / run_end{status:"cancelled"} 已由 agent.run() 的取消路径发出，
             # 这里不重复记，避免事件流里出现两条取消书签。
@@ -3528,15 +3613,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 _log.exception("chat.save_failed session=%s", session.id)
             # ui.cancelled 已发过 cancelled 事件（终态，泵会停）；没发过才补发
             if not getattr(agent, "last_cancel_notice_shown", False):
-                q.put({"type": "cancelled", "reason": str(e),
-                       "usage": _usage_delta(before, agent.usage)})
+                session.emit({"type": "cancelled", "reason": str(e),
+                              "usage": _usage_delta(before, agent.usage)})
         except Exception as e:  # noqa: BLE001 —— 任何异常都转成 error 事件
             _log.exception("chat.error session=%s", session.id)
             # Agent 不吞一般异常（按原样上抛），所以 error 事件只能在这里补记
             writer.emit(events.ERROR, source=events.SRC_LOOP, phase=events.PH_RUN_END,
                         kind=type(e).__name__, message=f"{type(e).__name__}: {e}")
-            q.put({"type": "error", "message": f"{type(e).__name__}: {e}",
-                   "usage": _usage_delta(before, agent.usage)})
+            session.emit({"type": "error", "message": f"{type(e).__name__}: {e}",
+                          "usage": _usage_delta(before, agent.usage)})
         finally:
             net_mode.reset()
             agent.event_writer = None

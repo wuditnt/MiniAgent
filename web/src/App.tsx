@@ -20,6 +20,7 @@ import {
   postAnswer,
   postConfirm,
   postStop,
+  reconnectStream,
   setSessionModel,
   truncateSession,
   updateSession,
@@ -30,6 +31,7 @@ import type {
   ApprovalMode,
   ChatItem,
   ConfirmInfo,
+  HistoryMessage,
   Mode,
   ModelProvider,
   PendingAsk,
@@ -70,6 +72,21 @@ function loadSession(): string {
     localStorage.setItem(SESSION_KEY, sid);
   }
   return sid;
+}
+
+/** 历史消息 → 聊天气泡：历史回放与「接入后台任务」的快照共用同一口径 */
+function toItems(messages: HistoryMessage[]): ChatItem[] {
+  return messages.map((m, i) => ({
+    id: `h-${i}`,
+    role: m.role === "user" ? "user" : "assistant",
+    content: m.content,
+    status: "done" as const,
+    // 落盘时一并保存的用量/耗时，回放时原样恢复脚注
+    usage: m.usage,
+    sec: m.sec,
+    // 附件元数据：发送时写入，历史回放原样展示
+    attachments: m.attachments,
+  }));
 }
 
 export default function App({
@@ -182,6 +199,10 @@ export default function App({
   // 正在执行的会话 id 集合（侧栏「运行中」指示器数据源）；
   // 发消息时本地乐观加一个，之后以 /api/running 轮询结果为准
   const [runningIds, setRunningIds] = useState<Set<string>>(() => new Set());
+  /** 正在「接入」后台任务的流（与发起新消息的 abortRef 相互独立） */
+  const attachedRef = useRef<AbortController | null>(null);
+  /** 刚在本页收到终态的会话：避免轮询还没清掉 running 时又自动接入一遍 */
+  const finishedSidRef = useRef<string | null>(null);
 
   // 开关状态持久化（逐消息生效：send 时读取当前 state，不依赖这里的时序）
   useEffect(() => {
@@ -289,23 +310,14 @@ export default function App({
   // 切换会话时重新加载历史
   useEffect(() => {
     localStorage.setItem(SESSION_KEY, session);
+    // 换会话就断开旧的「接入」流：后台任务不受影响，只是这边不看了
+    attachedRef.current?.abort();
+    attachedRef.current = null;
     setItems([]);
     setEditingId(null);   // 切换会话时退出编辑态，避免把编辑目标带到别的会话
     fetchHistory(session)
       .then((h) => {
-        setItems(
-          h.messages.map((m, i) => ({
-            id: `h-${i}`,
-            role: m.role === "user" ? "user" : "assistant",
-            content: m.content,
-            status: "done" as const,
-            // 落盘时一并保存的用量/耗时，回放时原样恢复脚注
-            usage: m.usage,
-            sec: m.sec,
-            // 附件元数据：发送时写入，历史回放原样展示
-            attachments: m.attachments,
-          }))
-        );
+        setItems(toItems(h.messages));
         // 若本次是从搜索结果点进来的，定位到命中那条消息并闪烁
         const hit = pendingHit.current;
         pendingHit.current = null;
@@ -400,6 +412,137 @@ export default function App({
     }));
   };
 
+  /**
+   * 接入一条正在后台执行的任务：先收快照重建对话，再实时消费本轮事件。
+   * 场景：刷新页面 / 换标签页 / 断线回来 —— 执行一直在后端跑，这里只是重新「看」。
+   */
+  const attachRun = (sid: string) => {
+    attachedRef.current?.abort();
+    const ac = new AbortController();
+    attachedRef.current = ac;
+    const asstId = `r-${Date.now()}`;
+    setBusy(true);
+    setRunningIds((prev) => new Set(prev).add(sid));
+    reconnectStream(
+      sid,
+      (ev) => {
+        switch (ev.type) {
+          case "snapshot": {
+            const base = toItems(ev.messages);
+            if (ev.running) {
+              // 本轮还没结束：快照之后再挂一条流式气泡接收后续帧
+              setItems([
+                ...base,
+                { id: asstId, role: "assistant", content: "", status: "streaming", mode },
+              ]);
+              curAsstRef.current = asstId;
+            } else {
+              setItems(base);
+            }
+            break;
+          }
+          case "delta":
+            patchAssistant(asstId, (it) =>
+              ev.kind === "reasoning"
+                ? { ...it, reasoning: (it.reasoning || "") + ev.text }
+                : { ...it, content: it.content + ev.text }
+            );
+            break;
+          case "tool_start":
+            patchAssistant(asstId, (it) => ({
+              ...it,
+              tools: [...(it.tools || []), { id: ev.id, name: ev.name, args: ev.args }],
+            }));
+            break;
+          case "tool_end":
+            patchAssistant(asstId, (it) => ({
+              ...it,
+              tools: (it.tools || []).map((t) =>
+                t.id === ev.id ? { ...t, ok: ev.ok, sec: ev.sec, result: ev.result } : t
+              ),
+            }));
+            break;
+          case "confirm_request":
+            setConfirm({ id: ev.id, tool: ev.tool, args: ev.args });
+            break;
+          case "ask_request":
+            askRef.current = {
+              id: ev.id,
+              question: ev.question,
+              options: ev.options,
+              allowFreeText: ev.allow_free_text,
+              multi: ev.multi,
+            };
+            setAsk(askRef.current);
+            break;
+          case "notice":
+            setItems((prev) => [
+              ...prev,
+              {
+                id: `n-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+                role: "notice",
+                content: ev.text,
+                status: "done",
+              },
+            ]);
+            break;
+          case "done":
+            patchAssistant(asstId, (it) => ({
+              ...it,
+              status: "done",
+              content: ev.answer || it.content,
+              sec: ev.sec,
+              usage: ev.usage,
+            }));
+            foldAsk(asstId);
+            finishedSidRef.current = sid;
+            if (ev.title_pending) window.setTimeout(() => refreshSessions(), 5000);
+            break;
+          case "error":
+            patchAssistant(asstId, (it) =>
+              finalizeTools({ ...it, status: "error", error: ev.message, usage: ev.usage })
+            );
+            foldAsk(asstId);
+            setConfirm(null);
+            finishedSidRef.current = sid;
+            break;
+          case "cancelled":
+            patchAssistant(asstId, (it) =>
+              finalizeTools({ ...it, status: "cancelled", reason: ev.reason, usage: ev.usage })
+            );
+            foldAsk(asstId);
+            setConfirm(null);
+            finishedSidRef.current = sid;
+            break;
+          default:
+            break;
+        }
+      },
+      ac.signal
+    )
+      .catch((err: unknown) => {
+        if (ac.signal.aborted) return;
+        message.warning(err instanceof Error ? err.message : "接入运行失败");
+      })
+      .finally(() => {
+        if (attachedRef.current === ac) attachedRef.current = null;
+        setBusy(false);
+        refreshAll();
+        setTjReload((n) => n + 1);
+      });
+  };
+
+  // 打开一个正在后台跑的会话（刷新 / 换标签页 / 断线回来）→ 自动接入实时输出
+  useEffect(() => {
+    if (busy || attachedRef.current || finishedSidRef.current === session) return;
+    if (!runningIds.has(session)) {
+      if (finishedSidRef.current === session) finishedSidRef.current = null;
+      return;
+    }
+    attachRun(session);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, runningIds, busy]);
+
   /** 用户在内联卡片上作答：回传服务端并折叠卡片 */
   const handleAnswerAsk = (answer: string) => {
     const cur = askRef.current;
@@ -479,6 +622,8 @@ export default function App({
     setTraces([]); // 新一轮 run：清掉上一轮的实时镜像
     const ac = new AbortController();
     abortRef.current = ac;
+    // 409 分支把收尾交给「接入」流，避免 finally 又把 busy 打回空闲
+    let handedToAttach = false;
 
     chatStream(
       {
@@ -585,10 +730,23 @@ export default function App({
       .catch((err: unknown) => {
         if (ac.signal.aborted) return; // 页面卸载导致的 abort，无需展示
         const msg = err instanceof Error ? err.message : String(err);
+        if (/已有任务在执行/.test(msg)) {
+          // 这个会话其实还在后台跑（多半是另一个标签页发起的）：
+          // 撤回乐观插入的气泡，改为接入那条运行的实时输出
+          setItems((prev) =>
+            prev.filter((it) => it.id !== asstId && it.id !== userItem.id)
+          );
+          handedToAttach = true;
+          finishedSidRef.current = null;
+          message.info("该对话正在后台执行，已接入实时输出");
+          attachRun(session);
+          return;
+        }
         patchAssistant(asstId, (it) => ({ ...it, status: "error", error: msg }));
         foldAsk(asstId);
       })
       .finally(() => {
+        if (handedToAttach) return;
         setBusy(false);
         refreshAll(); // 对话结束后刷新列表（标题/时间/计数可能变了）
         setTjReload((n) => n + 1); // 运行结束：让轨迹抽屉拉一次磁盘全量兜底
@@ -986,6 +1144,13 @@ export default function App({
                   {currentSession?.title || "新对话"}
                 </span>
               </Tooltip>
+            )}
+            {/* 运行状态条：本对话正在执行（含后台执行、刚接入的那一刻） */}
+            {runningIds.has(session) && (
+              <span className="header-running" title="该对话正在执行，关掉页面也会继续跑完">
+                <span className="header-running-dot" />
+                {busy ? "执行中" : "后台执行中"}
+              </span>
             )}
           </div>
 

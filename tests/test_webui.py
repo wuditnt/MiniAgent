@@ -602,6 +602,50 @@ def scenario_running_indicator() -> None:
     print("  [7] 运行中指示器通过（/api/running、列表、历史三者一致）")
 
 
+def scenario_reconnect() -> None:
+    """⑱ 接入后台任务：GET /api/chat/stream 先发快照，再实时广播到终态。
+
+    刷新页面 / 换标签页 / 断线回来时，前端靠这条通道把「正在跑的那一轮」
+    重新接上：第一帧是 snapshot（已发生的消息 + running），之后照常收事件。
+    """
+    global SCRIPT
+    sid = "t-reconnect"
+    SCRIPT = [("run_python", {"code": "import time; time.sleep(3)"})]
+    # 第一个连接发起任务；读到 tool_start（工具开始 sleep）就断开，模拟关页面
+    first = SSEClient({"message": "慢慢跑", "mode": "agent", "web": False, "session": sid})
+    for ev in first.events():
+        if ev["type"] == "confirm_request":
+            _approve(sid, ev)
+        elif ev["type"] == "tool_start":
+            break
+    first.resp.close()
+
+    # 重连：必须第一帧就是 snapshot，且 running=true、带着已经发生的用户消息
+    resp = urllib.request.urlopen(
+        f"http://127.0.0.1:{WEB_PORT}/api/chat/stream?session={sid}", timeout=60)
+    events = []
+    for raw in resp:
+        line = raw.decode("utf-8").strip()
+        if not line.startswith("data:"):
+            continue
+        events.append(json.loads(line[5:]))
+    types = [e["type"] for e in events]
+    assert types and types[0] == "snapshot", f"重连第一帧应是 snapshot：{types[:3]}"
+    assert events[0]["running"] is True, f"重连时应仍在运行：{events[0]}"
+    assert any(m.get("role") == "user" for m in events[0]["messages"]), "快照应含已发生的消息"
+    assert "done" in types, f"重连后应收到终态：{types}"
+
+    # 空闲会话再接入：只给快照，running=false，连接随即关闭
+    time.sleep(1.0)   # 等 worker 的 finally 收尾（running_since 清空）
+    resp2 = urllib.request.urlopen(
+        f"http://127.0.0.1:{WEB_PORT}/api/chat/stream?session={sid}", timeout=30)
+    idle = [json.loads(raw.decode("utf-8").strip()[5:])
+            for raw in resp2 if raw.decode("utf-8").strip().startswith("data:")]
+    assert len(idle) == 1 and idle[0]["type"] == "snapshot", f"空闲会话只该有快照：{idle}"
+    assert idle[0]["running"] is False, f"结束后 running 应为 false：{idle[0]}"
+    print("  [8] 接入后台任务通过（快照 + 实时广播到终态）")
+
+
 def _ws_root() -> str:
     """Web UI 会话落在「默认工作区」目录里 —— 即用户数据目录，不再是仓库根。"""
     import core.workspace_config as wc
@@ -1166,6 +1210,7 @@ def main() -> int:
         ("停止任务", scenario_stop),
         ("页面断开不取消", scenario_detach_keeps_running),
         ("运行中指示器", scenario_running_indicator),
+        ("接入后台任务", scenario_reconnect),
         ("危险确认-拒绝", lambda: scenario_confirm(deny=True)),
         ("危险确认-允许", lambda: scenario_confirm(deny=False)),
         ("同会话并发 409", scenario_409),

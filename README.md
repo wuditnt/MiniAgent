@@ -832,7 +832,7 @@ scripts\run_tests.bat --real           # 额外跑真实 API 用例（消耗 tok
 | `tests/test_cancel.py` | 取消机制 10 项：令牌 / 杀进程 / 流中断 / 消息补齐 / 原因送达 |
 | `tests/test_mcp_cancel.py` | MCP 取消通知 8 项：送达 / 停手 / 迟到响应 / 幂等 / 定向 |
 | `tests/test_http_e2e.py` | 本地 mock HTTP（支持 SSE）：流式三条降级路径 + 并行收益 |
-| `tests/test_webui.py` | Web UI 端到端 24 项：SSE 事件序列 / 双模式工具表 / 停止 / 页面断开后台继续 / 运行中指示器 / 危险确认 / 409 / 工作区 / 模型配置 / 会话搜索 / 通用配置 / 用户指令记忆 / keep-alive 请求体 |
+| `tests/test_webui.py` | Web UI 端到端 25 项：SSE 事件序列 / 双模式工具表 / 停止 / 页面断开后台继续 / 运行中指示器 / 接入后台任务 / 危险确认 / 409 / 工作区 / 模型配置 / 会话搜索 / 通用配置 / 用户指令记忆 / keep-alive 请求体 |
 | `tests/test_sys_monitor.py` | 系统监控插件 8 项：CPU / 内存 / 磁盘 / 网络 / 开机时长 / 端口占用 |
 | `tests/test_memory.py` | 记忆系统 15 项：存储 / 保护区 / 工具不可见 / prelude / shell / 注入 / 分级淘汰 / 提炼过滤 / 检索合并 / 显式指令 |
 | `tests/test_logging.py` | 文件日志 6 项：按日目录 / 错误聚合 / 幂等重配 / 关闭 / 配置 / 清理 |
