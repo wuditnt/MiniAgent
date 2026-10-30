@@ -552,13 +552,27 @@ body,
 .msg-toolbar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-width: 220px;
+  /* antd-x 给消息列表设的是 overflow-y:auto 且没写 overflow-x，
+     按 CSS 规则 overflow-x 会被计算成 auto —— 只要这排内容比气泡宽一点点，
+     消息区底部就会冒出一条横向滚动条（手机上尤其明显）。
+     这里允许换行：窄屏 / 大字号时「用量·耗时」整体折到第二行，
+     而不是把内容顶出容器。 */
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  /* 原来是 220px：气泡是 shrink-to-fit，窄屏下它会逼着容器往外撑 */
+  min-width: 0;
   margin-top: 10px;
 }
 
 .msg-toolbar-spacer {
-  flex: 1;
+  flex: 1 0 0;
+  min-width: 0;
+}
+
+/* 消息列表只允许纵向滚动：宽内容（表格 / 代码 / 公式）各自有横向滚动条，
+   消息区本身不该出现横向滚动条 */
+.chat-inner .ant-bubble-list {
+  overflow-x: hidden;
 }
 
 /* 用户气泡的小工具栏：挂在 Bubble footer 上（气泡外侧），按钮复用 .msg-tool，
@@ -573,6 +587,8 @@ body,
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  /* 不参与压缩：允许换行后没必要再把 26×26 的按钮挤成一条 */
+  flex: 0 0 auto;
   width: 26px;
   height: 26px;
   border-radius: 6px;
@@ -611,6 +627,7 @@ body,
 .msg-stat {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 5px;
   font-size: 12px;
   color: #8c8c8c;

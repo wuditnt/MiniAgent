@@ -266,8 +266,9 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
           <div className="gs-label">
             <span className="gs-label-text">工具档位</span>
             <span className="gs-help">
-              标准只加载常用工具分组（文件 / 文档 / 代码 / 数据 / 联网 / 系统基础），
-              每次请求省下约 1.3 万字符的工具描述；需要冷门工具时切到「全部」
+              标准只常驻常用工具（文件 / 文档 / 代码 / 数据 / 联网 / 系统基础），
+              每次请求省下约 1.5 万字符；需要低频能力（OCR、压缩包、数据库等）时
+              模型会自动检索加载。「全部」一次性暴露所有工具
             </span>
           </div>
           <div className="gs-control">

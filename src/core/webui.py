@@ -37,6 +37,7 @@ from core import model_config
 from core import settings
 from core import workspace_config
 from core.images import ATTACH_NOTE
+from core.tool_search import STANDARD_HIDDEN_GROUPS
 # brief 不再从 core.ui 导入：它会把 \n 换成 ⏎ 给控制台单行展示用，
 # SSE 路径（confirm_request / tool 事件）需要保留真实换行让前端代码块渲染。
 
@@ -653,23 +654,9 @@ def _brief_args(args: dict, limit: int = 1200) -> dict:
     return {k: _clip(v) for k, v in (args or {}).items()}
 
 
-#: standard 档位不加载的低频工具分组（工具本身仍在 REGISTRY 里，改成 full 立即恢复）。
-#: 判断依据：这些分组平均每次任务都很少被选，但 schema 合计约 1.3 万字符 ——
-#: 每轮请求都要为它们付一次 token。系统/文件/文档/代码/数据/联网等常用组不受影响。
-_STANDARD_EXCLUDED_GROUPS = frozenset({
-    "sys_monitor",   # cpu / 磁盘 / 网络速率 / 进程排行
-    "net_extra",     # ping / dns / check_port / http_post
-    "random",        # random_int / random_string / gen_uuid / random_choice
-    "hash",          # base64 / 文本哈希
-    "sys_extra",     # 剪贴板 / kill_process / wait_for_file
-    "dataframe",     # df_sql / df_summary / df_to_parquet
-    "database",      # sqlite / csv_sql
-    "archive",       # zip 创建与解包
-    "ocr",           # ocr_image / ocr_pdf
-    "image_meta",    # image_convert / image_info
-    "time_math",     # time_add / time_diff
-    "text_extra",    # case_convert / url 编解码 / json_query / html_to_text
-})
+#: standard 档位不常驻的低频工具分组（定义在 core.tool_search，与检索工具共用）。
+#: 这些工具仍在 REGISTRY 里：模型用 search_tools 检索到就会加载进本会话工具表。
+_STANDARD_EXCLUDED_GROUPS = STANDARD_HIDDEN_GROUPS
 
 
 def _session_registry(mode: str, approval: str = "ask", web: bool = False,
@@ -682,8 +669,9 @@ def _session_registry(mode: str, approval: str = "ask", web: bool = False,
     request_approval 仅在 auto 档暴露 —— 其它档位模型看不到它。
 
     profile = standard / full（缺省读通用配置里的 tool_profile）：
-    智能体模式下 standard 会略去 _STANDARD_EXCLUDED_GROUPS 里的低频分组，省下每轮
-    约 1.3 万字符的工具 schema；full 暴露全部工具。
+    智能体模式下 standard 不再把 _STANDARD_EXCLUDED_GROUPS 整组塞进 schema，而是
+    常驻常用工具 + 由模型用 search_tools 按需检索加载（每轮省约 1.5 万字符）；
+    full 暴露全部工具，此时检索没有意义，search_tools 不加载。
     """
     from core.registry import REGISTRY, ToolRegistry
 
@@ -712,6 +700,8 @@ def _session_registry(mode: str, approval: str = "ask", web: bool = False,
             continue              # 快速对话：除联网能力外不调用任何工具
         if profile != "full" and t.group in _STANDARD_EXCLUDED_GROUPS:
             continue
+        if t.name == "search_tools" and profile == "full":
+            continue              # 全量档：所有工具都已声明，检索只会浪费一次调用
         if t.name == "request_approval" and approval != "auto":
             continue
         if t.name == "remember" and not memory_on:
@@ -1146,7 +1136,8 @@ def _list_session_files() -> list[dict]:
 
 def _usage_delta(before: dict, after: dict) -> dict:
     """本轮用量 = after - before，供前端「用量」展示（负数按 0 处理）。"""
-    keys = ("llm_calls", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens")
+    keys = ("llm_calls", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens",
+            "cached_tokens")
     return {k: max(0, int(after.get(k, 0)) - int(before.get(k, 0))) for k in keys}
 
 

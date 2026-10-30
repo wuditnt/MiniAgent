@@ -48,7 +48,13 @@ import tools  # noqa: F401  —— 导入即加载插件；同时保留 agent.to
 from core import approval, ask, events, logging_setup, memory
 from core.cancel import CancellationToken, Cancelled, current_token, set_current_token
 from core.images import take_images
-from core.registry import REGISTRY, Tool, ToolRegistry
+from core.registry import (
+    REGISTRY,
+    Tool,
+    ToolRegistry,
+    reset_current_registry,
+    set_current_registry,
+)
 from core.ui import PlainUI
 
 _llm_log = logging_setup.get_logger("llm")
@@ -83,6 +89,9 @@ DEFAULT_SYSTEM_PROMPT = """你是一个能操作本地环境的智能体。
 6. Python 依赖：生成的代码用到第三方库时，在开头用 `# pip install xxx` 注释列出依赖；需要安装时用 run_shell 执行 `python -m pip install xxx`（装进后端虚拟环境，避免用裸 `pip install` 落到系统环境），装完再运行。
 7. 尽早收尾：任务完成后直接给出最终结果，不要无意义地多轮试探；简单任务尽量 2-3 轮内结束，复杂任务也控制在必要轮次内。
 8. 需要澄清就问：缺少关键信息或需要用户抉择时，调用 ask_user 提问（能给出候选就放进 options），不要在正文里泛泛地反问；能从上下文推断或可用默认值处理的，不要打断用户。
+9. 执行本地命令直接用 run_shell（Windows 上就是 PowerShell）；不要用 run_python 再包一层
+   subprocess 拼命令串 —— 多一层、更难读，也容易被网关的 WAF 判成攻击特征而拦截。
+   查进程用 list_processes，查硬件/系统概况用 system_info，别自己拼 PowerShell 重写一遍。
 
 如果现有工具不足以完成任务，明确说明缺什么能力，而不是硬凑。
 回答用简体中文。"""
@@ -206,6 +215,75 @@ def _looks_like_reasoning_rejection(err: Exception) -> bool:
     )
 
 
+class GatewayBlocked(RuntimeError):
+    """网关/WAF 拦截了请求：拿到的是 HTML 拦截页，而不是模型的 JSON 响应。
+
+    典型场景：企业网关前面的安全设备把「工具参数里的命令拼接」判成攻击特征，
+    直接返回 403 + 拦截页。对上层来说这既不是模型错误也不是网络错误，
+    需要一句能看懂的话，而不是整页 HTML。
+    """
+
+
+#: WAF 拦截页的特征词（大小写无关）
+_GATEWAY_MARKERS = (
+    "<!doctype html",
+    "<html",
+    "请求已被阻断",
+    "已被拦截",
+    "访问请求可能对网站造成安全威胁",
+    "request blocked",
+)
+
+
+def _is_gateway_block(err: Exception) -> bool:
+    text = str(err).lower()
+    return any(k in text for k in _GATEWAY_MARKERS)
+
+
+def _gateway_event_id(text: str) -> str:
+    """从拦截页里抠出 event_id（有的在注释里，有的在正文里）。"""
+    m = re.search(r"event_id:\s*([0-9a-fA-F]{16,})", text)
+    return m.group(1) if m else ""
+
+
+def _short_error(err: Exception, limit: int = 200) -> str:
+    """把异常压成单行短文本：日志和 UI 都不该出现整页 HTML。"""
+    text = re.sub(r"<[^>]+>", " ", str(err))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _gateway_blocked_error(err: Exception) -> GatewayBlocked | None:
+    if not _is_gateway_block(err):
+        return None
+    eid = _gateway_event_id(str(err))
+    msg = "企业网关的安全策略拦截了本次请求（HTTP 403）"
+    if eid:
+        msg += f"，event_id={eid}"
+    msg += (
+        "。常见诱因是请求体里含被 WAF 判为攻击特征的内容（例如命令拼接）；"
+        "可稍后重试，或把该会话切到直连官方端点。"
+    )
+    return GatewayBlocked(msg)
+
+
+def _is_mid_system_rejection(err: Exception) -> bool:
+    """只有「400/422 + 明确说 system 位置不对」才值得去掉末尾提醒重试。
+
+    不能只看「请求里有 system」——403（网关拦截）、401（Key 失效）、429（限流）
+    都会带着请求体里的 system 一起重发，白白多打一次服务端。
+    """
+    if getattr(err, "status_code", None) not in (400, 422):
+        return False
+    text = str(err).lower()
+    if "system" not in text and "role" not in text:
+        return False
+    return any(
+        k in text
+        for k in ("first", "only", "must be", "unsupported", "invalid", "unexpected", "not allowed")
+    )
+
+
 def _flatten_history(messages: list[dict[str, Any]]) -> str:
     """把消息列表压成纯文本，供摘要器阅读（工具结果截断，避免摘要输入本身超长）。"""
     lines: list[str] = []
@@ -232,8 +310,25 @@ def _flatten_history(messages: list[dict[str, Any]]) -> str:
 
 def _usage_delta(before: dict, after: dict) -> dict:
     """本轮用量 = after - before（只给事件流用，负数按 0 处理）。"""
-    keys = ("llm_calls", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens")
+    keys = ("llm_calls", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens",
+            "cached_tokens")
     return {k: max(0, int(after.get(k, 0)) - int(before.get(k, 0))) for k in keys}
+
+
+def _cached_tokens(usage) -> int:
+    """从服务商返回的 usage 里取「前缀缓存命中」的 token 数。
+
+    各家字段不统一：DeepSeek 用 prompt_cache_hit_tokens，OpenAI 放在
+    prompt_tokens_details.cached_tokens，Anthropic 兼容层用 cache_read_input_tokens。
+    都没有就返回 0（说明这一轮没命中缓存，或服务商不支持）。
+    """
+    for key in ("prompt_cache_hit_tokens", "cache_read_input_tokens"):
+        value = getattr(usage, key, None)
+        if isinstance(value, int):
+            return value
+    details = getattr(usage, "prompt_tokens_details", None)
+    value = getattr(details, "cached_tokens", None) if details is not None else None
+    return value if isinstance(value, int) else 0
 
 
 class Agent:
@@ -316,6 +411,9 @@ class Agent:
         self.usage: dict[str, int] = {
             "llm_calls": 0, "tool_calls": 0,
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+            # 前缀缓存命中数（各服务商字段名不同，见 _cached_tokens）；
+            # 工具表与 system 稳定时它应该逐轮上升，是「缓存真的生效」的唯一证据
+            "cached_tokens": 0,
         }
 
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -612,6 +710,9 @@ class Agent:
             self.session_id or "-", len(user_input or ""), len(attachments or []),
         )
         prev = set_current_token(token)
+        # 本次运行实际使用的会话工具表：search_tools 这类「动态加载能力」的工具
+        # 据此把新工具装进正确的表（写全局表会污染所有会话）。
+        reg_tok = set_current_registry(self.registry)
         # 钩子：取消时关闭 HTTP 客户端，卡在 socket 读上的请求会立刻报错 ——
         # 否则「非流式 + 网络卡住」时 Ctrl+C 打不断，取消就是一句空话。
         # 无条件注册：客户端是 _run_loop 里懒创建的，首次 run() 时还是 None，
@@ -644,11 +745,12 @@ class Agent:
             self._spawn_extract(user_input, answer)
             _llm_log.info(
                 "run.done session=%s sec=%.1f llm_calls=%d tool_calls=%d "
-                "prompt_tokens=%d completion_tokens=%d answer_chars=%d",
+                "prompt_tokens=%d cached_tokens=%d completion_tokens=%d answer_chars=%d",
                 self.session_id or "-", time.time() - _run_t0,
                 self.usage["llm_calls"] - _usage_before["llm_calls"],
                 self.usage["tool_calls"] - _usage_before["tool_calls"],
                 self.usage["prompt_tokens"] - _usage_before["prompt_tokens"],
+                self.usage["cached_tokens"] - _usage_before["cached_tokens"],
                 self.usage["completion_tokens"] - _usage_before["completion_tokens"],
                 len(answer or ""),
             )
@@ -683,6 +785,7 @@ class Agent:
         finally:
             approval.reset_asker(approval_tok)
             ask.reset_asker(ask_tok)
+            reset_current_registry(reg_tok)
             self.cancel_token = None
             self._extra_system = ""
             set_current_token(prev)
@@ -1135,7 +1238,6 @@ class Agent:
             attachments=um.get("_attachments") or [],
         )
         client = self._get_client()
-        schemas = self.registry.schemas()
         self.last_answer_streamed = False
         self._empty_answer_retried = False   # 本轮是否已因「空回答」重试过（只重试一次）
 
@@ -1158,6 +1260,11 @@ class Agent:
             reminder = self._net_reminder()
             if reminder:
                 msgs.append({"role": "system", "content": reminder})
+            # 每轮重新取一次：search_tools 可能在上一个回合把低频工具加载进
+            # 本会话表，只有重算才能让它们在本轮请求里被正常声明。
+            # schemas() 按名字排序（registry.schemas），同样的工具表每次都产出
+            # 逐字节相同的 JSON —— 这是前缀缓存能命中的前提，别改成集合遍历。
+            schemas = self.registry.schemas()
             payload = {
                 "model": self.model,
                 "messages": msgs,
@@ -1232,6 +1339,7 @@ class Agent:
                     "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
                     "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
                     "total_tokens": getattr(usage, "total_tokens", 0) or 0,
+                    "cached_tokens": _cached_tokens(usage),
                 },
                 content=content or "", content_chars=len(content or ""),
                 content_sha256=events.sha256_text(content or ""),
@@ -1365,6 +1473,7 @@ class Agent:
                 "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
                 "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
                 "total_tokens": getattr(usage, "total_tokens", 0) or 0,
+                "cached_tokens": _cached_tokens(usage),
             },
             content=content or "", content_chars=len(content or ""),
             content_sha256=events.sha256_text(content or ""),
@@ -1412,30 +1521,51 @@ class Agent:
         except Exception as e:  # noqa: BLE001
             if token is not None and token.cancelled():
                 raise Cancelled("LLM 请求被取消") from None
+            blocked = _gateway_blocked_error(e)
+            if blocked is not None:
+                _llm_log.error(
+                    "request.blocked_by_gateway model=%s event_id=%s brief=%s",
+                    self.model, _gateway_event_id(str(e)), _short_error(e),
+                )
+                raise blocked from None
             msgs = payload.get("messages") or []
             if (
                 tail_system
                 and msgs
                 and msgs[-1].get("role") == "system"
                 and msgs[-1].get("content") == tail_system
+                and _is_mid_system_rejection(e)
             ):
                 _llm_log.warning(
-                    "服务端不接受对话中间的 system 提醒，已去掉重试：%s", type(e).__name__
+                    "服务端不接受对话中间的 system 提醒，已去掉重试：%s", _short_error(e, 80)
                 )
                 retry = dict(payload)
                 retry["messages"] = msgs[:-1]
-                return self._request(client, retry)
+                try:
+                    return self._request(client, retry)
+                except Exception as e2:  # noqa: BLE001
+                    blocked = _gateway_blocked_error(e2)
+                    if blocked is not None:
+                        _llm_log.error(
+                            "request.blocked_by_gateway model=%s event_id=%s brief=%s",
+                            self.model, _gateway_event_id(str(e2)), _short_error(e2),
+                        )
+                        raise blocked from None
+                    raise
             # 兜底：服务商不认识思考参数（reasoning_effort / thinking / enable_thinking）
             # 时把相关参数全部摘掉重试一次，别让普通对话失败
             hit_keys = [k for k in _REASONING_KEYS if k in payload]
             if hit_keys and _looks_like_reasoning_rejection(e):
                 _llm_log.warning(
                     "推理参数（%s）不被支持，已去掉重试：%s",
-                    ",".join(hit_keys), type(e).__name__,
+                    ",".join(hit_keys), _short_error(e, 80),
                 )
                 retry = {k: v for k, v in payload.items() if k not in _REASONING_KEYS}
                 return self._request(client, retry)
-            _llm_log.exception("request.failed model=%s", self.model)
+            _llm_log.error(
+                "request.failed model=%s error=%s: %s",
+                self.model, type(e).__name__, _short_error(e),
+            )
             raise
 
     def _request(self, client, payload: dict):
@@ -1582,6 +1712,7 @@ class Agent:
             return
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             self.usage[key] += getattr(usage, key, 0) or 0
+        self.usage["cached_tokens"] += _cached_tokens(usage)
 
     # ------------------------------------------------------------ 工具执行
 

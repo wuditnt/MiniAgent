@@ -230,7 +230,11 @@ function MessageToolbar({
       <span className="msg-toolbar-spacer" />
       {showUsage && (
         <Tooltip
-          title={`输入 ${usage.prompt_tokens} / 输出 ${usage.completion_tokens} tokens ｜ 模型调用 ${usage.llm_calls} 次 ｜ 工具 ${usage.tool_calls} 次`}
+          title={
+            `输入 ${usage.prompt_tokens} / 输出 ${usage.completion_tokens} tokens` +
+            (usage.cached_tokens ? `（缓存命中 ${fmtTokens(usage.cached_tokens)}）` : "") +
+            ` ｜ 模型调用 ${usage.llm_calls} 次 ｜ 工具 ${usage.tool_calls} 次`
+          }
         >
           <span className="msg-stat">
             <DatabaseOutlined />

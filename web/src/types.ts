@@ -36,6 +36,8 @@ export interface Usage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  /** 前缀缓存命中的 token 数（服务商不支持或老会话可能没有） */
+  cached_tokens?: number;
 }
 
 /** SSE 事件（/api/chat 响应流；终态 = done / error / cancelled） */

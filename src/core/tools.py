@@ -66,10 +66,12 @@ _REPORT = _LOADER.load_all()
 from core.approval import register as _register_approval  # noqa: E402
 from core.ask import register as _register_ask  # noqa: E402
 from core.memory import register as _register_memory  # noqa: E402
+from core.tool_search import register as _register_tool_search  # noqa: E402
 
 _register_approval()
 _register_ask()
 _register_memory()
+_register_tool_search()
 
 
 def loader() -> PluginLoader:

@@ -336,6 +336,11 @@ def test_tail_system_rejected_falls_back():
     """服务商只允许第一条 system 时，去掉末尾提醒重发，而不是整轮失败。"""
     msg = _Msg(content="答。")
 
+    class _BadRole(ValueError):
+        """模拟 OpenAI 的 400：system 消息位置不对。"""
+
+        status_code = 400
+
     class _RejectTail:
         def __init__(self):
             self.calls = []
@@ -345,7 +350,7 @@ def test_tail_system_rejected_falls_back():
             self.calls.append(kw)
             msgs = kw["messages"]
             if len(msgs) > 1 and msgs[-1].get("role") == "system":
-                raise ValueError("system message must be the first message")
+                raise _BadRole("Error code: 400 - system message must be the first message")
             return _Resp(msg)
 
     client = _RejectTail()
@@ -357,6 +362,65 @@ def test_tail_system_rejected_falls_back():
     assert len(client.calls) == 2, client.calls
     assert client.calls[1]["messages"][-1]["role"] == "user", client.calls[1]["messages"][-1]
     print("✓ 联网提醒：服务端拒绝中间 system 时自动去除重发")
+
+
+def test_gateway_block_is_friendly_and_not_retried():
+    """网关返回 HTML 拦截页（403）：只发一次，转成可读错误，不把整页 HTML 透给用户。"""
+    page = (
+        "<!DOCTYPE html><html><body>您的访问请求可能对网站造成安全威胁，请求已被阻断。"
+        "<!-- event_id: 0d6aa994d51e47a7940cd6e417477b49 --></body></html>"
+    )
+
+    class _Blocked(Exception):
+        status_code = 403
+
+    class _C:
+        def __init__(self):
+            self.calls = []
+            self.chat = type("Chat", (), {"completions": self})()
+
+        def create(self, **kw):
+            self.calls.append(kw)
+            raise _Blocked(page)
+
+    client = _C()
+    a = agent_mod.Agent(verbose=False, client=client)
+    a.net_mode = "cloud"
+    try:
+        a.run("问题")
+    except agent_mod.GatewayBlocked as e:
+        text = str(e)
+    else:
+        raise AssertionError("403 拦截页应抛出 GatewayBlocked")
+    assert len(client.calls) == 1, f"403 不该重试，实际发了 {len(client.calls)} 次"
+    assert "event_id=0d6aa994" in text, text
+    assert "<html" not in text.lower() and "<!" not in text, text
+    print("✓ 网关拦截：403 HTML 只请求一次，错误可读且带 event_id")
+
+    # 非 HTML 的 403（比如 Key 失效）也不该触发「去掉 system 重试」
+    class _Denied(Exception):
+        status_code = 403
+
+    class _D:
+        def __init__(self):
+            self.calls = []
+            self.chat = type("Chat", (), {"completions": self})()
+
+        def create(self, **kw):
+            self.calls.append(kw)
+            raise _Denied("Error code: 403 - invalid api key")
+
+    client = _D()
+    b = agent_mod.Agent(verbose=False, client=client)
+    b.net_mode = "cloud"
+    try:
+        b.run("问题")
+    except _Denied:
+        pass
+    else:
+        raise AssertionError("普通 403 应原样抛出")
+    assert len(client.calls) == 1, f"普通 403 不该重试，实际发了 {len(client.calls)} 次"
+    print("✓ 普通 403：不误判为 system 位置问题，不重复请求")
 
 
 def test_empty_answer_retried_once():
@@ -395,6 +459,7 @@ if __name__ == "__main__":
     test_dangerous_command_blocked()
     test_net_reminder_is_system_role()
     test_tail_system_rejected_falls_back()
+    test_gateway_block_is_friendly_and_not_retried()
     test_empty_answer_retried_once()
     print("---")
     print("全部通过 ✅")

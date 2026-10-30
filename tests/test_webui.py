@@ -204,15 +204,19 @@ def scenario_registry_matrix() -> None:
     # 开联网：搜索 + 抓取（chat 模式也只有这两个）
     chat_cloud = {t.name for t in _session_registry("chat", "ask", True).all()}
     assert chat_cloud == {"web_search", "fetch_url"}, f"chat 联网工具表异常：{sorted(chat_cloud)}"
-    # agent 模式：全量；关联网时剔除 web_search，抓取仍在；ask 档不暴露 request_approval
+    # agent 模式：全量（全量档不加载 search_tools —— 所有工具都已声明）；
+    # 关联网时剔除 web_search，抓取仍在；ask 档不暴露 request_approval
     agent_local = {t.name for t in _session_registry("agent", profile="full").all()}
-    expect_agent = all_names - {"web_search", "request_approval"}
+    expect_agent = all_names - {"web_search", "request_approval", "search_tools"}
     assert agent_local == expect_agent, (
         f"agent 关联网差异：多 {sorted(agent_local - expect_agent)} / "
         f"少 {sorted(expect_agent - agent_local)}"
     )
     agent_cloud = {t.name for t in _session_registry("agent", "auto", True, profile="full").all()}
-    assert agent_cloud == all_names, f"auto + 联网应为全量，差异：{sorted(all_names ^ agent_cloud)}"
+    expect_full = all_names - {"search_tools"}
+    assert agent_cloud == expect_full, (
+        f"auto + 联网应为全量，差异：{sorted(expect_full ^ agent_cloud)}"
+    )
 
     # 档位：standard 只略去低频分组（常用能力必须留下），full 等于全量
     from core.webui import _STANDARD_EXCLUDED_GROUPS
@@ -224,6 +228,7 @@ def scenario_registry_matrix() -> None:
     need = {"read_file", "write_file", "read_xlsx", "run_shell", "web_search", "ask_user"}
     assert need <= std, f"standard 少了常用工具：{sorted(need - std)}"
     assert "random_int" not in std and "zip_create" not in std, "standard 应裁掉低频工具"
+    assert "search_tools" in std, "standard 必须带检索工具，否则低频能力对模型不可见"
     print("  [1] 会话工具表矩阵（chat±web / agent±web / 档位）通过")
 
 

@@ -232,6 +232,33 @@ def use_registry(reg: ToolRegistry):
         _ACTIVE.reset(token)
 
 
+# 「本次运行在哪个工具表里执行」—— 与上面的 _ACTIVE 不是一回事：
+#   _ACTIVE       = @tool 往哪个表里注册（导入插件时临时切换）
+#   _CURRENT      = Agent.run 期间实际使用/执行的表（会话级克隆，可能被裁过）
+# 工具若需要「给当前会话动态加载能力」（如 search_tools），必须读后者，
+# 否则会把工具装进全局表，污染别的会话。
+_CURRENT: contextvars.ContextVar[ToolRegistry | None] = contextvars.ContextVar(
+    "current_session_registry", default=None
+)
+
+
+def current_registry() -> ToolRegistry:
+    """当前运行使用的工具表；不在 Agent.run 内时回退全局 REGISTRY。"""
+    return _CURRENT.get() or REGISTRY
+
+
+def set_current_registry(reg: ToolRegistry | None) -> contextvars.Token:
+    return _CURRENT.set(reg)
+
+
+def reset_current_registry(token: contextvars.Token) -> None:
+    """恢复注入前的状态；token 跨上下文无效时退化为清空本上下文。"""
+    try:
+        _CURRENT.reset(token)
+    except (ValueError, LookupError):
+        _CURRENT.set(None)
+
+
 # ---------------------------------------------------------------- 装饰器
 
 def tool(
