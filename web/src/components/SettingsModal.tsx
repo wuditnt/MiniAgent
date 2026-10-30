@@ -251,13 +251,17 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
 
   const renderField = (key: keyof GeneralSettings) => {
     if (!draft) return null;
-    const meta = FIELDS.find((f) => f.key === key)!;
-    if (key === "stream" || key === "parallel_tools") {
-      return <Switch checked={draft[key] as boolean} onChange={(v) => patch(key, v)} />;
+    const value = draft[key];
+    // 布尔项一律渲染成开关（不是只有 stream / parallel_tools 才是布尔）
+    if (typeof value === "boolean") {
+      return <Switch checked={value} onChange={(v) => patch(key, v)} />;
     }
+    // 数值项必须能在 FIELDS 里找到区间；找不到就不渲染，别在这里抛异常
+    const meta = FIELDS.find((f) => f.key === key);
+    if (!meta) return null;
     return (
       <InputNumber
-        value={draft[key] as number}
+        value={value as number}
         min={meta.min}
         max={meta.max}
         step={meta.step}
