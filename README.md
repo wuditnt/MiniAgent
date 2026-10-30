@@ -844,7 +844,7 @@ scripts\run_tests.bat --real           # 额外跑真实 API 用例（消耗 tok
 | `tests/test_ask.py` | 内联提问 12 项：返回协议 / 选项规范化 / 工具契约 / 等待桥 |
 | `tests/test_auth.py` | 登录与账号 9 项：建库 / 默认超管 / scrypt 哈希 / 会话 / 失败限流 / 超管保护规则 / 改密 / 写入节流 |
 | `tests/test_tool_search.py` | 工具检索 6 项：档位矩阵 / 按需加载 / 无命中清单 / 下轮回可见 / 缓存命中统计 / 工具表稳定 |
-| `tests/test_subagent.py` | 子智能体 13 项：任务包隔离 / 只读工具子集 / 请求体一致 / 结果截断 / 空任务 / 取消传导 / 超时中断 / 失败降级 / 触发规则 / 开关 |
+| `tests/test_subagent.py` | 子智能体 15 项：任务包隔离 / 只读工具子集 / 请求体一致 / 结果截断 / 空任务 / 取消传导 / 超时中断 / 失败降级 / 触发规则 / 开关 / 委派提醒 |
 
 **CI**：仓库带 `.github/workflows/ci.yml`，push/PR 时自动跑两件事 ——
 Windows runner 上 `pytest tests -q`（平台行为依赖 Windows），Ubuntu 上 `npm run build`

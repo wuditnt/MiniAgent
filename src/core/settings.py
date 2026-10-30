@@ -69,7 +69,7 @@ DEFAULTS: dict = {
     # 开启后 delegate 工具进会话工具表：模型可把一个自包含的只读子任务交给
     # 子代理执行，只把结论带回主对话（中间过程不占主上下文）。
     "subagent_enabled": True,
-    "subagent_max_turns": 6,       # 单个子任务最多几轮（只做一件事，不需要很多轮）
+    "subagent_max_turns": 10,      # 单个子任务最多几轮（实测 6 轮偏紧，简单统计也会撞上限）
     "subagent_timeout": 120,       # 单个子任务墙钟超时（秒），到点中断
 }
 

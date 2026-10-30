@@ -294,6 +294,60 @@ def test_subagent_setting_disables_tool():
     print("✓ 开关：关闭后 delegate 不进会话工具表")
 
 
+def test_delegate_nudge_stages():
+    """委派提醒：没有 delegate 时不说；6 次提醒一次；12 次再提醒一次（措辞更强）；之后不再提醒。"""
+    first, second = agent_mod.Agent._DELEGATE_NUDGE_AT
+
+    no_delegate = agent_mod.Agent(
+        verbose=False, client=_StubClient([]), registry=subagent.build_registry()
+    )
+    no_delegate._tool_calls_this_run = 20
+    assert no_delegate._delegate_nudge() == "", "工具表里没有 delegate 时提醒没有意义"
+
+    from core.webui import _session_registry
+
+    reg = _session_registry("agent", "ask", False, profile="standard")
+    a = agent_mod.Agent(verbose=False, client=_StubClient([]), registry=reg)
+    a._tool_calls_this_run = first - 1
+    assert a._delegate_nudge() == "", "未到阈值不该提醒"
+    a._tool_calls_this_run = first
+    one = a._delegate_nudge()
+    assert "delegate" in one and "次工具" in one, one
+    assert a._delegate_nudge() == "", "第一次之后要到第二个阈值才再说"
+
+    a._tool_calls_this_run = second
+    two = a._delegate_nudge()
+    assert "还没有委派" in two and two != one, two
+    assert a._delegate_nudge() == "", "两次提醒之后不再重复"
+    print("✓ 提醒：两次阈值，措辞递进，之后不重复")
+
+
+def test_nudge_injected_after_many_tool_calls():
+    """连续多轮工具调用后，请求末尾会依次出现两次委派提醒。"""
+    from core.webui import _session_registry
+
+    reg = _session_registry("agent", "ask", False, profile="standard")
+    rounds = agent_mod.Agent._DELEGATE_NUDGE_AT[-1]
+    script = [_Msg(tool_calls=[_TC(i, "now", "{}")]) for i in range(1, rounds + 1)]
+    script.append(_Msg(content="完成。"))
+
+    a = agent_mod.Agent(
+        verbose=False, client=_StubClient(script), registry=reg, max_turns=rounds + 2
+    )
+    out = a.run("查几次时间")
+    assert out == "完成。", out
+
+    calls = a._client.chat.completions.calls
+    nudged = [
+        c for c in calls
+        if (c.get("messages") or [{}])[-1].get("role") == "system"
+        and "delegate" in ((c["messages"][-1].get("content")) or "")
+    ]
+    assert len(nudged) == 2, f"应注入两次委派提醒，实际 {len(nudged)} 次"
+    assert len(nudged[0]["messages"][-1]["content"]) != len(nudged[1]["messages"][-1]["content"])
+    print("✓ 提醒：两次提醒都真的进了请求末尾")
+
+
 if __name__ == "__main__":
     test_task_package_only()
     test_readonly_tool_subset()
@@ -308,5 +362,7 @@ if __name__ == "__main__":
     test_delegate_skips_vague_task()
     test_delegate_summarises_result()
     test_subagent_setting_disables_tool()
+    test_delegate_nudge_stages()
+    test_nudge_injected_after_many_tool_calls()
     print("---")
     print("全部通过 ✅")

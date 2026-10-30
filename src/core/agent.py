@@ -403,6 +403,10 @@ class Agent:
         # 控制台/一次性模式据此决定要不要再 print 一遍，避免同一段文字出现两次。
         self.last_answer_streamed = False
         self._empty_answer_retried = False   # 「空回答」重试标记（每轮 run 重置，只重试一次）
+        # 委派提醒：本 run 已执行多少次工具、是否已经派过子代理、已经提醒过几次
+        self._tool_calls_this_run = 0
+        self._delegated = False
+        self._delegate_nudge_count = 0
 
         # 取消提示是否已经由 UI 层显示过（同上：避免控制台重复打印）。
         self.last_cancel_notice_shown = False
@@ -906,6 +910,44 @@ class Agent:
     def _net_reminder(self) -> str:
         return self._NET_REMINDER if self.net_mode == "cloud" else ""
 
+    #: 工具调用累计到这些数、还没委派过，就依次提醒（最多两次）
+    _DELEGATE_NUDGE_AT = (6, 12)
+
+    def _delegate_nudge(self) -> str:
+        """工具调用次数到阈值、且还没派过子代理时，提醒模型把剩余排查交出去。
+
+        为什么必须在代码里做：实测仅靠工具描述与系统提示，模型会自己硬跑十几轮
+        （18~19 次工具调用、十几万 prompt token），一次都没调用 delegate。
+        这个提醒由运行时注入，不依赖模型自觉。两次的措辞递进：
+        第一次只是建议，第二次明确告诉它「继续自己查每个中间结果都会重复计费」。
+        """
+        if self._delegated or self.registry.get("delegate") is None:
+            return ""     # 已经派过 / 快速对话 / 配置关闭：不用提醒
+        stage = self._delegate_nudge_count
+        if stage >= len(self._DELEGATE_NUDGE_AT):
+            return ""
+        if self._tool_calls_this_run < self._DELEGATE_NUDGE_AT[stage]:
+            return ""
+        self._delegate_nudge_count = stage + 1
+        _llm_log.info(
+            "delegate.nudge stage=%d turn=%d tool_calls=%d",
+            stage + 1, self._turn, self._tool_calls_this_run,
+        )
+        used = self._tool_calls_this_run
+        if stage == 0:
+            return (
+                f"【系统提示，不是用户发言】本轮你已经调用了 {used} 次工具。"
+                "如果剩余工作还需要多轮工具调用才能得出结论，请立刻用 delegate 把剩余排查整体交给"
+                "子代理（任务包写清目标 / 输入 / 验收），你只拿结论；"
+                "如果只差一两次调用就能收尾，就继续做完，不要为了委派而委派。"
+            )
+        return (
+            f"【系统提示，不是用户发言】本轮工具调用已达到 {used} 次，你还没有委派过。"
+            "继续自己查，每个中间结果都会留在上下文里、之后每一轮都要重新计费。"
+            "如果剩余工作不止一两次调用，现在就调用 delegate 把剩余排查交出去；"
+            "确实马上能收尾的话，做完即可。"
+        )
+
     def _sync_system_prompt(self, user_input: str = "") -> None:
         """每轮 run() 刷新 messages[0] = 基础提示词 + auto 责任准则 + 联网提示 + 记忆块。
 
@@ -1240,6 +1282,9 @@ class Agent:
         client = self._get_client()
         self.last_answer_streamed = False
         self._empty_answer_retried = False   # 本轮是否已因「空回答」重试过（只重试一次）
+        self._tool_calls_this_run = 0
+        self._delegated = False
+        self._delegate_nudge_count = 0
 
         for turn in range(1, self.max_turns + 1):
             tok = self.cancel_token
@@ -1265,7 +1310,11 @@ class Agent:
             ]
             # 提醒必须是 system 角色：以 user 角色追加会让「最后一条用户消息」变成
             # 一段没有任务内容的系统说明，模型会误判成「用户这条消息是空的」。
-            reminder = self._net_reminder()
+            # 联网提醒与委派提醒合成一条再追加：_request_or_cancel 的降级逻辑只回退
+            # 「最后一条」system 消息，分两条的话第二次重试仍会被同一个服务端拒绝。
+            reminder = "\n\n".join(
+                p for p in (self._net_reminder(), self._delegate_nudge()) if p
+            )
             if reminder:
                 msgs.append({"role": "system", "content": reminder})
             # 每轮重新取一次：search_tools 可能在上一个回合把低频工具加载进
@@ -1392,6 +1441,10 @@ class Agent:
                         "content": result,
                     }
                 )
+            # 委派提醒的计数依据：本 run 累计执行了多少次工具、有没有派过子代理
+            self._tool_calls_this_run += len(tool_calls)
+            if any((tc.get("function") or {}).get("name") == "delegate" for tc in tool_calls):
+                self._delegated = True
 
             # 工具可能通过附件通道递了图片（如 view_image）：
             # 回填完工具结果后取走，作为一条 user 消息追加，
