@@ -10,6 +10,8 @@ Web UI 后端：把 Agent 的 9 个 UI 回调翻译成 SSE 事件流，浏览器
   · 危险确认：ask_confirm 回调推 confirm_request 事件后，在工作线程上无限等待
     （0.5s 轮询检查停止/断连，不设超时）；POST /api/confirm 置位事件返回用户选择
   · 取消：POST /api/stop → agent.interrupt()，复用 core/cancel 全链路
+  · 断连：页面关掉只停止推送，任务继续在后台跑完并落盘（执行归后端，前端只负责看）；
+    期间待确认 / 待提问按「拒绝 / 未回答」立即解除 —— 没人能答就不该继续等
 """
 
 from __future__ import annotations
@@ -220,6 +222,9 @@ class _Session:
         self.approval_mode = "ask"            # 三档确认：ask / auto / full，逐轮生效
         self.queue: queue.Queue | None = None
         self.busy = False                     # run_lock 的可观察副本
+        # 本轮开始执行的时刻（None = 空闲）。与 busy 同步维护：
+        # 侧栏「运行中」指示器靠它判断，不依赖前端是否还连着这条 SSE。
+        self.running_since: float | None = None
         self.run_lock = threading.Lock()
         self.confirm_lock = threading.Lock()
         # 询问槽位：同一会话同一时刻只挂一张确认/提问卡（前端是单卡 UI）。
@@ -1480,6 +1485,15 @@ class WebServer:
                 self.sessions[sid] = s
             return s
 
+    def running_sessions(self) -> dict[str, float]:
+        """当前正在执行的会话：{sid: 开始时刻}。只读内存，不碰磁盘。"""
+        with self._lock:
+            return {
+                sid: s.running_since
+                for sid, s in self.sessions.items()
+                if s.running_since is not None
+            }
+
     def reset_agents(self) -> None:
         """切换模型后让所有会话的 Agent 下次对话时重建。
 
@@ -1770,6 +1784,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_trajectory(parse_qs(parsed.query))
         elif route == "/api/sessions":
             self._handle_sessions_list(parse_qs(parsed.query))
+        elif route == "/api/running":
+            self._handle_running()
         elif route == "/api/workspaces":
             self._handle_workspaces_list()
         elif route == "/api/models":
@@ -2114,7 +2130,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             {k: v for k, v in it.items() if k != "_end"}
             for it in _display_items(src)
         ]
-        self._json({"session": sid, "messages": messages})
+        self._json({"session": sid, "messages": messages,
+                    "running": session.running_since is not None})
 
     def _handle_trajectory(self, params: dict) -> None:
         """只读：回放会话事件流（P0 事实层），供前端 Trajectory 视图使用。
@@ -2164,7 +2181,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 hit_index, snippet = matched
                 filtered.append({**it, "hit_index": hit_index, "snippet": snippet})
             items = filtered
+        # 执行状态来自内存（磁盘只有消息，记不住「正在跑」）；前端侧栏据此点亮指示器
+        running = self.web.running_sessions()
+        items = [{**it, "running": it["id"] in running} for it in items]
         self._json({"sessions": items})
+
+    def _handle_running(self) -> None:
+        """运行中的会话列表：{"sessions": {sid: {"since": 开始时刻}}}。
+
+        侧栏「运行中」指示器的轮询源 —— 只读内存、不带消息，开销与磁盘无关。
+        """
+        running = self.web.running_sessions()
+        self._json({"sessions": {sid: {"since": since} for sid, since in running.items()}})
 
     def _handle_session_create(self) -> None:
         """新建一个空会话，归属指定工作区（缺省用默认工作区）。"""
@@ -3313,6 +3341,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         q: queue.Queue | None = None
         alive = True
         pumping = False
+        started = False        # 工作线程是否已启动（启动后由它负责收尾）
         try:
             # 全新会话（磁盘无记录，含前端「草稿占位」的首条消息）：接受请求带来的
             # 会话级模型配置并落进 session；已开始的会话由 /api/sessions/<id>/model
@@ -3346,6 +3375,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             session.mode, session.web = mode, web
             session.approval_mode = approval
             session.busy = True
+            session.running_since = time.time()
             q = queue.Queue()
             session.queue = q
             # 用户显式「请帮我记住 XXX」：在 run 之前写入用户画像，
@@ -3361,6 +3391,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 name=f"web-chat-{sid}",
             )
             worker.start()
+            started = True
 
             self._sse_headers()
             self.close_connection = True
@@ -3375,17 +3406,20 @@ class _RequestHandler(BaseHTTPRequestHandler):
                         self.wfile.flush()
                     except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
                         alive = False
-                        agent.interrupt("浏览器断开了连接")
-                        # 断连后没人能应答：立刻解除确认/提问，别让 worker 无限等
+                        # 页面关掉只是「没人看」：执行归后端，任务照常跑完并落盘。
+                        # 但确认/提问必须立刻解锁 —— 现在没人能应答，继续等就是死等。
+                        session.queue = None
                         session.deny_pending_confirm()
                         session.deny_pending_ask()
+                        _log.info("chat.detached session=%s reason=sse_broken", sid)
                         break
                     continue
                 if not self._sse_frame(event):
                     alive = False
-                    agent.interrupt("浏览器断开了连接")
+                    session.queue = None
                     session.deny_pending_confirm()
                     session.deny_pending_ask()
+                    _log.info("chat.detached session=%s reason=sse_write", sid)
                     break
                 if event.get("type") in ("done", "error", "cancelled"):
                     break
@@ -3394,11 +3428,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if not pumping:
                 self._fail(500, f"{type(e).__name__}: {e}")
         finally:
-            session.busy = False
-            session.queue = None
-            session.run_lock.release()
+            # 工作线程已启动时，busy / queue / run_lock 由它负责收尾：
+            # 页面关掉不影响执行，请求线程退出时不能把会话标成空闲，
+            # 否则用户回来发新消息会和还在跑的那一轮撞车。
+            if not started:
+                session.busy = False
+                session.running_since = None
+                session.queue = None
+                session.run_lock.release()
             if not alive and q is not None:
-                # 工作线程很快会被取消；把队列排干，避免事件滞留
+                # 推送循环已退出：把队列排干，事件不会再有人读
                 try:
                     while True:
                         q.get_nowait()
@@ -3481,6 +3520,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
             # cancel / run_end{status:"cancelled"} 已由 agent.run() 的取消路径发出，
             # 这里不重复记，避免事件流里出现两条取消书签。
             _log.info("chat.cancelled session=%s reason=%s", session.id, e)
+            # 取消也要落盘：本轮已产生的消息（含补齐的 tool 回复）必须留下，
+            # 否则页面关掉/停止之后再重启，这一轮会整段消失。
+            try:
+                session.save()
+            except Exception:  # noqa: BLE001 —— 落盘失败不能影响取消事件
+                _log.exception("chat.save_failed session=%s", session.id)
             # ui.cancelled 已发过 cancelled 事件（终态，泵会停）；没发过才补发
             if not getattr(agent, "last_cancel_notice_shown", False):
                 q.put({"type": "cancelled", "reason": str(e),
@@ -3496,6 +3541,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
             net_mode.reset()
             agent.event_writer = None
             writer.close()
+            # 会话的「忙」与锁由工作线程收尾（页面断开时请求线程已退出）：
+            # 谁真正跑完谁解锁，避免出现「还在跑但已被标空闲」的撞车。
+            session.busy = False
+            session.running_since = None
+            session.queue = None
+            try:
+                session.run_lock.release()
+            except RuntimeError:
+                pass   # 准备阶段就失败时由请求线程释放过
 
     def _handle_confirm(self) -> None:
         body = self._read_body()

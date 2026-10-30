@@ -507,6 +507,101 @@ def scenario_stop() -> None:
     print(f"  [5] 停止任务通过（cancelled 终态，tool_end×{len(ends)}）")
 
 
+def scenario_detach_keeps_running() -> None:
+    """⑯ 页面断开不取消任务：后台继续跑完、落盘，并释放会话锁。
+
+    前后端分离：执行归后端，前端只是「看」。关页面只应停止推送，
+    不能像点停止那样把任务杀掉。
+    """
+    global SCRIPT
+    SCRIPT = [("run_python", {"code": "import time; time.sleep(1.5)"})]
+    sid = "t-detach"
+    client = SSEClient({"message": "慢慢跑", "mode": "agent", "web": False, "session": sid})
+    for ev in client.events():
+        if ev["type"] == "confirm_request":
+            _approve(sid, ev)
+        elif ev["type"] == "tool_start":
+            break
+    client.resp.close()          # 关掉页面：SSE 断开，任务应继续
+
+    deadline = time.time() + 25
+    content = ""
+    while time.time() < deadline:
+        _status, body = api("GET", f"/api/history?session={sid}")
+        msgs = (body or {}).get("messages") or []
+        last = next((m for m in reversed(msgs) if m.get("role") == "assistant"), None)
+        content = (last or {}).get("content") or ""
+        if content.strip():
+            break
+        time.sleep(0.5)
+    assert content.strip(), "断连后任务应在后台跑完（history 里应有回答）"
+
+    # 事件流是权威事实：最后一次 run_end 必须是 done，而不是 cancelled
+    from core import events as events_mod
+
+    ends = [e for e in events_mod.iter_events(sid) if e.get("type") == events_mod.RUN_END]
+    assert ends, "应有 run_end 事件"
+    assert ends[-1]["payload"].get("status") == "done", f"断连不应取消任务：{ends[-1]}"
+
+    # 工作线程收尾时释放会话锁：同一会话应能立刻继续对话（不 409）
+    time.sleep(0.8)
+    SCRIPT = []
+    try:
+        again = collect({"message": "再来一次", "mode": "agent", "web": False, "session": sid})
+    except Exception as e:  # noqa: BLE001 —— 409 会在这里抛 HTTPError
+        raise AssertionError(f"断连跑完后会话应可继续使用：{e}") from None
+    assert any(e.get("type") == "done" for e in again), "后续消息应正常完成"
+    print("  [6] 页面断开不取消任务通过（后台跑完、落盘、锁已释放）")
+
+
+def scenario_running_indicator() -> None:
+    """⑰ 运行中指示器：/api/running 与列表 / 历史里的 running 字段。
+
+    侧栏要能看出「哪些对话正在执行」。这个状态必须来自后端内存，
+    而不是前端自己的 busy 标记 —— 否则换个标签页或刷新页面就丢了。
+    """
+    global SCRIPT
+    sid = "t-running"
+    # 先跑完一轮，让会话在磁盘上有一行（列表接口是扫磁盘的）
+    SCRIPT = []
+    events = collect({"message": "先打个底", "mode": "agent", "web": False, "session": sid})
+    assert any(e.get("type") == "done" for e in events), "前置短任务应完成"
+
+    SCRIPT = [("run_python", {"code": "import time; time.sleep(2)"})]
+    client = SSEClient({"message": "跑久一点", "mode": "agent", "web": False, "session": sid})
+    seen = False
+    for ev in client.events():
+        if ev["type"] == "confirm_request":
+            _approve(sid, ev)
+        elif ev["type"] == "tool_start":
+            status, body = api("GET", "/api/running")
+            assert status == 200, body
+            assert sid in body["sessions"], f"运行中的会话应出现在 /api/running：{body}"
+            assert body["sessions"][sid]["since"] > 0, body
+            _s, lst = api("GET", "/api/sessions")
+            item = next((x for x in lst["sessions"] if x["id"] == sid), None)
+            assert item is not None, "会话应在列表中"
+            assert item.get("running") is True, f"/api/sessions 应标 running：{item}"
+            _s, hist = api("GET", f"/api/history?session={sid}")
+            assert hist.get("running") is True, f"/api/history 应标 running：{hist.keys()}"
+            seen = True
+    assert seen, "应在工具执行期间抓到运行状态"
+
+    # 结束后从 /api/running 消失（轮询到端到端一致）
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        _s, body = api("GET", "/api/running")
+        if sid not in body.get("sessions", {}):
+            break
+        time.sleep(0.5)
+    else:
+        raise AssertionError("/api/running 应清掉已结束的会话")
+    _s, lst = api("GET", "/api/sessions")
+    item = next((x for x in lst["sessions"] if x["id"] == sid), None)
+    assert item and item.get("running") is False, f"结束后应标非运行：{item}"
+    print("  [7] 运行中指示器通过（/api/running、列表、历史三者一致）")
+
+
 def _ws_root() -> str:
     """Web UI 会话落在「默认工作区」目录里 —— 即用户数据目录，不再是仓库根。"""
     import core.workspace_config as wc
@@ -1069,6 +1164,8 @@ def main() -> int:
         ("agent 模式工具轨迹", scenario_agent_tools),
         ("事件流轨迹回放", scenario_trajectory),
         ("停止任务", scenario_stop),
+        ("页面断开不取消", scenario_detach_keeps_running),
+        ("运行中指示器", scenario_running_indicator),
         ("危险确认-拒绝", lambda: scenario_confirm(deny=True)),
         ("危险确认-允许", lambda: scenario_confirm(deny=False)),
         ("同会话并发 409", scenario_409),

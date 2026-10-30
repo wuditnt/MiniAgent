@@ -152,6 +152,19 @@ export async function uploadFile(
   });
 }
 
+/** 运行中的会话：{sid: 开始时刻}。轻量轮询接口，用于侧栏「运行中」指示器。 */
+export async function fetchRunning(): Promise<Record<string, number>> {
+  const res = await req("/api/running");
+  if (!res.ok) throw new Error(await readError(res));
+  const body = await res.json();
+  return Object.fromEntries(
+    Object.entries(body.sessions || {}).map(([sid, v]) => [
+      sid,
+      (v as { since?: number }).since ?? 0,
+    ])
+  );
+}
+
 export async function fetchSessions(
   q: string = "",
   workspace: string = ""

@@ -801,6 +801,7 @@ body,
 
 /* ---- 会话侧边栏 ---- */
 .session-item {
+  position: relative;
   display: flex !important;
   align-items: flex-start;
   gap: 8px;
@@ -835,6 +836,37 @@ body,
   font-size: 11px;
   color: #bbb;
   margin-top: 2px;
+}
+
+/* 运行中指示器：绝对定位在会话项左侧内边距区，不占位、不把标题挤位移。
+   呼吸节奏 1.2s，比常见的 2s 快一点 —— 它表示「有活正在干」。 */
+.session-running-dot {
+  position: absolute;
+  left: 3px;
+  top: 15px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #1677ff;
+  pointer-events: none;
+  animation: session-running-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes session-running-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* 用户要求减少动效 → 退化为静态圆点（保留「在跑」的信息，只是不闪） */
+@media (prefers-reduced-motion: reduce) {
+  .session-running-dot {
+    animation: none;
+  }
 }
 
 /* 会话项右侧「时间 ↔ 快捷工具」共用一个槽位：默认只显示相对时间；

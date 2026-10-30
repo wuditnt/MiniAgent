@@ -179,6 +179,8 @@ export interface SessionItem {
   reasoning?: ReasoningLevel;
   /** 本会话的联网搜索开关（每个对话独立） */
   web?: boolean;
+  /** 是否正在执行（来自后端内存状态，侧栏据此显示运行指示器） */
+  running?: boolean;
 }
 
 /** 工作区（GET /api/workspaces 返回） */

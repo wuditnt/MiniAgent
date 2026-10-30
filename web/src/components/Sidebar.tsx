@@ -57,6 +57,8 @@ interface Props {
   onOpenSettings: () => void;
   /** 打开技能管理页（仅本机可用；远程访问时不渲染入口） */
   onOpenSkills: () => void;
+  /** 正在执行的会话 id 集合：有则在该会话标题前显示呼吸圆点 */
+  runningIds?: Set<string>;
 }
 
 /** 把命中的词用 <mark> 包起来（多词 AND，命中片段全部高亮） */
@@ -129,6 +131,7 @@ export default function Sidebar({
   onSearch,
   onOpenSettings,
   onOpenSkills,
+  runningIds,
 }: Props) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -341,6 +344,14 @@ export default function Sidebar({
                             className={`session-item ${s.id === currentId ? "active" : ""}`}
                             onClick={() => onSelect(s.id, s.hit_index)}
                           >
+                            {/* 运行中指示器：绝对定位，不占位、不让标题位移 */}
+                            {runningIds?.has(s.id) && (
+                              <span
+                                className="session-running-dot"
+                                aria-label="运行中"
+                                title="正在执行"
+                              />
+                            )}
                             <div className="session-item-body">
                               {editId === s.id ? (
                                 <input

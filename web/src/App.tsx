@@ -12,6 +12,7 @@ import {
   deleteWorkspace,
   fetchHistory,
   fetchModels,
+  fetchRunning,
   fetchSessions,
   fetchState,
   fetchWorkspaces,
@@ -178,6 +179,9 @@ export default function App({
   const [focus, setFocus] = useState<{ id: string; nonce: number } | null>(null);
   const pendingHit = useRef<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // 正在执行的会话 id 集合（侧栏「运行中」指示器数据源）；
+  // 发消息时本地乐观加一个，之后以 /api/running 轮询结果为准
+  const [runningIds, setRunningIds] = useState<Set<string>>(() => new Set());
 
   // 开关状态持久化（逐消息生效：send 时读取当前 state，不依赖这里的时序）
   useEffect(() => {
@@ -192,7 +196,15 @@ export default function App({
 
   /** 会话列表刷新（支持搜索词，跨全部工作区） */
   const refreshSessions = (q: string = "") => {
-    fetchSessions(q).then(setSessions).catch(() => {});
+    fetchSessions(q)
+      .then((list) => {
+        setSessions(list);
+        // 非搜索态才同步运行状态：搜索结果只是子集，不能拿它覆盖全局指示器
+        if (!q) {
+          setRunningIds(new Set(list.filter((s) => s.running).map((s) => s.id)));
+        }
+      })
+      .catch(() => {});
   };
 
   /** 工作区列表刷新（含每个工作区下的会话数） */
@@ -235,6 +247,43 @@ export default function App({
     refreshAll();
     refreshModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 侧栏「运行中」指示器：3s 轮询后端内存状态（只读、不碰磁盘）。
+  // 页面切到后台时暂停轮询，回到前台立即补拉一次 —— 用户看不到时没必要请求。
+  useEffect(() => {
+    let timer: number | undefined;
+    let fails = 0;
+    let stopped = false;
+    const tick = () => {
+      if (document.visibilityState !== "visible") return;
+      fetchRunning()
+        .then((map) => {
+          if (stopped) return;
+          fails = 0;
+          setRunningIds(new Set(Object.keys(map)));
+        })
+        .catch(() => {
+          if (stopped) return;
+          // 单次失败保留旧值（网络抖动不该让指示器闪一下），连续两次才清空
+          fails += 1;
+          if (fails >= 2) setRunningIds(new Set());
+        });
+    };
+    const loop = () => {
+      tick();
+      timer = window.setTimeout(loop, 3000);
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") tick();
+    };
+    loop();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, []);
 
   // 切换会话时重新加载历史
@@ -425,6 +474,8 @@ export default function App({
       setItems((prev) => [...prev, userItem, asstItem]);
     }
     setBusy(true);
+    // 乐观点亮侧栏指示器：不必等下一轮轮询，发出去这一刻就显示「运行中」
+    setRunningIds((prev) => new Set(prev).add(session));
     setTraces([]); // 新一轮 run：清掉上一轮的实时镜像
     const ac = new AbortController();
     abortRef.current = ac;
@@ -875,6 +926,7 @@ export default function App({
           currentId={session}
           collapsed={collapsed}
           remote={!!state?.remote}
+          runningIds={runningIds}
           onToggleCollapse={() => setCollapsed((c) => !c)}
           onSelect={handleSelectSession}
           onCreateSession={handleNewSession}
