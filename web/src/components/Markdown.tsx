@@ -134,6 +134,15 @@ function Markdown({
             }
             return <img src={finalSrc} alt={alt || ""} {...props} style={{ maxWidth: "100%", borderRadius: 8 }} />;
           },
+          a({ href, children, ...props }) {
+            // 正文里的超链接一律新标签页打开：当前页面是正在进行的对话，
+            // 直接跳走会把会话界面顶掉（noopener 同时断掉新页面对本页的 window.opener）
+            return (
+              <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+                {children}
+              </a>
+            );
+          },
         }}
       >
         {text}
