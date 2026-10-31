@@ -442,6 +442,176 @@ def test_empty_answer_retried_once():
     print("✓ 空回答：只重试一次，不反复空转")
 
 
+def _fake_registry(*names_and_flags):
+    """假工具表：避免验证门测试真写盘 / 真跑命令。每项 = (工具名, dangerous)。"""
+    from core.registry import Tool, ToolRegistry
+
+    reg = ToolRegistry()
+    for name, dangerous in names_and_flags:
+        reg.add(Tool(
+            name=name, description="fake", func=lambda **kw: "[ok] done",
+            parameters={"type": "object", "properties": {}}, dangerous=dangerous,
+        ))
+    return reg
+
+
+def test_verify_gate_nudges_once_after_side_effects():
+    """收尾验证门：本轮写过文件，模型直接给答案时拦一次，注入验证提醒后再交付。"""
+    script = [
+        _Msg(tool_calls=[_TC(1, "write_file", '{"path": "a.txt", "content": "x"}')]),
+        _Msg(content="写好了。"),              # 第 2 轮：应被拦下，不 return
+        _Msg(content="已读回验证，交付。"),        # 第 3 轮：放行
+    ]
+    a = agent_mod.Agent(verbose=False, client=_StubClient(script),
+                        registry=_fake_registry(("write_file", False)))
+    out = a.run("写个文件")
+
+    assert out == "已读回验证，交付。", out
+    gates = [m for m in a.messages if m.get("_injected") == "verify_gate"]
+    assert len(gates) == 1, f"验证提醒应恰好注入一次，实际 {len(gates)}"
+    assert gates[0]["role"] == "user", gates[0]
+    assert len(a._client.chat.completions.calls) == 3, a._client.chat.completions.calls
+    print("✓ 收尾验证门：有副作用操作时拦一次，验证后交付")
+
+
+def test_verify_gate_skips_readonly_and_disabled():
+    """纯读任务不触发验证门；开关关闭时即使写过文件也不拦。"""
+    script = [
+        _Msg(tool_calls=[_TC(1, "list_dir", "{}")]),
+        _Msg(content="看完了。"),
+    ]
+    a = agent_mod.Agent(verbose=False, client=_StubClient(script),
+                        registry=_fake_registry(("list_dir", False)))
+    assert a.run("看看目录") == "看完了。"
+    assert not any(m.get("_injected") == "verify_gate" for m in a.messages)
+    assert len(a._client.chat.completions.calls) == 2, "纯读任务不该被多拦一轮"
+
+    script2 = [
+        _Msg(tool_calls=[_TC(1, "write_file", "{}")]),
+        _Msg(content="写好了。"),
+    ]
+    b = agent_mod.Agent(verbose=False, client=_StubClient(script2),
+                        registry=_fake_registry(("write_file", False)))
+    b.verify_before_done = False
+    assert b.run("写个文件") == "写好了。"
+    assert len(b._client.chat.completions.calls) == 2, "开关关闭时不该注入验证提醒"
+
+    # dangerous 的自定义/MCP 工具即使不在内置名单里，也算副作用
+    c = agent_mod.Agent(verbose=False, client=_StubClient([_Msg(content="x")]),
+                        registry=_fake_registry(("custom_write", True), ("custom_read", False)))
+    assert c._is_side_effect_call({"function": {"name": "custom_write"}})
+    assert not c._is_side_effect_call({"function": {"name": "custom_read"}})
+    print("✓ 收尾验证门：纯读不触发 / 开关可关 / dangerous 工具纳入副作用")
+
+
+def test_turn_budget_nudge_enters_request_tail():
+    """进入最后 30% 轮次时，请求末尾出现收敛提醒（只进请求体，不落盘）。"""
+    script = [
+        _Msg(tool_calls=[_TC(1, "list_dir", "{}")]),
+        _Msg(tool_calls=[_TC(2, "list_dir", "{}")]),
+        _Msg(content="收尾。"),
+    ]
+    a = agent_mod.Agent(verbose=False, max_turns=4, client=_StubClient(script),
+                        registry=_fake_registry(("list_dir", False)))
+    assert a.run("任务") == "收尾。"
+
+    calls = a._client.chat.completions.calls
+    # max_turns=4 → 阈值 ceil(2.8)=3：第 1、2 轮无提醒，第 3 轮有
+    assert calls[0]["messages"][-1]["role"] == "user", calls[0]["messages"][-1]
+    assert calls[1]["messages"][-1]["role"] != "system", calls[1]["messages"][-1]
+    tail = calls[2]["messages"][-1]
+    assert tail["role"] == "system" and "第 3/4 轮" in tail["content"], tail
+    assert not any("第 3/4 轮" in str(m.get("content")) for m in a.messages), "提醒不该落盘"
+
+    b = agent_mod.Agent(verbose=False, max_turns=2, client=_StubClient([_Msg(content="答。")]))
+    b.run("问")
+    assert b._client.chat.completions.calls[0]["messages"][-1]["role"] == "user", \
+        "max_turns<3 时不打扰"
+    print("✓ 轮次预算：最后 30% 轮次注入收敛提醒，且只进请求体")
+
+
+def test_context_overflow_trims_and_retries():
+    """服务端判 prompt_too_long：压缩历史后用新消息体重发；裁不动则按原错误抛出。"""
+    class _OverflowThenOk:
+        def __init__(self, always_fail=False):
+            self.calls = []
+            self.always_fail = always_fail
+            self.chat = type("Chat", (), {"completions": self})()
+
+        def create(self, **kw):
+            self.calls.append(kw)
+            if self.always_fail or len(self.calls) == 1:
+                raise ValueError("Error code: 400 - prompt_too_long: messages too long")
+            return _Resp(_Msg(content="压缩后作答。"))
+
+    client = _OverflowThenOk()
+    a = agent_mod.Agent(verbose=False, client=client)
+    # 预置一段带「可裁的老 tool 结果」的历史（落在最后 6 条保护窗之外）
+    a.messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "u1"},
+        {"role": "tool", "tool_call_id": "c1", "content": "X" * 500},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u3"},
+        {"role": "assistant", "content": "a3"},
+        {"role": "user", "content": "u4"},
+        {"role": "assistant", "content": "a4"},
+    ]
+    out = a.run("继续")
+
+    assert out == "压缩后作答。", out
+    assert len(client.calls) == 2, f"应压缩后重发一次，实际 {len(client.calls)} 次"
+    sent_tools = [m for m in client.calls[1]["messages"] if m.get("role") == "tool"]
+    assert sent_tools, "第二次请求仍应保留 tool 消息（占位符形态）"
+    assert all(m["content"] != "X" * 500 for m in sent_tools), "老长文应被裁成占位符"
+    assert client.calls[1]["messages"] is not client.calls[0]["messages"], "重发必须重建消息体"
+
+    # 没有可裁内容（只有 system + user）：不重试，原样抛错
+    client2 = _OverflowThenOk(always_fail=True)
+    b = agent_mod.Agent(verbose=False, client=client2)
+    try:
+        b.run("问题")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("裁不动时应按原错误抛出")
+    assert len(client2.calls) == 1, f"裁不动不该空重试，实际 {len(client2.calls)} 次"
+    print("✓ 上下文超长：响应式压缩后重试；裁不动时原样报错")
+
+
+def test_chat_mode_uses_chat_system_prompt():
+    """快速对话只挂少量工具，system 提示也必须换成「问答助手」版。
+
+    背景：之前 chat 模式复用了智能体的 DEFAULT_SYSTEM_PROMPT，
+    模型会照着「能读写文件、跑命令」的自我描述，凭空罗列一堆自己做不到的能力。
+    """
+    client = _StubClient([_Msg(content="你好，我在。")])
+    a = agent_mod.Agent(verbose=False, client=client)
+    a.chat_mode = True
+    out = a.run("你好")
+
+    assert out == "你好，我在。", out
+    system = client.chat.completions.calls[0]["messages"][0]
+    assert system["role"] == "system", system
+    assert "快速对话" in system["content"], system["content"][:60]
+    assert "操作本地环境" not in system["content"], "chat 模式不该继续用智能体提示"
+    print("✓ 快速对话：system 提示换成问答助手版，不再自称能操作本地环境")
+
+
+def test_agent_mode_keeps_agent_prompt():
+    """同一个 Agent 切回智能体模式时，system 提示必须恢复原版。"""
+    client = _StubClient([_Msg(content="ok")])
+    a = agent_mod.Agent(verbose=False, client=client)
+    a.chat_mode = False
+    a.run("你好")
+
+    system = client.chat.completions.calls[0]["messages"][0]
+    assert "操作本地环境" in system["content"], system["content"][:60]
+    print("✓ 智能体模式：仍使用完整的智能体提示")
+
+
 if __name__ == "__main__":
     print("工作区:", agent_mod.tools.WORKSPACE)
     print("---")
@@ -460,6 +630,12 @@ if __name__ == "__main__":
     test_net_reminder_is_system_role()
     test_tail_system_rejected_falls_back()
     test_gateway_block_is_friendly_and_not_retried()
+    test_chat_mode_uses_chat_system_prompt()
+    test_agent_mode_keeps_agent_prompt()
     test_empty_answer_retried_once()
+    test_verify_gate_nudges_once_after_side_effects()
+    test_verify_gate_skips_readonly_and_disabled()
+    test_turn_budget_nudge_enters_request_tail()
+    test_context_overflow_trims_and_retries()
     print("---")
     print("全部通过 ✅")

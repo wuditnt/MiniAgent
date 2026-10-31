@@ -153,6 +153,13 @@ body,
   font-size: 16px;
 }
 
+/* 「发送后把最新消息顶到最上面」用的动态留白：
+   高度由 Chat.tsx 的跟随滚动 effect 计算并写入，这里只保证不参与 flex 撑缩 */
+.chat-tail-space {
+  flex: none;
+  height: 0;
+}
+
 /* 长会话分段渲染：顶部「加载更早消息」入口 */
 .load-earlier {
   display: flex;
@@ -211,29 +218,41 @@ body,
   line-height: 1.7;
 }
 
-/* 「编辑历史消息」提示条：只提示，不删任何内容（取消即恢复原样） */
-.edit-banner {
+/* ---- 内联编辑框（编辑重发，参考图3）：整行展开，右下角 取消 / 发送 ---- */
+.edit-inline {
+  /* 固定宽度：父容器是 shrink-to-fit，width:100% 会退化成内容宽度（很窄） */
+  width: 640px;
+  max-width: 100%;
+  margin-top: 2px;
+  padding: 10px 12px 8px;
+  border: 1px solid #e0e0e0;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  transition: border-color 0.15s;
+}
+
+.edit-inline:focus-within {
+  border-color: #1677ff;
+}
+
+/* 框体自己画边框：文本域只留白底文字，聚焦环由外框承担 */
+.edit-inline .ant-input,
+.edit-inline textarea {
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  font-size: 16px;
+  line-height: 1.7;
+  resize: none;
+}
+
+.edit-inline-actions {
   display: flex;
-  align-items: center;
+  justify-content: flex-end;
   gap: 8px;
-  margin-bottom: 8px;
-  padding: 6px 10px;
-  border: 1px solid #ffe0b2;
-  border-radius: 8px;
-  background: #fff8e6;
-  color: #8a6100;
-  font-size: 12.5px;
-}
-
-.edit-banner-cancel {
-  margin-left: auto;
-  color: #1677ff;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.edit-banner-cancel:hover {
-  text-decoration: underline;
+  margin-top: 8px;
 }
 
 .hint {
@@ -241,6 +260,51 @@ body,
   color: #bbb;
   font-size: 12px;
   padding-top: 8px;
+}
+
+/* ---- 多选删除底栏（参考图2）：替代输入区；执行「删除 / 取消」后恢复 ---- */
+.select-bar {
+  flex: none;
+  /* 父级是 column flex：只写 margin:auto 会退化成 shrink-to-fit 并居中，
+     这里显式拉满，再用 max-width + auto 外边距与消息区同宽居中 */
+  width: 100%;
+  max-width: 860px;
+  box-sizing: border-box;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* 左内边距 = 消息区 16 + 卡片 16：让「全选」左缘与每条消息的勾选框严格对齐 */
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px)) 32px;
+  background: #fff;
+  border-top: 1px solid #f0f0f0;
+}
+
+.select-bar .select-all {
+  font-size: 14px;
+}
+
+.select-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 「删除」按参考图做纯黑主色按钮（含禁用 / 悬停态，避免退回蓝色主色） */
+.select-del.ant-btn-primary {
+  background: #1f1f1f;
+  border-color: #1f1f1f;
+}
+
+.select-del.ant-btn-primary:not(:disabled):hover {
+  background: #333;
+  border-color: #333;
+}
+
+.select-del.ant-btn-primary:disabled {
+  background: #1f1f1f;
+  border-color: #1f1f1f;
+  opacity: 0.35;
 }
 
 /* ---- Markdown 渲染（正文跟随 16px 基准，代码 14px） ---- */
@@ -562,6 +626,19 @@ body,
   /* 原来是 220px：气泡是 shrink-to-fit，窄屏下它会逼着容器往外撑 */
   min-width: 0;
   margin-top: 10px;
+  /* 默认隐藏，鼠标移到该条消息（气泡 + 下方按钮区）时才浮现；
+     占位保留，避免出现/消失时整段内容跳动 */
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+
+/* 悬停显示；最后一对问答由 .msg-toolbar-pinned 常驻 */
+.ant-bubble:hover .msg-toolbar,
+.msg-toolbar:hover,
+.msg-toolbar-pinned {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .msg-toolbar-spacer {
@@ -581,6 +658,62 @@ body,
   justify-content: flex-end;
   min-width: 0;
   margin-top: 0;
+}
+
+/* ---- 多选删除卡片视图（参考图1）：一轮对话一张浅灰卡片，行首双勾选框 ---- */
+.select-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.turn-card {
+  padding: 12px 16px 14px;
+  border-radius: 16px;
+  background: #f7f7f8;
+}
+
+.turn-row {
+  display: flex;
+  gap: 12px;
+}
+
+/* 勾选框固定宽度、不参与压缩：轮级与分项两列在卡片内严格左对齐（图2） */
+.turn-check {
+  flex: none;
+}
+
+.turn-row-user {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.turn-row-assistant {
+  align-items: flex-start;
+  margin-top: 10px;
+}
+
+/* 用户气泡：与普通模式一致的淡蓝底、右对齐 */
+.turn-user {
+  max-width: 78%;
+  margin-left: auto;
+  padding: 6px 14px;
+  border-radius: 14px;
+  background: #e6f4ff;
+  font-size: 16px;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+
+/* 助手内容占满剩余宽度，保持与普通模式相同的阅读宽度 */
+.turn-assistant {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 助手行首的复选勾与正文第一行对齐（用户行是居中对齐） */
+.turn-row-assistant .turn-check {
+  margin-top: 6px;
 }
 
 .msg-tool {

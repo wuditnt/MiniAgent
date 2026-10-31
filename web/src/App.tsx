@@ -8,6 +8,7 @@ import { Dropdown, Input, message, Modal, Switch, Tooltip } from "antd";
 import {
   chatStream,
   createWorkspace,
+  deleteMessages,
   deleteSession,
   deleteWorkspace,
   fetchHistory,
@@ -578,13 +579,21 @@ export default function App({
             );
             break;
           case "done":
-            patchAssistant(asstId, (it) => ({
-              ...it,
-              status: "done",
-              content: ev.answer || it.content,
-              sec: ev.sec,
-              usage: ev.usage,
-            }));
+            // 与本页主动发送的 done 同口径：必须 endRun 定稿 run 状态，
+            // 否则「接入」视角的时间线会永远停在「执行中」走表（另一浏览器发起的回合）
+            patchAssistant(asstId, (it) =>
+              endRun(
+                {
+                  ...it,
+                  status: "done",
+                  content: ev.answer || it.content,
+                  sec: ev.sec,
+                  usage: ev.usage,
+                },
+                "done",
+                ev.elapsed_ms
+              )
+            );
             foldAsk(asstId);
             finishedSidRef.current = sid;
             if (ev.title_pending) window.setTimeout(() => refreshSessions(), 5000);
@@ -629,11 +638,15 @@ export default function App({
 
   // 打开一个正在后台跑的会话（刷新 / 换标签页 / 断线回来）→ 自动接入实时输出
   useEffect(() => {
-    if (busy || attachedRef.current || finishedSidRef.current === session) return;
+    if (busy || attachedRef.current) return;
+    // 轮询确认已空闲：清掉「本页刚收过终态」标记，之后该会话再有后台任务才允许接入；
+    // 必须放在 finishedSid 挡板之前，否则标记永远清不掉，后续真任务也接不上
     if (!runningIds.has(session)) {
       if (finishedSidRef.current === session) finishedSidRef.current = null;
       return;
     }
+    // 本页刚收到终态、轮询还没把 running 清掉：不要把刚跑完的这轮再接入一遍
+    if (finishedSidRef.current === session) return;
     attachRun(session);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, runningIds, busy]);
@@ -668,25 +681,6 @@ export default function App({
     const msg = text.trim();
     if (!msg && !(attachments && attachments.length)) return;
     if (busy) return;
-    // 编辑态下发送 = 用这条新内容替换旧轮次（旧 user 及之后全部截掉），
-    // 与「点击编辑」解耦：点错编辑但没发送，对话内容不会丢。
-    if (editingId) {
-      const idx = items.findIndex((it) => it.id === editingId);
-      setEditingId(null);
-      if (idx >= 0 && items[idx].role === "user") {
-        // keep = 该 user 消息之前所有非 notice 消息（不含这条 user 本身）
-        const keep = items.slice(0, idx).filter((it) => it.role !== "notice").length;
-        truncateSession(session, keep)
-          .then(() => {
-            setItems((prev) => prev.slice(0, idx));
-            send(msg, attachments, skipUserItem);
-          })
-          .catch((e: unknown) =>
-            message.error(e instanceof Error ? e.message : "编辑重发失败")
-          );
-        return;
-      }
-    }
     const asstId = `a-${Date.now()}`;
     curAsstRef.current = asstId;
     // 技能在消息里用不可见字符包裹：气泡只显示名字
@@ -849,6 +843,9 @@ export default function App({
               )
             );
             foldAsk(asstId); // 若有未答的卡片，随本轮结束标记失效
+            // 本页刚收到终态：挡住自动接入 effect 在轮询还没清掉 running 时
+            // 把这轮再 attach 一遍（snapshot 会整份重建 items，滚动锚点随之失效）
+            finishedSidRef.current = session;
             // 标题没被用户命名过：记忆提炼会在后台再补一个模型标题，但它晚于
             // done 才落盘（那时这条 SSE 连接已经关了），所以稍后自己再拉一次列表
             if (ev.title_pending) window.setTimeout(() => refreshSessions(), 5000);
@@ -863,6 +860,7 @@ export default function App({
             );
             foldAsk(asstId);
             setConfirm(null);
+            finishedSidRef.current = session;
             break;
           case "cancelled":
             // 串行路径取消时 agent 不发 tool_end：这里把挂着的 pending 节点收尾，避免永远转圈
@@ -875,6 +873,7 @@ export default function App({
             );
             foldAsk(asstId);
             setConfirm(null);
+            finishedSidRef.current = session;
             break;
           case "trace":
             // 事件流的实时镜像（可选）：累积给轨迹抽屉并排展示，落盘全量仍以兜底拉取为准
@@ -938,11 +937,31 @@ export default function App({
       .catch((e: unknown) => message.error(e instanceof Error ? e.message : "重新生成失败"));
   };
 
-  /** 编辑重发：先把原文回填输入框并进入编辑态（不删消息，取消即恢复原样） */
+  /** 编辑重发：让最后一条 user 气泡原位变成内联编辑框（取消即恢复原样） */
   const handleEditResend = (msgId: string) => {
     const idx = items.findIndex((it) => it.id === msgId);
     if (idx < 0 || items[idx].role !== "user") return;
     setEditingId(msgId);
+  };
+
+  /** 内联编辑框的「发送」：先截掉该条 user 及其后的本轮内容，再用新文本重发 */
+  const sendEdit = (text: string) => {
+    if (busy) return;
+    const id = editingId;
+    setEditingId(null);
+    if (!id) return;
+    const idx = items.findIndex((it) => it.id === id);
+    if (idx < 0 || items[idx].role !== "user") return;
+    const msg = text.trim();
+    if (!msg) return;
+    // keep = 该 user 消息之前所有非 notice 消息（不含这条 user 本身）
+    const keep = items.slice(0, idx).filter((it) => it.role !== "notice").length;
+    truncateSession(session, keep)
+      .then(() => {
+        setItems((prev) => prev.slice(0, idx));
+        send(msg);
+      })
+      .catch((e: unknown) => message.error(e instanceof Error ? e.message : "编辑重发失败"));
   };
 
   /** 开一个未落盘的草稿会话（前端先占位），真正聊天时才由后端落盘 */
@@ -1082,16 +1101,24 @@ export default function App({
       .catch((e: unknown) => message.error(e instanceof Error ? e.message : "移除失败"));
   };
 
-  /** 删除消息：截掉该条及之后的所有内容（含该条） */
-  const handleDeleteMessage = (msgId: string) => {
-    const idx = items.findIndex((it) => it.id === msgId);
-    if (idx < 0) return;
-    const keep = items.slice(0, idx).filter((it) => it.role !== "notice").length;
-    truncateSession(session, keep)
-      .then(() => {
-        setItems((prev) => prev.slice(0, idx));
-      })
-      .catch((e: unknown) => message.error(e instanceof Error ? e.message : "删除失败"));
+  /** 多选删除：ids → 展示项序号（不含 notice）交后端任意删；本地先过滤、失败回滚 */
+  const handleDeleteMessages = (ids: string[]) => {
+    const idset = new Set(ids);
+    if (!idset.size) return;
+    const indexes: number[] = [];
+    let ord = 0;
+    for (const it of items) {
+      if (it.role === "notice") continue;
+      if (idset.has(it.id)) indexes.push(ord);
+      ord += 1;
+    }
+    if (!indexes.length) return;
+    const snapshot = items;
+    setItems((prev) => prev.filter((it) => !idset.has(it.id)));
+    deleteMessages(session, indexes).catch((e: unknown) => {
+      message.error(e instanceof Error ? e.message : "删除失败");
+      setItems(snapshot); // 失败回滚：恢复到删除前
+    });
   };
 
   /** 清空会话：截断到 0 */
@@ -1473,9 +1500,10 @@ export default function App({
           workspaceLocked={!!currentSession && currentSession.message_count > 0}
           onRegenerate={busy ? undefined : handleRegenerate}
           onEditResend={busy ? undefined : handleEditResend}
-          editing={!!editingId}
+          editingId={editingId}
+          onEditSend={sendEdit}
           onCancelEdit={() => setEditingId(null)}
-          onDelete={busy ? undefined : handleDeleteMessage}
+          onDeleteMessages={busy ? undefined : handleDeleteMessages}
           onTrajectory={() => openTrajectory(session)}
           contextUsage={contextUsage}
           contextLimit={contextLimit}

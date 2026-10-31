@@ -95,6 +95,7 @@ KIND_TRIM_TOOL_RESULTS = "trim_tool_results"
 KIND_SUMMARY = "summary"
 KIND_HARD_WINDOW = "hard_window"
 KIND_ATTACHMENT_IMAGES = "attachment_images"
+KIND_VERIFY_GATE = "verify_gate"
 
 
 # ---------------------------------------------------------------- 路径与哈希
@@ -449,6 +450,9 @@ def _replay(events: list[dict], upto_seq: int) -> tuple[list[dict], str | None]:
                 parts = p.get("parts")
                 if isinstance(parts, list):
                     msgs.append({"role": "user", "content": parts})
+            elif kind == KIND_VERIFY_GATE:
+                # 收尾验证门注入的 user 提醒（_injected 是私有标记，不参与重放）
+                msgs.append({"role": "user", "content": p.get("content") or ""})
 
     return msgs, sys_sha
 

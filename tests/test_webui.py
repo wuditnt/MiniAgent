@@ -190,20 +190,40 @@ def scenario_registry_matrix() -> None:
     """① 每会话工具表矩阵：不改 agent.py 就能实现双模式的根基。"""
     import tools  # noqa: F401  —— 确保插件已加载（测试进程可能尚未初始化）
     from core.registry import REGISTRY
-    from core.webui import _session_registry
+    from core.webui import _CHAT_MODE_TOOLS, _session_registry
 
     all_names = {t.name for t in REGISTRY.all()}
     missing = {"web_search", "fetch_url"} - all_names
     assert not missing, (
         f"插件未加载：缺 {missing}；REGISTRY 共 {len(all_names)} 个：{sorted(all_names)[:12]}"
     )
+    whitelist = set(_CHAT_MODE_TOOLS)
+    assert whitelist <= all_names, f"快速对话白名单里有不存在的工具：{sorted(whitelist - all_names)}"
 
-    # 关联网：不提供搜索，只保留本地抓取
+    # 关联网：不提供搜索，保留本地抓取 + 快速对话只读白名单
     chat_local = {t.name for t in _session_registry("chat").all()}
-    assert chat_local == {"fetch_url"}, f"chat 不联网应只有 fetch_url：{sorted(chat_local)}"
-    # 开联网：搜索 + 抓取（chat 模式也只有这两个）
+    expect_chat = {"fetch_url"} | whitelist
+    assert chat_local == expect_chat, (
+        f"chat 工具表异常：多 {sorted(chat_local - expect_chat)} / 少 {sorted(expect_chat - chat_local)}"
+    )
+    # 开联网：搜索 + 抓取 + 白名单（写操作/执行类一律不进）
     chat_cloud = {t.name for t in _session_registry("chat", "ask", True).all()}
-    assert chat_cloud == {"web_search", "fetch_url"}, f"chat 联网工具表异常：{sorted(chat_cloud)}"
+    expect_chat_web = {"web_search", "fetch_url"} | whitelist
+    assert chat_cloud == expect_chat_web, f"chat 联网工具表异常：{sorted(chat_cloud)}"
+    for bad in ("write_file", "edit_file", "run_shell", "run_python", "delete_file"):
+        assert bad not in chat_cloud, f"快速对话不该暴露 {bad}"
+
+    # chat_tools 开关关闭：只剩联网能力
+    from core import settings as settings_mod
+    original_get = settings_mod.get
+    settings_mod.get = lambda key, *args: (
+        False if key == "chat_tools" else original_get(key)
+    )
+    try:
+        chat_off = {t.name for t in _session_registry("chat", "ask", True).all()}
+    finally:
+        settings_mod.get = original_get
+    assert chat_off == {"web_search", "fetch_url"}, f"开关关闭后应只剩联网能力：{sorted(chat_off)}"
     # agent 模式：全量（全量档不加载 search_tools —— 所有工具都已声明）；
     # 关联网时剔除 web_search，抓取仍在；ask 档不暴露 request_approval
     agent_local = {t.name for t in _session_registry("agent", profile="full").all()}
@@ -300,6 +320,54 @@ def scenario_display_grouping() -> None:
     assert items[1]["content"] == "这是第一张图\n\n这是第二张图", items[1]["content"]
     assert items[1]["_end"] == 8, items[1]      # keep 截断映射回原始序列的依据
     print(f"  [1b] 展示分组通过（{len(raw)} 条消息 → {len(items)} 个气泡）")
+
+
+def scenario_delete_messages() -> None:
+    """多选删除：_delete_display 任意下标映射 + runs 轮次重排 + 接口兜底与实际删除。"""
+    from core.webui import _delete_display, _renumber_runs
+
+    raw = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "q3"},
+    ]
+    # 删掉中间一轮（q2 + a2）：保留 q1/a1 与 q3，不做「此条及之后」连坐
+    kept, deleted = _delete_display(raw, [2, 3])
+    assert [m["content"] for m in kept] == ["q1", "a1", "q3"], kept
+    assert deleted == {2}, f"被删的是第 2 个用户轮次：{deleted}"
+
+    # 空选 / 下标越界 → 拒绝
+    assert _delete_display(raw, []) is None
+    assert _delete_display(raw, [9]) is None
+
+    # runs 重排：被删轮次的 run 丢弃，其余轮次整体前移
+    runs = [{"turn": 1}, {"turn": 2}, {"turn": 3}]
+    assert _renumber_runs(runs, {2}) == [{"turn": 1}, {"turn": 2}], _renumber_runs(runs, {2})
+
+    # ---- 接口：真实删除两轮对话里的第一轮
+    global SCRIPT
+    SCRIPT = []
+    sid = "t-del"
+    collect({"message": "第一轮", "mode": "chat", "web": False, "session": sid})
+    collect({"message": "第二轮", "mode": "chat", "web": False, "session": sid})
+    status, hist = api("GET", f"/api/history?session={sid}")
+    assert status == 200 and len(hist["messages"]) == 4, hist["messages"]
+
+    # 参数兜底：空数组 / 非整数 / 下标越界 → 400
+    for payload in ({"indexes": []}, {"indexes": ["a"]}, {"indexes": [99]}, {}):
+        s, b = api("POST", f"/api/sessions/{sid}/delete-messages", payload)
+        assert s == 400 and "error" in b, f"{payload} 应 400：{s} {b}"
+
+    status, body = api("POST", f"/api/sessions/{sid}/delete-messages", {"indexes": [0, 1]})
+    assert status == 200 and body["deleted"] == 2, body
+
+    status, hist = api("GET", f"/api/history?session={sid}")
+    assert [m["content"] for m in hist["messages"]] == ["第二轮", FINAL_TEXT], hist["messages"]
+    # 第一轮被删后，第二轮的 run 轮次号应从 2 前移为 1
+    assert [r["turn"] for r in hist["runs"]] == [1], hist["runs"]
+    print("  [1c] 多选删除通过（任意下标 + runs 重排 + 400 兜底）")
 
 
 def scenario_attachment_path() -> None:
@@ -609,6 +677,8 @@ def scenario_running_indicator() -> None:
     assert acts and acts[0]["kind"] == "step", acts
     tool = next((a for a in acts if a["kind"] == "tool"), None)
     assert tool and tool["status"] == "ok" and (tool.get("dur_ms") or 0) >= 1000, acts
+    # detail 必须是单行字符串：前端时间线直接渲染它，对象会把 React 弄白屏
+    assert isinstance(tool.get("detail"), str), tool
     assert hist.get("server_now"), "history 应带服务端时间"
     print("  [7] 运行中指示器通过（/api/running、列表、历史三者一致）")
 
@@ -721,9 +791,10 @@ def scenario_409() -> None:
             status, body = api("POST", "/api/chat",
                                {"message": "第二条", "mode": "agent", "session": "t-busy"})
             assert status == 409 and "error" in body, f"应为 409：{status} {body}"
-            # 运行中的会话不允许被截断 / 改配置（与 worker 抢写盘）
+            # 运行中的会话不允许被截断 / 删除消息 / 改配置（与 worker 抢写盘）
             for path, payload in (
                 ("/api/sessions/t-busy/truncate", {"keep": 0}),
+                ("/api/sessions/t-busy/delete-messages", {"indexes": [0]}),
                 ("/api/sessions/t-busy/model", {"web": True}),
             ):
                 s2, b2 = api("POST", path, payload)
@@ -1163,6 +1234,87 @@ def scenario_keepalive_body() -> None:
     print("  [14] keep-alive：未读请求体不污染下一个请求 通过")
 
 
+# ---------------------------------------------------------------- 运行模式
+
+def scenario_run_mode_auto_login() -> None:
+    """运行模式（MINI_AGENT_RUN_MODE）：默认生产；dev 模式仅本机回环免密自动登录。
+
+    安全边界必须成立：服务器开了 dev 模式，但请求来自远程地址时仍按未登录处理。
+    """
+    import core.auth as _auth
+    import core.webui as _webui
+
+    port = 8777
+    tmp = tempfile.mkdtemp(prefix="miniagent-auth-test-")
+    old_db = _auth._DB_PATH
+    old_env = os.environ.get(_webui._RUN_MODE_ENV)
+
+    def get(path: str, cookie: str | None = None):
+        headers = {"Cookie": cookie} if cookie else {}
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read() or b"{}"), r.headers.get("Set-Cookie") or ""
+        except HTTPError as e:
+            body = e.read() or b"{}"
+            return e.code, json.loads(body or b"{}"), e.headers.get("Set-Cookie") or ""
+
+    wsrv = None
+    try:
+        _auth._DB_PATH = os.path.join(tmp, "auth.db")
+        _auth.init_db()
+        _auth.ensure_default_admin()
+        wsrv = _webui.WebServer(port=port, model="mock-gpt", login_enabled=True)
+        threading.Thread(target=wsrv.serve_forever, daemon=True).start()
+        for _ in range(50):
+            try:
+                if get("/api/health")[0] == 200:
+                    break
+            except Exception:  # noqa: BLE001 —— 服务还没起来
+                pass
+            time.sleep(0.1)
+        else:
+            raise RuntimeError("登录态测试服务未能在 5s 内就绪")
+
+        # 生产模式（未设置 / 不填）：没 Cookie 就 401
+        os.environ.pop(_webui._RUN_MODE_ENV, None)
+        status, body, _ = get("/api/auth/me")
+        assert status == 401 and body.get("code") == "UNAUTHENTICATED", (status, body)
+
+        # 开发模式：本机访问免密登录 admin，且不再要求改初始密码
+        os.environ[_webui._RUN_MODE_ENV] = "dev"
+        status, body, set_cookie = get("/api/auth/me")
+        user = body.get("user") or {}
+        assert status == 200, (status, body)
+        assert user.get("username") == _auth.DEFAULT_ADMIN, user
+        assert user.get("role") == _auth.ROLE_SUPERADMIN, user
+        assert user.get("must_change_password") is False, user
+        assert "ma_session=" in set_cookie, set_cookie
+
+        # 自动登录确实建立了会话：带 Cookie 访问其它接口放行
+        status, _, _ = get("/api/state", set_cookie.split(";")[0])
+        assert status == 200, status
+
+        # 安全边界：远程来源即使在 dev 模式也必须登录
+        original = _webui._RequestHandler._client_ip
+        _webui._RequestHandler._client_ip = lambda self: "203.0.113.7"
+        try:
+            status, body, _ = get("/api/auth/me")
+            assert status == 401, (status, body)
+        finally:
+            _webui._RequestHandler._client_ip = original
+    finally:
+        if wsrv is not None:
+            wsrv.shutdown()
+        if old_env is None:
+            os.environ.pop(_webui._RUN_MODE_ENV, None)
+        else:
+            os.environ[_webui._RUN_MODE_ENV] = old_env
+        _auth._DB_PATH = old_db
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  [17] 运行模式：dev 本机自动登录 / 默认生产 / 远程不放行 通过")
+
+
 # ---------------------------------------------------------------- 主流程
 
 def main() -> int:
@@ -1212,8 +1364,10 @@ def main() -> int:
         ("会话工具表矩阵", scenario_registry_matrix),
         ("健康检查", scenario_health),
         ("Host 头白名单", scenario_host_guard),
+        ("运行模式-开发自动登录", scenario_run_mode_auto_login),
         ("附件路径解析", scenario_attachment_path),
         ("展示分组-注入不拆气泡", scenario_display_grouping),
+        ("多选删除消息", scenario_delete_messages),
         ("会话标题生成与锁定", scenario_session_title),
         ("chat 模式 + history", scenario_chat_and_history),
         ("agent 模式工具轨迹", scenario_agent_tools),

@@ -594,9 +594,9 @@ def test_rebuild_display_fallback():
         actual = events.rebuild_display(sid)
 
         def core_fields(items):
-            # _end 是「在 raw 列表中的下标」，两条链路的 raw 粒度不同（一个含 tool、一个不含），
-            # 因此只比对展示语义（role / content / attachments）。
-            return [{k: v for k, v in it.items() if k != "_end"} for it in items]
+            # _start / _end 是「在 raw 列表中的下标」，两条链路的 raw 粒度不同
+            # （一个含 tool、一个不含），因此只比对展示语义（role / content / attachments）。
+            return [{k: v for k, v in it.items() if k not in ("_start", "_end")} for it in items]
 
         assert core_fields(actual) == core_fields(expected), (actual, expected)
         print("✓ 事件流：JSON 丢失时可用事件流恢复等价的展示项")

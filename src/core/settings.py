@@ -32,6 +32,10 @@ DEFAULTS: dict = {
     "stream": True,                # 流式输出（关闭则整段返回）
     "parallel_tools": True,        # 同一轮的多个工具并行执行
     "max_workers": 4,              # 并行工具的最大线程数
+    # 收尾验证门：本轮执行过写文件/跑命令类操作后，模型准备直接给最终答案时，
+    # 先注入一次「交付前请验证」提醒（跑测试/读回/语法检查），验证后再交付。
+    # 每次任务最多触发一次，纯读类任务不触发。
+    "verify_before_done": True,
     # 沙箱外读取策略：strict=沙箱外读写全拦（默认）；
     # whitelist=仅白名单路径可读；open=沙箱外全部只读放开。
     # 任何档位下沙箱外写入都由 sandbox.safe_path 硬禁，没有开关。
@@ -65,6 +69,12 @@ DEFAULTS: dict = {
     #           模型需要时用 search_tools 检索，命中后加载进本会话即可调用。
     # full：暴露全部工具（原来的行为），适合需要冷门工具的场景。
     "tool_profile": "standard",
+    # 快速对话（chat 模式）的本地只读工具白名单开关：默认开。
+    # 开启时除联网能力外，额外放行 now / time_diff / machine_status /
+    # port_usage / clipboard_read / list_dir —— 都是只读、毫秒级、无副作用、
+    # 不需要审批的工具，用来快速回答「现在几点 / 电脑卡不卡 / 谁占了端口」这类
+    # 即时事实问题。关闭后快速对话只剩联网能力（web_search / fetch_url）。
+    "chat_tools": True,
     # ---- 子智能体（委派）----
     # 开启后 delegate 工具进会话工具表：模型可把一个自包含的只读子任务交给
     # 子代理执行，只把结论带回主对话（中间过程不占主上下文）。
@@ -97,7 +107,8 @@ INT_KEYS = ("max_turns", "max_context_chars", "keep_recent_turns", "max_output_c
             "subagent_timeout")
 #: 布尔字段
 BOOL_KEYS = ("stream", "parallel_tools", "memory_enabled", "memory_auto_extract",
-             "log_enabled", "events_enabled", "subagent_enabled")
+             "log_enabled", "events_enabled", "subagent_enabled", "verify_before_done",
+             "chat_tools")
 #: 枚举字符串字段：允许的取值
 ENUM_KEYS: dict[str, tuple[str, ...]] = {
     "sandbox_read": ("strict", "whitelist", "open"),

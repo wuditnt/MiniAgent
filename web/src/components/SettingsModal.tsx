@@ -331,6 +331,17 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
             </div>
             <div className="gs-control">{renderField("subagent_enabled")}</div>
           </div>
+          <div className="gs-row">
+            <div className="gs-label">
+              <span className="gs-label-text">快速对话可查本地状态</span>
+              <span className="gs-help">
+                快速对话除联网外，额外提供查时间、本机状态、端口占用、剪贴板、
+                列目录这些只读工具，用来即时回答「现在几点 / 电脑卡不卡 / 谁占了端口」；
+                写文件、执行命令等一律不提供。关闭后快速对话只剩联网能力
+              </span>
+            </div>
+            <div className="gs-control">{renderField("chat_tools")}</div>
+          </div>
         </>
       )}
     </div>

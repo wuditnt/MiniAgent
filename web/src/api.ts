@@ -212,6 +212,17 @@ export async function truncateSession(sid: string, keep: number): Promise<{ ok: 
   return res.json();
 }
 
+/** 多选删除：按展示气泡下标任意删除选中的消息（与历史回放同一索引口径） */
+export async function deleteMessages(sid: string, indexes: number[]): Promise<{ ok: boolean; deleted: number }> {
+  const res = await req(`/api/sessions/${encodeURIComponent(sid)}/delete-messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ indexes }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 /** 修改会话标题（改过之后后端不再按首条消息自动生成） */
 export async function updateSession(sid: string, title: string): Promise<{ id: string; title: string }> {
   const res = await req(`/api/sessions/${encodeURIComponent(sid)}`, {

@@ -13,15 +13,24 @@ import {
   UpOutlined,
 } from "@ant-design/icons";
 import { serverNowMs } from "../serverClock";
+import { fmtSec } from "../format";
 import type { RunAction, RunInfo, ToolCall } from "../types";
 import ToolChain from "./ToolChain";
 
-/** 毫秒 → m:ss */
+/** 毫秒 → 与消息脚注一致的写法（6s / 1m23s） */
 function fmtClock(ms: number): string {
-  const total = Math.max(0, Math.round(ms / 1000));
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
+  return fmtSec(Math.max(0, ms) / 1000);
+}
+
+/** detail 兜底转文本：旧版本把工具参数（对象）存进了 detail，直接渲染会让 React 白屏 */
+function detailText(detail: unknown): string {
+  if (detail == null) return "";
+  if (typeof detail === "string") return detail;
+  try {
+    return JSON.stringify(detail);
+  } catch {
+    return String(detail);
+  }
 }
 
 function stateLabel(run: RunInfo): string {
@@ -35,14 +44,15 @@ function stateLabel(run: RunInfo): string {
 function lastActionText(run: RunInfo, streaming: boolean): string {
   const last = run.actions[run.actions.length - 1];
   const running = run.status === "running";
+  const detail = last ? detailText(last.detail) : "";
   if (running) {
     if (last && last.status === "running") {
-      return last.detail ? `正在 ${last.name}：${last.detail}` : `正在 ${last.name}`;
+      return detail ? `正在 ${last.name}：${detail}` : `正在 ${last.name}`;
     }
     return streaming ? "正在生成回答" : "准备中";
   }
   if (!last) return "—";
-  return `最后动作 ${last.name}${last.detail ? `：${last.detail}` : ""}`;
+  return `最后动作 ${last.name}${detail ? `：${detail}` : ""}`;
 }
 
 function actionDot(a: RunAction): string {
@@ -106,10 +116,10 @@ export default function RunHeader({
               <span className={`run-item-dot ${actionDot(a)}`} />
               <span className="run-item-body">
                 <span className="run-item-name">{a.name}</span>
-                {a.detail ? <span className="run-item-detail">{a.detail}</span> : null}
+                {a.detail ? <span className="run-item-detail">{detailText(a.detail)}</span> : null}
               </span>
               {a.dur_ms != null ? (
-                <span className="run-item-dur">{(a.dur_ms / 1000).toFixed(1)}s</span>
+                <span className="run-item-dur">{fmtSec(a.dur_ms / 1000)}</span>
               ) : null}
             </div>
           ))}

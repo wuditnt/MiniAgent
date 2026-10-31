@@ -389,6 +389,8 @@ export interface GeneralSettings {
   tool_profile: "standard" | "full";
   /** 子智能体（委派）：开启后 delegate 工具进会话工具表 */
   subagent_enabled: boolean;
+  /** 快速对话（chat 模式）放行本地只读工具（查时间 / 本机状态 / 端口 / 剪贴板 / 列目录） */
+  chat_tools: boolean;
   /** 单个子任务最多跑几轮 */
   subagent_max_turns: number;
   /** 单个子任务的墙钟超时（秒） */

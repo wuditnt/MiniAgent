@@ -43,6 +43,7 @@ import type {
   WorkspaceItem,
 } from "../types";
 import { fetchSkills, uploadFile } from "../api";
+import { fmtSec } from "../format";
 import Markdown from "./Markdown";
 import ToolChain from "./ToolChain";
 import RunHeader from "./RunHeader";
@@ -66,12 +67,6 @@ function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
   return String(n);
-}
-
-/** 耗时：12.3s / 1m23s */
-function fmtSec(sec: number): string {
-  if (sec < 60) return `${sec}s`;
-  return `${Math.floor(sec / 60)}m${Math.round(sec % 60)}s`;
 }
 
 /** 降级复制：某些环境（无 user activation / 非安全上下文）拿不到 clipboard API */
@@ -139,15 +134,24 @@ function stripMarkdown(md: string): string {
  */
 function MessageToolbar({
   item,
+  onEdit,
   onRegenerate,
   onDelete,
   onTrajectory,
+  pinned = false,
+  extraClass,
 }: {
   item: ChatItem;
+  /** 编辑重发（仅最后一条 user 消息提供）；排在复制之前 */
+  onEdit?: () => void;
   onRegenerate?: (msgId: string) => void;
   onDelete?: (msgId: string) => void;
   /** 打开本会话的运行轨迹抽屉（P0 事实层） */
   onTrajectory?: () => void;
+  /** 是否常驻显示（最后一对问答），否则鼠标悬停该条消息才出现 */
+  pinned?: boolean;
+  /** 追加到根节点的类名（user 气泡右对齐用 msg-toolbar-user） */
+  extraClass?: string;
 }) {
   const btnRef = useRef<HTMLSpanElement>(null);
   const hasContent = !!item.content.trim();
@@ -155,7 +159,10 @@ function MessageToolbar({
   const showUsage = !!usage && usage.total_tokens > 0;
   const showSec = item.sec != null;
 
-  if (!hasContent && !showUsage && !showSec && !onRegenerate && !onTrajectory) return null;
+  if (
+    !hasContent && !showUsage && !showSec &&
+    !onEdit && !onRegenerate && !onDelete && !onTrajectory
+  ) return null;
 
   const mark = (ok: boolean) => {
     const el = btnRef.current;
@@ -185,7 +192,14 @@ function MessageToolbar({
   };
 
   return (
-    <div className="msg-toolbar">
+    <div className={`msg-toolbar${extraClass ? ` ${extraClass}` : ""}${pinned ? " msg-toolbar-pinned" : ""}`}>
+      {onEdit && (
+        <Tooltip title="编辑重发">
+          <span className="msg-tool" onClick={onEdit}>
+            <EditOutlined />
+          </span>
+        </Tooltip>
+      )}
       {hasContent && (
         <Dropdown
           trigger={["hover"]}
@@ -222,7 +236,7 @@ function MessageToolbar({
         </Tooltip>
       )}
       {onDelete && (
-        <Tooltip title="删除此条及之后消息">
+        <Tooltip title="删除">
           <span className="msg-tool" onClick={() => onDelete(item.id)}>
             <DeleteOutlined />
           </span>
@@ -369,6 +383,8 @@ function AssistantBodyInner({
   workspaceId,
   pendingAsk,
   onAnswerAsk,
+  pinned = false,
+  hideToolbar = false,
 }: {
   item: ChatItem;
   onRegenerate?: (msgId: string) => void;
@@ -377,6 +393,10 @@ function AssistantBodyInner({
   workspaceId: string;
   pendingAsk?: PendingAsk | null;
   onAnswerAsk?: (answer: string) => void;
+  /** 最后一对问答：工具栏常驻 */
+  pinned?: boolean;
+  /** 多选删除的卡片视图：勾选框在卡片行首，气泡内不再显示工具栏 */
+  hideToolbar?: boolean;
 }) {
   return (
     <div className="assistant-body">
@@ -439,12 +459,13 @@ function AssistantBodyInner({
           已停止{item.reason ? `：${item.reason}` : ""}
         </Tag>
       ) : null}
-      {item.status !== "streaming" ? (
+      {!hideToolbar && item.status !== "streaming" ? (
         <MessageToolbar
           item={item}
           onRegenerate={onRegenerate}
           onDelete={onDelete}
           onTrajectory={onTrajectory}
+          pinned={pinned}
         />
       ) : null}
     </div>
@@ -476,13 +497,15 @@ interface Props {
   contextLimit?: number;
   /** 重新生成（assistant 消息）：截掉该条及之后的内容，重发对应的 user 消息 */
   onRegenerate?: (msgId: string) => void;
-  /** 编辑重发（user 消息）：把原文填回输入框并进入编辑态；发送时才替换旧轮次 */
+  /** 编辑重发（仅最后一条 user 消息）：气泡原位变成内联编辑框 */
   onEditResend?: (msgId: string) => void;
-  /** 是否处于编辑态（输入框上方提示，可取消） */
-  editing?: boolean;
+  /** 正在内联编辑的消息 id（该气泡渲染为编辑框）；null = 未在编辑 */
+  editingId?: string | null;
+  /** 内联编辑框「发送」：先删掉该条（最后一次信息）再用新文本重发 */
+  onEditSend?: (text: string) => void;
   onCancelEdit?: () => void;
-  /** 删除消息：截掉该条及之后的内容 */
-  onDelete?: (msgId: string) => void;
+  /** 多选删除：按选中的消息 id 删除（任意组合，不再限定「此条及之后」） */
+  onDeleteMessages?: (ids: string[]) => void;
   /** 打开本会话的运行轨迹抽屉（P0 事实层） */
   onTrajectory?: () => void;
   /** 内联提问：正在等待作答的 ask_user 卡片（渲染在当前流式气泡内） */
@@ -673,6 +696,50 @@ function AttachmentPreview({
   );
 }
 
+/**
+ * 内联编辑框（编辑重发，参考图3）：原位替换最后一条 user 气泡。
+ * 文本为空、或与原文完全相同时「发送」禁用；确认后由 App 先删掉这条再重发。
+ */
+function InlineEditBox({
+  original,
+  onCancel,
+  onSend,
+}: {
+  original: string;
+  onCancel: () => void;
+  onSend: (text: string) => void;
+}) {
+  const [text, setText] = useState(original);
+  const ok = !!text.trim() && text.trim() !== original.trim();
+  const submit = () => {
+    if (ok) onSend(text);
+  };
+  return (
+    <div className="edit-inline">
+      <Input.TextArea
+        autoFocus
+        autoSize={{ minRows: 3, maxRows: 8 }}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            submit();
+          }
+        }}
+      />
+      <div className="edit-inline-actions">
+        <Button size="small" onClick={onCancel}>
+          取消
+        </Button>
+        <Button size="small" type="primary" disabled={!ok} onClick={submit}>
+          发送
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export default function Chat({
   items,
   busy,
@@ -689,9 +756,10 @@ export default function Chat({
   workspaceLocked,
   onRegenerate,
   onEditResend,
-  editing,
+  editingId,
+  onEditSend,
   onCancelEdit,
-  onDelete,
+  onDeleteMessages,
   onTrajectory,
   contextUsage,
   contextLimit,
@@ -723,6 +791,18 @@ export default function Chat({
   const pickedSkills = useMemo(() => parseComposer(input).skills, [input]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevLen = useRef(0);
+  // 是否处于「跟随底部」状态：用户手动往上翻历史时置 false，滚回底部自动恢复
+  const stick = useRef(true);
+  // 「发送后顶到最上面」的锚点消息 id + 它下面的动态留白
+  const anchorId = useRef<string | null>(null);
+  const tailRef = useRef<HTMLDivElement>(null);
+  // 视口模式：pinned = 本轮用户消息钉在顶部、期间绝不移动视口；follow = 贴底跟随。
+  // 滚动权只归这一个状态机：Bubble.List 的 autoScroll 已关闭，避免两套逻辑抢滚动条。
+  const viewMode = useRef<"pinned" | "follow">("follow");
+  // 发送 / 重新生成的调用处置位：下一次布局进入 pinned 并做一次定位
+  const pendingPin = useRef(false);
+  // 本轮是否已切到「贴底跟随」（回复超一屏）；带滞回，见跟随 effect
+  const roundFollow = useRef(false);
   // 上一轮的决策卡片：用于在卡片出现的瞬间强制滚到底部
   const prevAsk = useRef<PendingAsk | null>(null);
   // 已上传、待发送的附件（chips 展示在输入框上方）
@@ -735,6 +815,9 @@ export default function Chat({
   // 加载更早消息时记录滚动位置，渲染后按高度差补偿，避免视口跳动
   const anchor = useRef<{ height: number; top: number } | null>(null);
   const hiddenCount = Math.max(0, items.length - visibleCount);
+  // 多选删除（参考图2）：选中态独立于 items；selectMode 期间输入区整体隐藏
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
 
   /** 技能清单：每次打开选择器都重新拉，保证管理页的启停立即生效 */
   const ensureSkills = () => {
@@ -754,6 +837,92 @@ export default function Chat({
     setSkillOpen(false);
     setSlashAt(null);
     setSkillQueryText("");
+  };
+
+  // ---------------------------------------------------------------- 多选删除
+
+  /** 一轮对话 = 一条 user 气泡 + 其后的助手气泡（图1/图2 的一整块）。
+      user 之前已有助手消息（如开场白）时单独成组，只有分项勾选框。 */
+  type SelGroup = {
+    key: string;
+    userId?: string;
+    assistantIds: string[];
+    noticeId?: string;
+  };
+
+  const selGroups = useMemo(() => {
+    const out: SelGroup[] = [];
+    let cur: SelGroup | null = null;
+    for (const it of items.slice(hiddenCount)) {
+      if (it.role === "notice") {
+        cur = null;
+        out.push({ key: it.id, assistantIds: [], noticeId: it.id });
+        continue;
+      }
+      if (it.role === "user") {
+        cur = { key: it.id, userId: it.id, assistantIds: [] };
+        out.push(cur);
+        continue;
+      }
+      if (!cur) {
+        cur = { key: it.id, assistantIds: [] };
+        out.push(cur);
+      }
+      cur.assistantIds.push(it.id);
+    }
+    return out;
+  }, [items, hiddenCount]);
+
+  const itemById = useMemo(() => new Map(items.map((it) => [it.id, it])), [items]);
+
+  const groupIds = (g: SelGroup) => (g.userId ? [g.userId, ...g.assistantIds] : g.assistantIds);
+
+  /** 进入多选删除：预选中被点击那一整轮（user + 助手），避免留下孤儿回复 */
+  const enterSelect = (msgId?: string) => {
+    if (busy || !onDeleteMessages) return;
+    if (editingId) onCancelEdit?.();
+    const g = msgId
+      ? selGroups.find((x) => x.userId === msgId || x.assistantIds.includes(msgId))
+      : undefined;
+    setSelected(new Set(g ? groupIds(g) : msgId ? [msgId] : []));
+    setSelectMode(true);
+  };
+
+  /** 退出多选删除：输入区与工具栏恢复显示 */
+  const exitSelect = () => {
+    setSelectMode(false);
+    setSelected(new Set());
+  };
+
+  const toggleSel = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  /** 轮级全选框（与用户气泡对齐）：整轮一起勾选 / 取消；部分选中时点一下补齐 */
+  const toggleGroup = (g: SelGroup) => {
+    const ids = groupIds(g);
+    setSelected((prev) => {
+      const all = ids.every((id) => prev.has(id));
+      const next = new Set(prev);
+      ids.forEach((id) => (all ? next.delete(id) : next.add(id)));
+      return next;
+    });
+  };
+
+  // 只把当前可见窗口里的消息纳入可选集：全选不应勾掉用户还没加载出来看到的历史
+  const selectableIds = useMemo(() => selGroups.flatMap(groupIds), [selGroups]);
+  const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
+  const toggleAll = () =>
+    setSelected(allSelected ? new Set() : new Set(selectableIds));
+
+  /** 执行删除：无论成败都退出选择态恢复输入区（失败时 App 侧回滚并提示） */
+  const confirmDelete = () => {
+    onDeleteMessages?.([...selected]);
+    exitSelect();
   };
 
   /**
@@ -874,13 +1043,21 @@ export default function Chat({
   const loadEarlier = () => {
     const el = scrollRef.current;
     if (el) anchor.current = { height: el.scrollHeight, top: el.scrollTop };
+    viewMode.current = "follow"; // 翻历史即退出钉顶模式
     setVisibleCount((c) => c + LOAD_STEP);
   };
+
+  /** 是否贴着底部（距底部 < 120px，约等于「贴着输入框上沿」） */
+  const atBottom = (el: HTMLDivElement) =>
+    el.scrollHeight - el.scrollTop - el.clientHeight < 120;
 
   /** 滚到顶部附近自动加载（内容还没撑满一屏时不自动，交给按钮） */
   const onScroll = () => {
     const el = scrollRef.current;
-    if (!el || hiddenCount <= 0) return;
+    if (!el) return;
+    // 用户手动上翻 → 暂停自动跟随；滚回底部附近 → 恢复
+    stick.current = atBottom(el);
+    if (hiddenCount <= 0) return;
     if (el.scrollTop > 60) return;
     if (el.scrollHeight <= el.clientHeight + 200) return;
     loadEarlier();
@@ -990,20 +1167,105 @@ export default function Chat({
     setPending((prev) => prev.filter((_, i) => i !== idx));
   };
 
-  // 贴近底部时跟随滚动；用户向上翻历史时不打扰；新消息插入时强制回底
-  useEffect(() => {
+  // 跟随滚动：
+  //   ① 刚发出消息 → 把它顶到列表顶部（下方整块区域留给回复）；
+  //   ② 之后内容继续增长（流式 token / 工具卡片 / 思考块），只要仍贴着底部就跟随，
+  //      保证最新文字始终露在输入框上方；
+  //   ③ 用户手动往上翻历史时不打扰，滚回底部附近自动恢复（见 onScroll）。
+  //
+  // 「顶部对齐」为什么需要留白：把列表末尾的消息顶到视口顶部，需要 scrollTop 超过
+  // scrollHeight - clientHeight，浏览器会钳到最大值，消息只能停在底部。
+  // 所以在锚点下方补一块动态留白，让可滚动范围刚好够把锚点推到顶部。
+  useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    // 有定位请求时让位给 focusId 的滚动逻辑，避免被「跳到底部」覆盖
+    // 有定位请求时让位给 focusId 的滚动逻辑；搜索跳转属于 follow 模式
     if (focusId) {
       prevLen.current = items.length;
+      viewMode.current = "follow";
+      roundFollow.current = false;
       return;
     }
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
-    if (nearBottom || items.length > prevLen.current) {
-      el.scrollTop = el.scrollHeight;
-    }
+    const prev = prevLen.current;
     prevLen.current = items.length;
+
+    // 发送 / 重新生成：锚点就绪后进入「钉顶」模式（调用处已置 pendingPin）
+    let wantPin = false;
+    if (items.length > prev) {
+      // 新插入的尾巴里可能有用户消息（后面常紧跟助手占位气泡），
+      // 以「本次新增的最后一条用户消息」为锚点。
+      for (let i = items.length - 1; i >= prev; i--) {
+        if (items[i].role === "user" && i >= items.length - 2) {
+          anchorId.current = items[i].id;
+          break;
+        }
+      }
+    }
+    if (pendingPin.current) {
+      // 编辑重发是「先截断、再插入」两段式变更：锚点还没进 DOM 时等下一次提交，
+      // 避免把 pendingPin 消费在空锚点上导致该轮失去钉顶。
+      const probe = anchorId.current
+        ? el.querySelector<HTMLElement>(`#msg-${anchorId.current}`)
+        : null;
+      if (probe) {
+        pendingPin.current = false;
+        viewMode.current = "pinned";
+        stick.current = true;
+        wantPin = true;
+      }
+    }
+
+    const tail = tailRef.current;
+    if (viewMode.current !== "pinned") {
+      // follow 模式：不留白，按 stick 贴底跟随
+      anchorId.current = null;
+      roundFollow.current = false;
+      if (tail) tail.style.height = "0px";
+      if (stick.current) el.scrollTop = el.scrollHeight;
+      return;
+    }
+
+    const anchorEl = anchorId.current
+      ? el.querySelector<HTMLElement>(`#msg-${anchorId.current}`)
+      : null;
+    if (!anchorEl) {
+      // 锚点已不在列表里（切会话 / 截断）：回退 follow
+      anchorId.current = null;
+      viewMode.current = "follow";
+      roundFollow.current = false;
+      if (tail) tail.style.height = "0px";
+      if (stick.current) el.scrollTop = el.scrollHeight;
+      return;
+    }
+
+    // 留白高度 = 恰好让锚点能顶到视口顶部所需的额外空间（内容本身够高时为 0）
+    // 定位基准取气泡根节点（#msg 在气泡内容内部，与可视气泡顶有固定偏移），
+    // 留白与滚动目标统一按「气泡顶距视口顶 5px」计算，保证目标不被 scrollHeight 钳制
+    const spacer = tail ? tail.offsetHeight : 0;
+    const cRect = el.getBoundingClientRect();
+    const bubbleEl = anchorEl.closest<HTMLElement>(".ant-bubble") ?? anchorEl;
+    const anchorTop = bubbleEl.getBoundingClientRect().top - cRect.top + el.scrollTop;
+    const contentBelow = el.scrollHeight - spacer - anchorTop;
+    const pad = Math.min(el.clientHeight, Math.max(0, el.clientHeight - contentBelow - 5));
+    if (tail) tail.style.height = `${pad}px`;
+
+    // 用户手动翻走时不动视口（发送那一刻除外）
+    if (!stick.current && !wantPin) return;
+
+    // 钉顶视图下「本轮内容超出一屏」的量：运行时间线卡片展开/收起会让它短暂波动，
+    // 所以用带滞回的双阈值：超出 48px 才切贴底跟随；收回不超屏才回到钉顶。
+    const over = contentBelow - (el.clientHeight - 8);
+    if (wantPin) roundFollow.current = false;
+    if (!roundFollow.current && over > 48) roundFollow.current = true;
+    else if (roundFollow.current && over < 0) roundFollow.current = false;
+
+    if (roundFollow.current) {
+      // 回复确实长到一屏装不下：贴底跟随，保证最新文字可见
+      el.scrollTop = el.scrollHeight - el.clientHeight;
+    } else {
+      // 装得下（含回合结束时间线收起后）：用户消息钉在顶部，期间视口不再移动
+      el.scrollTop = Math.min(anchorTop - 5, el.scrollHeight - el.clientHeight);
+    }
   }, [items, focusId]);
 
   // 决策卡片（ask_user）出现时消息条数不变，上面的跟随滚动不会触发；
@@ -1011,7 +1273,7 @@ export default function Chat({
   useEffect(() => {
     const appeared = !!pendingAsk && !prevAsk.current;
     prevAsk.current = pendingAsk ?? null;
-    if (appeared && !focusId) {
+    if (appeared && !focusId && viewMode.current === "follow") {
       const el = scrollRef.current;
       if (el) el.scrollTop = el.scrollHeight;
     }
@@ -1035,13 +1297,27 @@ export default function Chat({
         placement: "start",
         variant: "borderless",
       },
+      // 内联编辑框（编辑重发）：贴左侧整行展开（参考图3），无气泡底色
+      editor: {
+        placement: "start",
+        variant: "borderless",
+      },
     }),
     []
   );
 
   // 只有真正影响气泡的依赖变化时才重建列表：输入框打字、附件增删等局部状态
   // 不应该把整段历史重新构造一遍（长会话下这是输入卡顿的主要来源之一）
-  const bubbleItems = useMemo(() => items.slice(hiddenCount).map((it) => {
+  const bubbleItems = useMemo(() => {
+    // 最后一对问答：工具栏常驻（其中最后一条 user / assistant 各算一个）
+    let lastUserId = "";
+    let lastAssistantId = "";
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (!lastAssistantId && items[i].role === "assistant") lastAssistantId = items[i].id;
+      if (!lastUserId && items[i].role === "user") lastUserId = items[i].id;
+      if (lastUserId && lastAssistantId) break;
+    }
+    return items.slice(hiddenCount).map((it) => {
     // 每条消息套一层带 id 的容器，供搜索命中后 scrollIntoView 定位
     if (it.role === "assistant") {
       const waiting =
@@ -1057,12 +1333,20 @@ export default function Chat({
           <div id={`msg-${it.id}`}>
             <AssistantBody
               item={it}
-              onRegenerate={busy ? undefined : onRegenerate}
-              onDelete={busy ? undefined : onDelete}
+              onRegenerate={
+                busy
+                  ? undefined
+                  : (id: string) => {
+                      pendingPin.current = true; // 重新生成同样钉到该轮顶部
+                      onRegenerate?.(id);
+                    }
+              }
+              onDelete={busy ? undefined : (id: string) => enterSelect(id)}
               onTrajectory={onTrajectory}
               workspaceId={workspaceId}
               pendingAsk={pendingAsk}
               onAnswerAsk={onAnswerAsk}
+              pinned={it.id === lastAssistantId}
             />
           </div>
         ),
@@ -1070,6 +1354,25 @@ export default function Chat({
     }
     if (it.role === "notice") {
       return { key: it.id, role: "notice", content: <span className="notice">{it.content}</span> };
+    }
+    // 编辑重发中：气泡原位换成内联输入框（参考图3）；确认后由 App 删旧发新
+    if (editingId === it.id) {
+      return {
+        key: it.id,
+        role: "editor",
+        content: (
+          <div id={`msg-${it.id}`}>
+            <InlineEditBox
+              original={it.content}
+              onCancel={() => onCancelEdit?.()}
+              onSend={(t) => {
+                pendingPin.current = true; // 重发后把新消息钉到列表顶部
+                onEditSend?.(t);
+              }}
+            />
+          </div>
+        ),
+      };
     }
     return {
       key: it.id,
@@ -1081,48 +1384,47 @@ export default function Chat({
         </span>
       ),
       // 小工具栏放气泡下方（Bubble 的 footer），而不是塞进蓝色气泡里：
-      // 这样按钮尺寸、颜色、hover 与助手气泡下方那排完全一致。
-      footer: onEditResend && !busy ? (
-        <div className="msg-toolbar msg-toolbar-user">
-          <Tooltip title="编辑重发">
-            <span
-              className="msg-tool"
-              onClick={() => {
-                setInput(it.content);
-                onEditResend(it.id);
-              }}
-            >
-              <EditOutlined />
-            </span>
-          </Tooltip>
-          {onDelete && (
-            <Tooltip title="删除此条及之后消息">
-              <span className="msg-tool" onClick={() => onDelete(it.id)}>
-                <DeleteOutlined />
-              </span>
-            </Tooltip>
-          )}
-        </div>
-      ) : undefined,
+      // 顺序 = 编辑重发 / 复制 / 删除（需求图1）；仅最后一条 user 气泡有编辑。
+      footer: busy ? undefined : (
+        <MessageToolbar
+          item={it}
+          extraClass="msg-toolbar-user"
+          pinned={it.id === lastUserId}
+          onEdit={
+            it.id === lastUserId && onEditResend ? () => onEditResend(it.id) : undefined
+          }
+          onDelete={onDeleteMessages ? (id: string) => enterSelect(id) : undefined}
+        />
+      ),
     };
-  }), [
+    });
+  }, [
     items,
     hiddenCount,
     busy,
     onRegenerate,
-    onDelete,
     onTrajectory,
     workspaceId,
     pendingAsk,
     onAnswerAsk,
     onEditResend,
+    editingId,
+    onEditSend,
+    onCancelEdit,
+    onDeleteMessages,
   ]);
 
   return (
     <>
       <div className="chat-scroll" ref={scrollRef} onScroll={onScroll}>
         {items.length === 0 ? (
-          <WelcomePane mode={mode} onPick={onSend} />
+          <WelcomePane
+            mode={mode}
+            onPick={(t: string) => {
+              pendingPin.current = true;
+              onSend(t);
+            }}
+          />
         ) : (
           <div className="chat-inner">
             {hiddenCount > 0 && !scrollable && (
@@ -1132,27 +1434,104 @@ export default function Chat({
                 </Button>
               </div>
             )}
-            <Bubble.List items={bubbleItems} roles={roles} />
+            {/* 多选删除（图1）：每轮对话一张卡片，行首双勾选框（轮级 + 分项） */}
+            {selectMode ? (
+              <div className="select-cards">
+                {selGroups.map((g) => {
+                  if (g.noticeId) {
+                    const it = itemById.get(g.noticeId);
+                    return it ? (
+                      <div key={g.key} className="notice">
+                        {it.content}
+                      </div>
+                    ) : null;
+                  }
+                  const user = g.userId ? itemById.get(g.userId) : undefined;
+                  const ids = groupIds(g);
+                  const checkedCount = ids.filter((id) => selected.has(id)).length;
+                  const all = ids.length > 0 && checkedCount === ids.length;
+                  return (
+                    <div className="turn-card" key={g.key}>
+                      {user && (
+                        <div className="turn-row turn-row-user">
+                          <Checkbox
+                            className="turn-check"
+                            checked={all}
+                            indeterminate={checkedCount > 0 && !all}
+                            onChange={() => toggleGroup(g)}
+                          />
+                          <div className="turn-user" id={`msg-${user.id}`}>
+                            {user.content}
+                            <AttachmentPreview
+                              attachments={user.attachments}
+                              workspaceId={workspaceId}
+                            />
+                          </div>
+                        </div>
+                      )}
+                      {g.assistantIds.map((id) => {
+                        const it = itemById.get(id);
+                        if (!it) return null;
+                        return (
+                          <div className="turn-row turn-row-assistant" key={id}>
+                            <Checkbox
+                              className="turn-check"
+                              checked={selected.has(id)}
+                              onChange={() => toggleSel(id)}
+                            />
+                            <div className="turn-assistant" id={`msg-${id}`}>
+                              <AssistantBody
+                                item={it}
+                                onTrajectory={onTrajectory}
+                                workspaceId={workspaceId}
+                                hideToolbar
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              /* autoScroll 必须关：它会在「距底部很近」时自动 scrollTo 底部，
+                 而钉顶视图恰好距底部 8px，会被它误判并在回合结束时抢滚动条 */
+              <Bubble.List autoScroll={false} items={bubbleItems} roles={roles} />
+            )}
+            {/* 「发送后顶到最上面」所需的动态留白，高度由跟随滚动 effect 直接写入 */}
+            <div className="chat-tail-space" ref={tailRef} aria-hidden="true" />
           </div>
         )}
       </div>
+      {selectMode ? (
+        /* 多选删除（图2）：底部 全选 / 取消 / 删除；期间输入框与工具栏一律隐藏 */
+        <div className="select-bar">
+          <Checkbox
+            className="select-all"
+            checked={allSelected}
+            indeterminate={!allSelected && selected.size > 0}
+            onChange={toggleAll}
+          >
+            全选
+          </Checkbox>
+          <div className="select-actions">
+            <Button type="text" onClick={exitSelect}>
+              取消
+            </Button>
+            <Button
+              type="primary"
+              className="select-del"
+              disabled={!selected.size}
+              onClick={confirmDelete}
+            >
+              删除
+            </Button>
+          </div>
+        </div>
+      ) : (
       <div className="composer">
         <div className="composer-inner">
-          {editing && (
-            <div className="edit-banner">
-              <EditOutlined />
-              <span>正在编辑历史消息：发送后才会替换该轮及其之后的对话</span>
-              <span
-                className="edit-banner-cancel"
-                onClick={() => {
-                  setInput("");
-                  onCancelEdit?.();
-                }}
-              >
-                取消编辑
-              </span>
-            </div>
-          )}
           <div className="composer-body">
           <div className="composer-top">
             <WorkspaceChip
@@ -1192,9 +1571,12 @@ export default function Chat({
               onChange={handleInputChange}
               components={{ input: SkillInput }}
               onSubmit={(v: string) => {
+                // 输入框发送 = 放弃内联编辑（编辑只从内联框确认发送），防止误截断
+                if (editingId) onCancelEdit?.();
                 // 技能块序列化成「裸名字 + 不可见包裹字符」，由后端运行时自行查找
                 const message = serializeForSend(v).trim();
                 if (!message && !pending.length) return;
+                pendingPin.current = true; // 发送后把这条消息钉到列表顶部
                 onSend(message, pending.length ? pending : undefined);
                 setInput("");
                 setPending([]);
@@ -1359,6 +1741,7 @@ export default function Chat({
           <div className="hint">Enter 发送 / Shift+Enter 换行 · 本地部署，数据不出本机</div>
         </div>
       </div>
+      )}
     </>
   );
 }

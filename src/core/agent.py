@@ -96,8 +96,59 @@ DEFAULT_SYSTEM_PROMPT = """你是一个能操作本地环境的智能体。
 如果现有工具不足以完成任务，明确说明缺什么能力，而不是硬凑。
 回答用简体中文。"""
 
+#: 快速对话（chat 模式）的系统提示：只保留「问答」这一定位。
+#: 不能复用 DEFAULT_SYSTEM_PROMPT —— 那套提示描述的是「能读写文件、跑命令」的智能体，
+#: 而快速对话实际只挂了少量即时查询工具，二者不符时模型会凭空罗列自己的能力。
+CHAT_SYSTEM_PROMPT = """你是一个简洁、可靠的对话助手。
+
+本轮是「快速对话」：只挂了少量即时查询工具（当前时间、时间差、本机概况、联网搜索/抓取），
+没有读写本地文件、执行命令、处理办公文档的能力。
+
+规则：
+1. 只做知识问答、解释、写作与推理；直接给结论，不铺垫、不凑字数。
+2. 不承诺自己做不到的事：被问到读文件、跑代码、改系统、处理 Word/Excel/PDF 时，
+   明确说明「快速对话模式做不到，切到智能体模式就能做」，也不要主动罗列自己不具备的能力。
+3. 只有需要实时信息时才用 web_search / fetch_url，能凭常识回答就不搜。
+4. 回答用简体中文。"""
+
 # 取消时给模型看的统一占位文本（也是给用户看的轨迹内容）
 CANCELLED_TEXT = "[cancelled] 用户取消了本次任务，该工具未执行完成。"
+
+# 有副作用的内置工具：本轮执行过它们，交付前就应该先验证（收尾验证门的触发条件）。
+# 不在集合里的工具若标了 dangerous 也算（覆盖 MCP 等外部写操作）；
+# 集合按「写文件 / 改内容 / 执行命令 / 改外部状态」维护，只读工具一律不收。
+_SIDE_EFFECT_TOOLS = frozenset({
+    "write_file", "append_to_file", "edit_file", "re_replace",
+    "write_csv", "df_to_parquet",
+    "run_shell", "run_python",
+    "copy_file", "move_file", "delete_file", "make_dir", "rename",
+    "git_commit", "zip_create", "zip_extract",
+    "http_post", "clipboard_write", "kill_process",
+})
+
+# 收尾验证门注入的提醒（user 角色 + _injected 标记：与 max_turns_wrapup 同一口径，
+# webui 落盘与展示跳过它，不会打断用户可见的对话气泡）
+_VERIFY_GATE_NOTE = (
+    "【系统提示，不是用户发言】本轮你执行过写文件 / 执行命令类操作，交付前请先验证再收尾：\n"
+    "- 写了或改了文件（文档 / 报告 / 表格等）：读回关键部分，确认内容完整、格式正确、存到了指定位置；\n"
+    "- 整理或引用了数据 / 资料：核对关键数字、名称、时间、出处，确认与来源一致、没有遗漏或臆造；\n"
+    "- 跑了命令：看完整输出与结果是否符合预期，不要只看「执行成功」。\n"
+    "验证发现问题就先修复再验证；全部通过后，用一两句话说明「验证过什么、结果如何」，再交付最终结果。\n"
+    "如果你刚才已经做过等价验证，直接说明验证依据并交付，不要重复劳动。"
+)
+
+# 服务端拒绝「上下文超长」类请求的错误特征（各家服务商措辞不同，小写匹配）
+_OVERFLOW_HINTS = (
+    "prompt_too_long", "prompt is too long", "context_length_exceeded",
+    "context length", "context window", "maximum context",
+    "reduce the length", "too many tokens", "request too large", "string above max",
+)
+
+
+def _is_context_overflow(err: Exception) -> bool:
+    """判断异常是不是「请求超出模型上下文窗口」——这类错可以通过压缩历史后重试恢复。"""
+    text = str(err).lower()
+    return any(k in text for k in _OVERFLOW_HINTS)
 
 
 def _setting(name: str):
@@ -407,6 +458,12 @@ class Agent:
         self._tool_calls_this_run = 0
         self._delegated = False
         self._delegate_nudge_count = 0
+        # 收尾验证门：开关（显式参数 > 通用配置 > 默认开）+ 本 run 状态
+        self.verify_before_done = bool(_pick(None, "verify_before_done", True))
+        self._side_effect_this_run = False   # 本 run 是否执行过写/执行类工具
+        self._verify_nudged = False          # 验证提醒每次 run 最多注入一次
+        # 上下文被服务端判超长后的应急压缩重试次数（每次 run 重置，防死循环）
+        self._overflow_retries = 0
 
         # 取消提示是否已经由 UI 层显示过（同上：避免控制台重复打印）。
         self.last_cancel_notice_shown = False
@@ -631,6 +688,21 @@ class Agent:
             kind=events.KIND_HARD_WINDOW, dropped_messages=dropped,
             boundary=boundary, prefix_end=prefix_end,
         )
+
+    def _responsive_trim(self) -> bool:
+        """服务端判超长时的应急压缩：不走 _trim_context 的本地阈值判断，
+        直接逐级加强（清旧工具输出 → 滚动摘要 → 硬窗口），
+        返回是否真的裁掉了内容（裁不动时调用方应放弃重试、按原错误抛出）。
+        """
+        before = self._context_chars()
+        self._trim_old_tool_results()
+        if self._context_chars() < before:
+            return True
+        self._roll_summary()
+        if self._context_chars() < before:
+            return True
+        self._hard_window()
+        return self._context_chars() < before
 
     def _summarize(self, text: str, prev: str) -> str | None:
         """调当前模型把历史压成摘要；任何失败都返回 None（不阻断任务）。"""
@@ -948,13 +1020,48 @@ class Agent:
             "确实马上能收尾的话，做完即可。"
         )
 
+    def _turn_budget_nudge(self, turn: int) -> str:
+        """进入最后约 30% 轮次时提醒模型收敛，避免「探索到上限、任务没交付」。
+
+        与委派提醒一样走尾部临时 system（只进请求体、不落盘）。
+        max_turns 很小（<3）时不打扰：本来就一两轮，提醒只会浪费输出。
+        """
+        if self.max_turns < 3:
+            return ""
+        threshold = max(2, -(-self.max_turns * 7 // 10))   # ceil(0.7 * max_turns)
+        if not (threshold <= turn <= self.max_turns):
+            return ""
+        left = self.max_turns - turn + 1
+        return (
+            f"【系统提示，不是用户发言】本轮是第 {turn}/{self.max_turns} 轮（含本轮只剩 {left} 轮）。"
+            "请优先收敛：不要再开启新的探索分支，用已有信息完成并交付当前最佳结果；"
+            "确实无法完成时，说明已完成的部分与阻塞点。"
+        )
+
+    def _is_side_effect_call(self, tc: dict) -> bool:
+        """这次工具调用是否有副作用（写文件 / 执行命令 / 改外部状态）。"""
+        name = (tc.get("function") or {}).get("name") or ""
+        if name in _SIDE_EFFECT_TOOLS:
+            return True
+        tool = self.registry.get(name)
+        return bool(tool is not None and tool.dangerous)
+
+    def _verify_gate_needed(self, turn: int) -> bool:
+        """收尾验证门：本轮有副作用操作、还没提醒过、且还有余量再跑一轮。"""
+        return (
+            self.verify_before_done
+            and self._side_effect_this_run
+            and not self._verify_nudged
+            and turn < self.max_turns
+        )
+
     def _sync_system_prompt(self, user_input: str = "") -> None:
         """每轮 run() 刷新 messages[0] = 基础提示词 + auto 责任准则 + 联网提示 + 记忆块。
 
         四者都每轮覆盖：确认模式可逐轮切换、记忆文件可能在外部被编辑，
         改完下一轮立即生效，不做增量拼接（避免重复追加）。
         """
-        base = self.system_prompt
+        base = CHAT_SYSTEM_PROMPT if self.chat_mode else self.system_prompt
         auto = approval.AUTO_RESPONSIBILITY_PROMPT if self.approval_mode == approval.AUTO else ""
         net = self._net_hint()
         mem = self._memory_block(user_input)
@@ -1285,6 +1392,9 @@ class Agent:
         self._tool_calls_this_run = 0
         self._delegated = False
         self._delegate_nudge_count = 0
+        self._side_effect_this_run = False
+        self._verify_nudged = False
+        self._overflow_retries = 0
 
         for turn in range(1, self.max_turns + 1):
             tok = self.cancel_token
@@ -1313,7 +1423,9 @@ class Agent:
             # 联网提醒与委派提醒合成一条再追加：_request_or_cancel 的降级逻辑只回退
             # 「最后一条」system 消息，分两条的话第二次重试仍会被同一个服务端拒绝。
             reminder = "\n\n".join(
-                p for p in (self._net_reminder(), self._delegate_nudge()) if p
+                p for p in (
+                    self._net_reminder(), self._delegate_nudge(), self._turn_budget_nudge(turn),
+                ) if p
             )
             if reminder:
                 msgs.append({"role": "system", "content": reminder})
@@ -1330,12 +1442,16 @@ class Agent:
                 "temperature": self.temperature,
             }
             self._apply_reasoning(payload)
-            digests = [events.message_digest(m) for m in payload["messages"]]
+            # I1 的 digest 只覆盖「可重放的历史消息」：末尾的临时 system 提醒
+            # （联网/委派/轮次预算）只进请求体、不落盘也不进事件流，
+            # 若计入 digest，重放永远少一条，I1 校验必炸。
+            history_msgs = payload["messages"][:-1] if reminder else payload["messages"]
+            digests = [events.message_digest(m) for m in history_msgs]
             self._emit(
                 events.LLM_REQUEST, source=events.SRC_MODEL, phase=events.PH_TURN, turn=turn,
                 model=self.model, temperature=self.temperature,
                 tools=[(s.get("function") or {}).get("name") for s in schemas],
-                message_count=len(payload["messages"]),
+                message_count=len(history_msgs),
                 chars=sum(d["chars"] for d in digests),
                 system_sha256=self._system_sha or "",
                 messages=digests,
@@ -1428,6 +1544,22 @@ class Agent:
                     )
                     self._ui_call("notice", "[yellow]· 模型返回空回答，正在重试本轮[/yellow]")
                     continue
+                # 收尾验证门：本轮动过文件/跑过命令，模型却准备直接交答案时，
+                # 拦一次让它先验证（跑测试 / 读回 / 语法检查）。只拦一次、
+                # 最后一轮不拦（拦了也没有余量再执行验证工具）。
+                if self._verify_gate_needed(turn):
+                    self._verify_nudged = True
+                    _llm_log.info("verify.gate turn=%d：交付前注入验证提醒", turn)
+                    self._ui_call("notice", "[yellow]· 交付前请先验证（读回文件 / 核对内容 / 查看命令结果）[/yellow]")
+                    self.messages.append(
+                        {"role": "user", "content": _VERIFY_GATE_NOTE, "_injected": "verify_gate"}
+                    )
+                    # 事件流同步记录：否则 I1 重放到下一条 llm_request 时会少一条消息
+                    self._emit(
+                        events.CONTEXT_INJECT, source=events.SRC_LOOP, phase=events.PH_CONTEXT,
+                        kind=events.KIND_VERIFY_GATE, content=_VERIFY_GATE_NOTE,
+                    )
+                    continue
                 self.last_answer_streamed = shown
                 return content or ""
 
@@ -1445,7 +1577,6 @@ class Agent:
             self._tool_calls_this_run += len(tool_calls)
             if any((tc.get("function") or {}).get("name") == "delegate" for tc in tool_calls):
                 self._delegated = True
-
             # 工具可能通过附件通道递了图片（如 view_image）：
             # 回填完工具结果后取走，作为一条 user 消息追加，
             # 视觉模型在下一轮就能真正「看到」这些图。没有附件时什么都不做。
@@ -1589,6 +1720,23 @@ class Agent:
                     self.model, _gateway_event_id(str(e)), _short_error(e),
                 )
                 raise blocked from None
+            # 上下文被服务端判超长：事前预防（_trim_context 按本地字符数估算）
+            # 与服务商实际窗口可能不一致，这里做响应式补救 —— 强制压缩一级后
+            # 用压缩后的消息体重发。每次 run 最多两次，裁不动就按原错误抛出。
+            if _is_context_overflow(e) and self._overflow_retries < 2 and self._responsive_trim():
+                self._overflow_retries += 1
+                _llm_log.warning(
+                    "context.overflow retry=%d：服务端判超长，已压缩历史后重试",
+                    self._overflow_retries,
+                )
+                self._ui_call("notice", "[yellow]· 上下文超出模型窗口，已压缩历史后重试[/yellow]")
+                retry = dict(payload)
+                retry["messages"] = [
+                    {k: v for k, v in m.items() if not k.startswith("_")} for m in self.messages
+                ]
+                if tail_system:
+                    retry["messages"].append({"role": "system", "content": tail_system})
+                return self._request_or_cancel(client, retry, token, tail_system=tail_system)
             msgs = payload.get("messages") or []
             if (
                 tail_system
@@ -1812,6 +1960,10 @@ class Agent:
                 todo.append((i, tool, args))
             else:
                 results[i] = preset
+
+        # 只统计真正进入执行阶段的调用：被拒绝、参数错误或未知工具不触发收尾验证门
+        if any(self._is_side_effect_call(prepared[i][0]) for i, _tool, _args in todo):
+            self._side_effect_this_run = True
 
         if not todo:
             _tool_log.info("batch.done turn=%d count=0 sec=%.2f", turn, time.time() - batch_t0)

@@ -82,6 +82,20 @@ _LOCAL_USER = {
     "must_change_password": False, "created_at": "", "last_login_at": None,
 }
 
+#: 运行模式：MINI_AGENT_RUN_MODE=dev 为开发模式，其余（含未设置）一律按生产模式。
+#: 开发模式下「本机回环访问」免密自动登录超级管理员，只用于本地调试：
+#:   · 判定依据是对端地址，远程请求即使服务器的 dev 模式也走正常登录；
+#:   · 仍要求 login_enabled（--no-login 走的是另一条占位身份路径）。
+_RUN_MODE_ENV = "MINI_AGENT_RUN_MODE"
+_DEV_RUN_MODES = frozenset({"dev", "development", "local"})
+
+
+def _run_mode() -> str:
+    """当前运行模式：dev / prod。每次读取环境变量，测试可临时切换。"""
+    raw = os.environ.get(_RUN_MODE_ENV, "").strip().lower()
+    return "dev" if raw in _DEV_RUN_MODES else "prod"
+
+
 _DIST = os.path.join(ROOT, "web", "dist")
 _SESSIONS_DIR = os.path.join(data_dir(), "sessions")  # 会话持久化目录
 
@@ -98,6 +112,20 @@ _STARTED_AT = time.time()
 _PICK_LOCK = threading.Lock()
 
 _log = logging_setup.get_logger("app")
+
+
+def _dev_admin_user() -> dict | None:
+    """开发模式自动登录用的账号：优先默认 admin，其次任一启用的超级管理员。"""
+    try:
+        u = auth.get_user_by_name(auth.DEFAULT_ADMIN)
+        if u and not u.get("disabled") and u.get("role") == auth.ROLE_SUPERADMIN:
+            return u
+        for x in auth.list_users():
+            if x.get("role") == auth.ROLE_SUPERADMIN and not x.get("disabled"):
+                return x
+    except Exception:  # noqa: BLE001 —— 自动登录失败只按未登录处理，不影响正常登录
+        _log.exception("auth.dev_auto_login_failed")
+    return None
 
 
 def pick_folder_dialog() -> str | None:
@@ -459,7 +487,7 @@ class _Session:
             run = self.run
             return int((time.time() - run["started_at"]) * 1000) if run else 0
 
-    def record_action(self, kind: str, name: str, detail: str = "",
+    def record_action(self, kind: str, name: str, detail: object = "",
                       status: str = "running", aid: str | None = None) -> None:
         """追加一条动作（tool / notice / step），ts 为相对本轮起点的毫秒数。"""
         with self.run_meta_lock:
@@ -468,7 +496,7 @@ class _Session:
                 return
             run["actions"].append({
                 "ts": int((time.time() - run["started_at"]) * 1000),
-                "kind": kind, "id": aid, "name": name, "detail": detail,
+                "kind": kind, "id": aid, "name": name, "detail": _detail_text(detail),
                 "status": status, "dur_ms": None,
             })
 
@@ -774,9 +802,48 @@ def _brief_args(args: dict, limit: int = 1200) -> dict:
     return {k: _clip(v) for k, v in (args or {}).items()}
 
 
+def _detail_text(detail: object, limit: int = 300) -> str:
+    """动作 detail 一律压成单行字符串。
+
+    时间线的 detail 是给人看的一行摘要（前端 RunHeader 直接渲染它）；
+    工具参数是 dict，此前被原样存进去，前端展开时间线时把对象当 React
+    子节点渲染导致整页白屏 —— 这里统一落成文本。
+    """
+    if detail is None:
+        return ""
+    if isinstance(detail, str):
+        text = detail
+    elif isinstance(detail, dict):
+        parts = []
+        for k, v in detail.items():
+            s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+            parts.append(f"{k}={s}")
+        text = " ".join(parts)
+    else:
+        try:
+            text = json.dumps(detail, ensure_ascii=False)
+        except (TypeError, ValueError):
+            text = str(detail)
+    text = text.replace("\r", " ").replace("\n", " ")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 #: standard 档位不常驻的低频工具分组（定义在 core.tool_search，与检索工具共用）。
 #: 这些工具仍在 REGISTRY 里：模型用 search_tools 检索到就会加载进本会话工具表。
 _STANDARD_EXCLUDED_GROUPS = STANDARD_HIDDEN_GROUPS
+
+#: 快速对话额外放行的本地工具（chat_tools 开关控制，默认开）。
+#: 入选标准：只读、毫秒级、无副作用、不需要审批 —— 快速对话要的是「立刻答」，
+#: 每多一个工具就多一份 schema 和一轮往返，所以只留「现在的情况」这类即时事实。
+#: 写操作、run_shell/run_python、文档解析（慢且要装依赖）、ask_user/delegate 一律不进。
+_CHAT_MODE_TOOLS = frozenset({
+    "now",             # 当前时间 / 时区 / Unix 时间
+    "time_diff",       # 两个时间差多久、离某日期还有几天
+    "machine_status",  # 本机一页看全：CPU / 内存 / 各磁盘 / 网速 / 开机时长
+    "port_usage",      # 谁占着某个端口、服务是否还活着
+    "clipboard_read",  # 用户刚复制的内容
+    "list_dir",        # 目录里有什么（最小事实查询）
+})
 
 
 def _session_registry(mode: str, approval: str = "ask", web: bool = False,
@@ -784,6 +851,8 @@ def _session_registry(mode: str, approval: str = "ask", web: bool = False,
     """按行为矩阵克隆一份会话工具表（见方案 §3.1）。
 
     chat 模式 = 不做推理思考，只保留联网能力（web_search / fetch_url），其余工具不加载；
+    chat_tools 开关打开时（默认），再额外放行 _CHAT_MODE_TOOLS 里的本地只读工具
+    （查时间 / 本机状态 / 端口占用 / 剪贴板 / 列目录），用于快速回答即时事实问题；
     web_search 仅在联网开关打开时加载；fetch_url 始终可用（云端 or 本地按本轮模式分派）。
     Tool 对象本身无状态，跨注册表共享引用是安全的。
     request_approval 仅在 auto 档暴露 —— 其它档位模型看不到它。
@@ -808,9 +877,11 @@ def _session_registry(mode: str, approval: str = "ask", web: bool = False,
         from core import settings
         memory_on = bool(settings.get("memory_enabled"))
         subagent_on = bool(settings.get("subagent_enabled"))
+        chat_tools = bool(settings.get("chat_tools"))
     except Exception:  # noqa: BLE001
         memory_on = True
         subagent_on = True
+        chat_tools = True
 
     reg = ToolRegistry()
     for t in REGISTRY.all():
@@ -820,7 +891,13 @@ def _session_registry(mode: str, approval: str = "ask", web: bool = False,
         elif t.name == "fetch_url":
             pass                  # 抓取始终可用：云端 / 本地实现按本轮联网模式分派
         elif mode == "chat":
-            continue              # 快速对话：除联网能力外不调用任何工具
+            # 快速对话：只放行联网能力 + 极小的本地只读白名单。
+            # 白名单工具直接入表并跳过后面的档位过滤 —— 它们本就属于
+            # standard 的隐藏分组，不该因档位再被裁掉。
+            if not (chat_tools and t.name in _CHAT_MODE_TOOLS):
+                continue
+            reg.add(t)
+            continue
         if profile != "full" and t.group in _STANDARD_EXCLUDED_GROUPS:
             continue
         if t.name == "search_tools" and profile == "full":
@@ -1384,7 +1461,8 @@ def _display_items(raw: list[dict]) -> list[dict]:
       · 主循环的内部注入消息（见 _is_injected）不算「下一条 user」——
         它们直接跨过去继续合并，否则 ReAct 中途递图片会把一次回复切成多个气泡。
 
-    每个展示项附带 "_end"：该项在 raw 中的最后下标，供 keep 截断映射回原始序列。
+    每个展示项附带 "_start" / "_end"：该项在 raw 中的首/末下标，供 keep 截断、
+    多选删除映射回原始序列（内部字段，下发前统一剥离）。
     """
     items: list[dict] = []
     n = len(raw)
@@ -1397,7 +1475,7 @@ def _display_items(raw: list[dict]) -> list[dict]:
                 continue
             text = _user_text(raw[i].get("content"))
             if text:
-                item: dict = {"role": "user", "content": text, "_end": i}
+                item: dict = {"role": "user", "content": text, "_start": i, "_end": i}
                 atts = raw[i].get("_attachments") or raw[i].get("attachments")
                 if atts:
                     item["attachments"] = atts
@@ -1422,7 +1500,8 @@ def _display_items(raw: list[dict]) -> list[dict]:
                 else:
                     break
             if segs:
-                item = {"role": "assistant", "content": "\n\n".join(segs), "_end": j - 1}
+                item = {"role": "assistant", "content": "\n\n".join(segs),
+                        "_start": i, "_end": j - 1}
                 if stats_src is not None:
                     usage = stats_src.get("usage") or (stats_src.get("_stats") or {}).get("usage")
                     sec = stats_src.get("sec")
@@ -1461,6 +1540,64 @@ def _keep_slice(raw: list[dict], keep: int) -> list[dict] | None:
             kept.append(raw[j])
             j += 1
     return kept
+
+
+def _delete_display(raw: list[dict], indexes: list[int]) -> tuple[list[dict], set[int]] | None:
+    """按「展示气泡」下标任意删除，映射回原始消息序列（多选删除用）。
+
+    返回 (重建后的原始序列, 被删 user 轮次的轮次号集合)；
+    下标越界返回 None。轮次号与 begin_run 的口径一致 —— 到该 user 消息为止
+    的非注入 user 消息条数（1 起），供 _renumber_runs 把后续 run 的 turn 前移。
+    """
+    disp = _display_items(raw)
+    sel = set(indexes)
+    if not sel or any((not isinstance(i, int)) or isinstance(i, bool) or i < 0 or i >= len(disp)
+                      for i in sel):
+        return None
+    # 各 user 展示项对应的轮次号
+    user_ord: dict[int, int] = {}          # 展示下标 → 轮次号
+    end_to_idx = {it["_end"]: k for k, it in enumerate(disp) if it["role"] == "user"}
+    cum = 0
+    for i, m in enumerate(raw):
+        if m.get("role") == "user" and not _is_injected(m):
+            cum += 1
+            if i in end_to_idx:
+                user_ord[end_to_idx[i]] = cum
+    deleted_ords = {user_ord[k] for k in sel if k in user_ord}
+    # 保留项按原顺序拼接各自 span —— 每个 span 自成协议闭环
+    # （assistant 的 tool_calls 与它的 tool 结果同属一个展示项，不会被拆开）
+    kept: list[dict] = []
+    last_end = -1
+    for k, it in enumerate(disp):
+        if k in sel:
+            continue
+        kept.extend(raw[it["_start"]: it["_end"] + 1])
+        last_end = it["_end"]
+    # 对齐 _keep_slice 的尾部兜底：最后一条恰是带 tool_calls 的 assistant 时，
+    # 把原始序列里紧随其后的 tool 结果一并带上，避免协议校验拒绝
+    if last_end >= 0 and kept and kept[-1].get("role") == "assistant" and kept[-1].get("tool_calls"):
+        j = last_end + 1
+        while j < len(raw) and raw[j].get("role") == "tool":
+            kept.append(raw[j])
+            j += 1
+    return kept, deleted_ords
+
+
+def _renumber_runs(runs: list[dict], deleted_ords: set[int]) -> list[dict]:
+    """user 轮次被删后重排 runs：被删轮次的 run 丢弃，其余 turn 整体前移。"""
+    if not deleted_ords:
+        return list(runs)
+    out: list[dict] = []
+    for r in runs:
+        t = r.get("turn")
+        if t in deleted_ords:
+            continue
+        if isinstance(t, int) and not isinstance(t, bool):
+            t = t - sum(1 for o in deleted_ords if o < t)
+            out.append({**r, "turn": t})
+        else:
+            out.append(r)
+    return out
 
 
 def _match_terms(title: str, msgs: list[str], terms: list[str]):
@@ -1841,6 +1978,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
         # 健康检查必须免登录：桌面壳在用户登录前就要能探活
         if route in ("/api/auth/login", "/api/health") or not route.startswith("/api/"):
             return True
+        # 开发模式：本机回环访问免密自动登录超级管理员（远程请求不受影响）。
+        # 判定放在 token 解析之后：已有有效登录会话时继续用它，不抢账号。
+        dev_auto = _run_mode() == "dev" and (self._client_ip() in _LOCAL_CLIENTS)
         user = None
         token = self._session_token()
         if token:
@@ -1849,11 +1989,30 @@ class _RequestHandler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001 —— 数据库异常按未登录处理，绝不 500
                 _log.exception("auth.resolve_failed")
                 user = None
+        if user is None and dev_auto:
+            dev_user = _dev_admin_user()
+            if dev_user is not None:
+                try:
+                    token = auth.create_session(
+                        dev_user,
+                        ip=self._client_ip(),
+                        user_agent=self.headers.get("User-Agent") or "",
+                    )
+                    self._set_cookie(_SESSION_COOKIE, token, auth.SESSION_TTL)
+                except Exception:  # noqa: BLE001 —— 建会话失败退回未登录
+                    _log.exception("auth.dev_auto_login_failed")
+                user = dev_user
+                _log.warning("auth.dev_auto_login user=%s ip=%s",
+                             dev_user.get("username"), self._client_ip())
         if user is None:
             self._json(
                 {"error": "未登录或登录已过期", "code": "UNAUTHENTICATED"}, 401
             )
             return False
+        # 开发模式把「待改初始密码」标记抹掉：默认 admin 就是该状态，
+        # 否则自动登录进来前端会卡在改密页、接口也被 403 挡住，调试无从下手。
+        if dev_auto and user.get("must_change_password"):
+            user = {**user, "must_change_password": False}
         if user["must_change_password"] and route not in (
             # 这三个接口必须放行，否则「未改密」会连自己也认不出来：
             #   me      → 前端要知道当前是谁、是否待改密
@@ -1969,6 +2128,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_session_create()
         elif (m := re.match(r"^/api/sessions/([^/]+)/truncate$", route)):
             self._handle_session_truncate(m.group(1))
+        elif (m := re.match(r"^/api/sessions/([^/]+)/delete-messages$", route)):
+            self._handle_session_delete_messages(m.group(1))
         elif (m := re.match(r"^/api/sessions/([^/]+)/model$", route)):
             self._handle_session_model(m.group(1))
         elif route == "/api/workspaces/pick":
@@ -2247,7 +2408,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             runs = data.get("runs") or []
         # 同一轮 ReAct 的多个 assistant 文本段合并成一个气泡（_end 是内部字段，不外发）
         messages = [
-            {k: v for k, v in it.items() if k != "_end"}
+            {k: v for k, v in it.items() if k not in ("_end", "_start")}
             for it in _display_items(src)
         ]
         self._json({"session": sid, "messages": messages,
@@ -2337,7 +2498,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 src = data.get("messages", [])
                 runs = data.get("runs") or []
             messages = [
-                {k: v for k, v in it.items() if k != "_end"}
+                {k: v for k, v in it.items() if k not in ("_end", "_start")}
                 for it in _display_items(src)
             ]
             run = session.run
@@ -2486,6 +2647,53 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 data["messages"] = kept
                 _save_session_file(sid, data)
             self._json({"ok": True, "keep": keep})
+        finally:
+            session.run_lock.release()
+
+    def _handle_session_delete_messages(self, sid: str) -> None:
+        """多选删除：按展示气泡下标任意删除（body: {"indexes": [int, ...]}）。
+
+        与前端「删除模式」配套：选中哪几条就删哪几条，不做「截断到此」的连坐。
+        消息重建走 _delete_display（与 _display_items 同口径），runs 的轮次号
+        随 user 轮次的删除同步重排，保证历史回放还能把时间线挂对气泡。
+        """
+        sid = self._sid_or_fail(sid)
+        if sid is None:
+            return
+        body = self._read_body()
+        idxs = body.get("indexes") if body else None
+        if (not isinstance(idxs, list) or not idxs
+                or not all(isinstance(i, int) and not isinstance(i, bool) for i in idxs)):
+            self._fail(400, "indexes 必须是非空整数数组")
+            return
+        session = self._lock_session_or_409(sid, "删除消息")
+        if session is None:
+            return
+        try:
+            # 内存优先（含最新态），否则从磁盘恢复后再改（与截断同套路）
+            if session.agent is not None:
+                result = _delete_display(session.agent.messages[1:], idxs)
+                if result is None:
+                    self._fail(400, "下标超出当前消息数量")
+                    return
+                kept, deleted_ords = result
+                session.agent.messages = session.agent.messages[:1] + kept
+                session.runs = _renumber_runs(session.runs, deleted_ords)
+                session.save()
+            else:
+                data = _load_session_file(sid)
+                if data is None:
+                    self._fail(404, "会话不存在")
+                    return
+                result = _delete_display(data.get("messages", []), idxs)
+                if result is None:
+                    self._fail(400, "下标超出当前消息数量")
+                    return
+                kept, deleted_ords = result
+                data["messages"] = kept
+                data["runs"] = _renumber_runs(data.get("runs") or [], deleted_ords)
+                _save_session_file(sid, data)
+            self._json({"ok": True, "deleted": len(set(idxs))})
         finally:
             session.run_lock.release()
 
@@ -3896,6 +4104,11 @@ def serve(
                 f"{auth.DEFAULT_ADMIN_PASSWORD}，首次登录后必须修改密码。"
             )
         auth.cleanup_expired()
+        if _run_mode() == "dev":
+            print(
+                "警告：开发模式（MINI_AGENT_RUN_MODE=dev）—— 来自本机回环地址的访问"
+                "将免密自动登录超级管理员。请勿在生产环境或对外暴露的端口上使用。"
+            )
     else:
         print("警告：已禁用登录（--no-login），任何能访问该端口的人都能操作本机。")
 
