@@ -110,6 +110,24 @@ function formatTime(ts: number): string {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
+/** 会话模式图标：任务 = 剪贴板 + 勾，对话 = 圆形气泡；空心线条，跟随标签颜色 */
+function ModeIcon({ mode }: { mode?: "chat" | "agent" }) {
+  if (mode === "chat") {
+    return (
+      <svg className="session-mode-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+      </svg>
+    );
+  }
+  return (
+    <svg className="session-mode-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M9 4.5H7.5A2.5 2.5 0 0 0 5 7v11.5A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V7a2.5 2.5 0 0 0-2.5-2.5H15" />
+      <rect x="9" y="2.5" width="6" height="4" rx="1.5" />
+      <path d="M8.6 13.6l2.2 2.2 4.5-4.8" />
+    </svg>
+  );
+}
+
 export default function Sidebar({
   workspaces,
   sessions,
@@ -339,8 +357,11 @@ export default function Sidebar({
                           className={`session-item ${draftHere.id === currentId ? "active" : ""}`}
                           onClick={() => onSelect(draftHere.id)}
                         >
-                          <span className={`session-mode-tag ${draftHere.mode === "chat" ? "chat" : ""}`}>
-                            {draftHere.mode === "chat" ? "对话" : "任务"}
+                          <span
+                            className={`session-mode-tag ${draftHere.mode === "chat" ? "chat" : ""}`}
+                            title={draftHere.mode === "chat" ? "对话" : "任务"}
+                          >
+                            <ModeIcon mode={draftHere.mode} />
                           </span>
                           <div className="session-item-body">
                             <div className="session-item-title">
@@ -366,8 +387,11 @@ export default function Sidebar({
                                 title="正在执行"
                               />
                             ) : (
-                              <span className={`session-mode-tag ${s.mode === "chat" ? "chat" : ""}`}>
-                                {s.mode === "chat" ? "对话" : "任务"}
+                              <span
+                                className={`session-mode-tag ${s.mode === "chat" ? "chat" : ""}`}
+                                title={s.mode === "chat" ? "对话" : "任务"}
+                              >
+                                <ModeIcon mode={s.mode} />
                               </span>
                             )}
                             <div className="session-item-body">

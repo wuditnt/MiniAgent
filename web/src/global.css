@@ -1020,7 +1020,7 @@ body.sidebar-resizing .sidebar-resizer::after {
 }
 
 /* 会话模式标签：绝对定位在左侧 20px 前导槽，左边缘与工作区文件夹图标对齐；
-   正文从 24px 开始，与文件夹标题同列。与运行点同一位置，可互换。 */
+   正文从 26px 开始，与文件夹标题同列。与运行点同一位置，可互换。 */
 .session-mode-tag {
   position: absolute;
   left: 4px;
@@ -1032,11 +1032,20 @@ body.sidebar-resizing .sidebar-resizer::after {
   height: 16px;
   padding: 0;
   border-radius: 4px;
-  font-size: 9px;
-  line-height: 16px;
   color: #8c8c8c;
   background: #f0f0f0;
   pointer-events: none;
+}
+
+/* 模式图标：空心线条，尺寸贴合 20×16 标签槽 */
+.session-mode-icon {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .session-mode-tag.chat {
