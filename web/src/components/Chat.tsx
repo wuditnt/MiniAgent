@@ -43,7 +43,7 @@ import type {
   WorkspaceItem,
 } from "../types";
 import { fetchSkills, uploadFile } from "../api";
-import { fmtSec } from "../format";
+import { fmtSec, fmtTime } from "../format";
 import Markdown from "./Markdown";
 import ToolChain from "./ToolChain";
 import RunHeader from "./RunHeader";
@@ -158,6 +158,12 @@ function MessageToolbar({
   const usage = item.usage;
   const showUsage = !!usage && usage.total_tokens > 0;
   const showSec = item.sec != null;
+  // 消息时间：用户消息放在工具栏最左，助手消息放在最右
+  const timeNode = item.ts ? (
+    <Tooltip title={new Date(item.ts * 1000).toLocaleString("zh-CN")}>
+      <span className="msg-time">{fmtTime(item.ts)}</span>
+    </Tooltip>
+  ) : null;
 
   if (
     !hasContent && !showUsage && !showSec &&
@@ -193,6 +199,7 @@ function MessageToolbar({
 
   return (
     <div className={`msg-toolbar${extraClass ? ` ${extraClass}` : ""}${pinned ? " msg-toolbar-pinned" : ""}`}>
+      {item.role === "user" && timeNode}
       {onEdit && (
         <Tooltip title="编辑重发">
           <span className="msg-tool" onClick={onEdit}>
@@ -262,6 +269,7 @@ function MessageToolbar({
           <span className="msg-stat">{fmtSec(item.sec as number)}</span>
         </Tooltip>
       )}
+      {item.role !== "user" && timeNode}
     </div>
   );
 }
@@ -476,6 +484,8 @@ function AssistantBodyInner({
 const AssistantBody = memo(AssistantBodyInner);
 
 interface Props {
+  /** 会话 id：切换会话时重置「展开」状态 */
+  sessionId: string;
   items: ChatItem[];
   busy: boolean;
   mode: Mode;
@@ -544,6 +554,9 @@ const LEVEL_LABEL: Record<ReasoningLevel, string> = {
  */
 const INITIAL_VISIBLE = 30;
 const LOAD_STEP = 30;
+
+/** 用户气泡折叠后保留的行数 */
+const BUBBLE_CLAMP_LINES = 5;
 
 /** 一轮最多同时选几个技能：system prompt 每次模型调用都会重发，选太多会挤爆上下文 */
 const MAX_SKILLS = 3;
@@ -740,7 +753,67 @@ function InlineEditBox({
   );
 }
 
+/**
+ * 用户气泡正文：超过 3 行时折叠，第三行下方居中给「展开」；
+ * 是否溢出靠实测（侧栏拖宽/窄屏变化后会重新判断）。
+ */
+function UserText({
+  text,
+  expanded,
+  onExpand,
+}: {
+  text: string;
+  expanded: boolean;
+  onExpand: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [overflow, setOverflow] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => {
+      const lh = parseFloat(getComputedStyle(el).lineHeight) || 28;
+      let full = el.scrollHeight;
+      // 行数限制后 scrollHeight 会跟着变矮，临时解除才能量到真实高度
+      if (el.classList.contains("clamped")) {
+        const display = el.style.display;
+        el.style.display = "block";
+        el.style.setProperty("-webkit-line-clamp", "unset");
+        full = el.scrollHeight;
+        el.style.display = display;
+        el.style.removeProperty("-webkit-line-clamp");
+      }
+      const over = full > Math.round(lh * BUBBLE_CLAMP_LINES) + 1;
+      setOverflow((prev) => (prev === over ? prev : over));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text]);
+  const clamped = overflow && !expanded;
+  return (
+    <>
+      <div className="user-bubble-clamp">
+        <div ref={ref} className={`user-bubble-text${clamped ? " clamped" : ""}`}>
+          {text}
+        </div>
+        {clamped && <div className="bubble-fade" aria-hidden="true" />}
+      </div>
+      {/* 参考图：折叠时【展开全部】在渐变下方独立占一行，居中 */}
+      {clamped && (
+        <div className="bubble-expand-row">
+          <button type="button" className="bubble-expand" onClick={onExpand}>
+            展开全部
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function Chat({
+  sessionId,
   items,
   busy,
   mode,
@@ -779,6 +852,9 @@ export default function Chat({
   trialSkill,
 }: Props) {
   const [input, setInput] = useState("");
+  // 已展开的长用户气泡：仅当前会话内有效，切会话即清空（不持久化）
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const knownUserIds = useRef<Set<string>>(new Set());
   const senderRef = useRef<ElementRef<typeof Sender>>(null);
   // 技能选择：清单懒加载（首次点开或输入 "/" 时才请求）
   const [skills, setSkills] = useState<SkillItem[] | null>(null);
@@ -985,6 +1061,32 @@ export default function Chat({
     // 只在模式切换时触发一次；input 用当前值即可
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
+
+  // 切换会话：展开状态只在当前会话内有效，切走再切回一律恢复折叠
+  useEffect(() => {
+    setExpandedIds(new Set());
+    // 当前列表里的用户消息算作「历史」：回放时不自动展开
+    knownUserIds.current = new Set(
+      items.filter((it) => it.role === "user").map((it) => it.id)
+    );
+    // 只跟随会话切换；items 此处可能是切换前的旧值，增量交给下一个 effect
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  // 本次会话里刚发出的长消息默认展开（自己能看到刚发的内容）；历史回放保持折叠
+  useEffect(() => {
+    const known = knownUserIds.current;
+    const fresh = items.filter((it) => it.role === "user" && !known.has(it.id));
+    items.forEach((it) => {
+      if (it.role === "user") known.add(it.id);
+    });
+    if (!fresh.length || !busy) return;
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      fresh.forEach((it) => next.add(it.id));
+      return next;
+    });
+  }, [items, busy]);
 
   // 从技能管理页点「在对话框中试用」：nonce 变化才算一次新请求，避免重渲染重复插入
   const lastTrialNonce = useRef(0);
@@ -1204,9 +1306,18 @@ export default function Chat({
     if (pendingPin.current) {
       // 编辑重发是「先截断、再插入」两段式变更：锚点还没进 DOM 时等下一次提交，
       // 避免把 pendingPin 消费在空锚点上导致该轮失去钉顶。
-      const probe = anchorId.current
-        ? el.querySelector<HTMLElement>(`#msg-${anchorId.current}`)
-        : null;
+      let aid = anchorId.current;
+      let probe = aid ? el.querySelector<HTMLElement>(`#msg-${aid}`) : null;
+      if (!probe) {
+        // 截断后列表变短，上面的「新增尾巴」检测不成立；改为回退到当前最后一条用户消息，
+        // 保证编辑重发插入的新消息同样能被钉到列表顶部
+        const lastUser = items.slice().reverse().find((it) => it.role === "user");
+        if (lastUser) {
+          aid = lastUser.id;
+          anchorId.current = aid;
+          probe = el.querySelector<HTMLElement>(`#msg-${aid}`);
+        }
+      }
       if (probe) {
         pendingPin.current = false;
         viewMode.current = "pinned";
@@ -1297,10 +1408,11 @@ export default function Chat({
         placement: "start",
         variant: "borderless",
       },
-      // 内联编辑框（编辑重发）：贴左侧整行展开（参考图3），无气泡底色
+      // 内联编辑框（编辑重发）：与用户气泡同侧右对齐，宽度 70%
       editor: {
-        placement: "start",
+        placement: "end",
         variant: "borderless",
+        classNames: { content: "edit-bubble" },
       },
     }),
     []
@@ -1378,10 +1490,21 @@ export default function Chat({
       key: it.id,
       role: "user",
       content: (
-        <span id={`msg-${it.id}`}>
-          {it.content}
+        <div id={`msg-${it.id}`}>
+          <UserText
+            text={it.content}
+            expanded={expandedIds.has(it.id)}
+            onExpand={() =>
+              setExpandedIds((prev) => {
+                if (prev.has(it.id)) return prev;
+                const next = new Set(prev);
+                next.add(it.id);
+                return next;
+              })
+            }
+          />
           <AttachmentPreview attachments={it.attachments} workspaceId={workspaceId} />
-        </span>
+        </div>
       ),
       // 小工具栏放气泡下方（Bubble 的 footer），而不是塞进蓝色气泡里：
       // 顺序 = 编辑重发 / 复制 / 删除（需求图1）；仅最后一条 user 气泡有编辑。
@@ -1402,6 +1525,7 @@ export default function Chat({
     items,
     hiddenCount,
     busy,
+    expandedIds,
     onRegenerate,
     onTrajectory,
     workspaceId,

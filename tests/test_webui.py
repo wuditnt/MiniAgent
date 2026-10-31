@@ -490,7 +490,10 @@ def scenario_chat_and_history() -> None:
     status, hist = api("GET", "/api/history?session=t-chat")
     assert status == 200
     msgs = hist["messages"]
-    assert msgs[0] == {"role": "user", "content": "你好"}
+    # 用户消息带落盘时间（ts），这里只比对角色与正文
+    first = msgs[0]
+    assert first["role"] == "user" and first["content"] == "你好", first
+    assert first.get("ts"), f"用户消息应带时间戳：{first}"
     # assistant 消息内联 usage/sec 脚注（刷新后恢复每轮用量），只比对正文与脚注存在性
     last = msgs[-1]
     assert last["role"] == "assistant" and last["content"] == FINAL_TEXT

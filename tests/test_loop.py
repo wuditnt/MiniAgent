@@ -221,7 +221,8 @@ def test_max_turns_wrapup_starts_new_bubble():
     assert "已达最大轮次（2 轮），任务未完成" in out, out
     assert "结论：已完成 A" in out, out
     # 收尾是末尾新增的一条 assistant：旧的两轮回答内容必须原样保留
-    assert a.messages[-1] == {"role": "assistant", "content": out}, a.messages[-1]
+    last = a.messages[-1]
+    assert last["role"] == "assistant" and last["content"] == out, last
     earlier = [m["content"] for m in a.messages if m["role"] == "assistant"][:-1]
     assert earlier == ["我先看看目录。", "再看一层。"], earlier
     assert sum(1 for m in a.messages if m["role"] == "assistant") == 3, a.messages

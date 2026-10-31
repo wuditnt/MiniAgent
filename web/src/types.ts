@@ -167,6 +167,8 @@ export interface ChatItem {
   reason?: string;
   /** 用户消息的附件（图片 / 文件），供前端展示 */
   attachments?: Attachment[];
+  /** 消息时间（秒级时间戳）：工具栏里展示「今天 23:08」 */
+  ts?: number;
   /** assistant 消息里折叠留存的提问卡片（answered / expired） */
   ask?: AskRecord;
   /** 本轮执行记录（后端时间线）：计时、最后动作、可展开的动作列表 */
@@ -195,6 +197,8 @@ export interface HistoryMessage {
   sec?: number;
   /** 用户消息的附件元数据 */
   attachments?: Attachment[];
+  /** 消息时间（秒级时间戳），老会话可能没有 */
+  ts?: number;
 }
 
 /** 会话列表项（GET /api/sessions 返回） */

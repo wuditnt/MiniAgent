@@ -380,6 +380,9 @@ class _Session:
                     continue
                 if role in ("user", "assistant") and isinstance(content, str) and content:
                     msg: dict[str, Any] = {"role": role, "content": content}
+                    # 消息时间：历史回放时原样带回，供气泡工具栏展示
+                    if m.get("ts"):
+                        msg["_ts"] = m["ts"]
                     # 每轮的用量/耗时一并灌回内存（_ 前缀字段不会发给模型接口）
                     if role == "assistant" and (m.get("usage") or m.get("sec") is not None):
                         msg["_stats"] = {"usage": m.get("usage"), "sec": m.get("sec")}
@@ -408,6 +411,8 @@ class _Session:
                 item = {"role": "user", "content": content}
                 if m.get("_attachments"):
                     item["attachments"] = m["_attachments"]
+                if m.get("_ts"):
+                    item["ts"] = m["_ts"]
                 messages.append(item)
             elif role == "assistant" and isinstance(content, str) and content:
                 item = {"role": "assistant", "content": content}
@@ -417,6 +422,8 @@ class _Session:
                     item["usage"] = stats["usage"]
                 if stats.get("sec") is not None:
                     item["sec"] = stats["sec"]
+                if m.get("_ts"):
+                    item["ts"] = m["_ts"]
                 messages.append(item)
         # 标题 = 首条真实用户消息（剥口语前缀后截断）；用户手动改过名则保留。
         # 模型生成的标题走 session_title()，同时把 title_custom 置真把这行短路掉。
@@ -1486,11 +1493,15 @@ def _display_items(raw: list[dict]) -> list[dict]:
                 atts = raw[i].get("_attachments") or raw[i].get("attachments")
                 if atts:
                     item["attachments"] = atts
+                ts = raw[i].get("_ts") or raw[i].get("ts")
+                if ts:
+                    item["ts"] = ts
                 items.append(item)
             i += 1
         elif role in ("assistant", "tool"):
             segs: list[str] = []
             stats_src: dict | None = None
+            seg_ts: float | None = None
             j = i
             while j < n:
                 seg = raw[j]
@@ -1499,6 +1510,8 @@ def _display_items(raw: list[dict]) -> list[dict]:
                         c = seg.get("content")
                         if isinstance(c, str) and c:
                             segs.append(c)
+                        if seg_ts is None and seg.get("_ts"):
+                            seg_ts = seg["_ts"]
                         if seg.get("_stats") or seg.get("usage") is not None:
                             stats_src = seg
                     j += 1
@@ -1509,6 +1522,8 @@ def _display_items(raw: list[dict]) -> list[dict]:
             if segs:
                 item = {"role": "assistant", "content": "\n\n".join(segs),
                         "_start": i, "_end": j - 1}
+                if seg_ts:
+                    item["ts"] = seg_ts
                 if stats_src is not None:
                     usage = stats_src.get("usage") or (stats_src.get("_stats") or {}).get("usage")
                     sec = stats_src.get("sec")

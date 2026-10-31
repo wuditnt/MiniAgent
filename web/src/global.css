@@ -169,10 +169,63 @@ body.sidebar-resizing .sidebar-resizer::after {
   background: #ffffff;
 }
 
-/* 我发送的内容：淡蓝底气泡包裹（右对齐） */
+/* 我发送的内容：淡蓝底气泡包裹（右对齐）
+   antd-x 默认给 .ant-bubble-content 的 max-width 是 100%，长文本会把整行撑满；
+   这里按需求收到消息区的 70%，短消息仍按内容自适应宽度 */
 .chat-inner .ant-bubble-end .ant-bubble-content {
+  max-width: 70%;
   background: #e6f4ff;
   border-radius: 14px;
+}
+
+/* 用户气泡正文：超过 5 行折叠，末行整行渐隐；【展开全部】在渐变下方独立一行、居中 */
+.user-bubble-clamp {
+  position: relative;
+}
+
+.user-bubble-text.clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+  overflow: hidden;
+}
+
+/* 末行整行渐隐（参考图效果）：从透明渐到气泡底色，不拦截点击 */
+.bubble-fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 28px;
+  background: linear-gradient(180deg, rgba(230, 244, 255, 0) 0%, #e6f4ff 100%);
+  pointer-events: none;
+}
+
+.bubble-expand-row {
+  display: flex;
+  justify-content: center;
+  margin-top: 6px;
+}
+
+/* 纯文字按钮：灰色、居中，与参考图一致 */
+.bubble-expand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #8c8c8c;
+  font-size: 14px;
+  line-height: 22px;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.bubble-expand:hover {
+  color: #595959;
 }
 
 /* 助手回复：无外框、无背景，文字直接显示 */
@@ -257,10 +310,22 @@ body.sidebar-resizing .sidebar-resizer::after {
   line-height: 1.7;
 }
 
-/* ---- 内联编辑框（编辑重发，参考图3）：整行展开，右下角 取消 / 发送 ---- */
+/* ---- 内联编辑框（编辑重发）：与用户气泡右对齐，占消息区宽度的 70% ---- */
+/* 气泡内容自身不再留 padding / 背景，避免 70% 宽度叠加内边距后溢出被裁切 */
+.chat-inner .ant-bubble-end .edit-bubble {
+  box-sizing: border-box;
+  width: 70%;
+  max-width: 70%;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  border-radius: 0;
+}
+
 .edit-inline {
-  /* 固定宽度：父容器是 shrink-to-fit，width:100% 会退化成内容宽度（很窄） */
-  width: 640px;
+  /* 父级已有明确宽度（70%），这里拉满即可，避免固定 640px 在窄屏溢出 */
+  box-sizing: border-box;
+  width: 100%;
   max-width: 100%;
   margin-top: 2px;
   padding: 10px 12px 8px;
@@ -732,9 +797,9 @@ body.sidebar-resizing .sidebar-resizer::after {
   margin-top: 10px;
 }
 
-/* 用户气泡：与普通模式一致的淡蓝底、右对齐 */
+/* 用户气泡：与普通模式一致的淡蓝底、右对齐（宽度上限同样为 70%） */
 .turn-user {
-  max-width: 78%;
+  max-width: 70%;
   margin-left: auto;
   padding: 6px 14px;
   border-radius: 14px;
@@ -801,6 +866,14 @@ body.sidebar-resizing .sidebar-resizer::after {
   align-items: center;
   flex: 0 0 auto;
   gap: 5px;
+  font-size: 12px;
+  color: #8c8c8c;
+  white-space: nowrap;
+}
+
+/* 消息时间：与工具栏图标同色系，不参与压缩 */
+.msg-time {
+  flex: 0 0 auto;
   font-size: 12px;
   color: #8c8c8c;
   white-space: nowrap;

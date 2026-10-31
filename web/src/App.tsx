@@ -107,6 +107,7 @@ function toItems(messages: HistoryMessage[], runs?: RunInfo[]): ChatItem[] {
       sec: m.sec,
       // 附件元数据：发送时写入，历史回放原样展示
       attachments: m.attachments,
+      ts: m.ts,
       run: m.role === "user" ? undefined : byTurn.get(turn),
     };
   });
@@ -508,6 +509,7 @@ export default function App({
                   content: "",
                   status: "streaming",
                   mode,
+                  ts: Date.now() / 1000,
                   run: ev.run || undefined,
                 },
               ]);
@@ -699,6 +701,7 @@ export default function App({
     if (busy) return;
     const asstId = `a-${Date.now()}`;
     curAsstRef.current = asstId;
+    const sentAt = Date.now() / 1000;
     // 技能在消息里用不可见字符包裹：气泡只显示名字
     const display = stripSkillMarks(msg).trim();
     const userItem: ChatItem = {
@@ -707,6 +710,7 @@ export default function App({
       content: display || skillsInSent(msg).join(" "),
       status: "done",
       attachments,
+      ts: sentAt,
     };
     const asstItem: ChatItem = {
       id: asstId,
@@ -714,6 +718,7 @@ export default function App({
       content: "",
       status: "streaming",
       mode,
+      ts: sentAt,
       // 起点先用本地时间占位，收到 run_start 后换成服务端的 started_at
       run: {
         turn: 0,
@@ -1546,6 +1551,7 @@ export default function App({
         </header>
 
         <Chat
+          sessionId={session}
           items={items}
           busy={busy}
           mode={mode}

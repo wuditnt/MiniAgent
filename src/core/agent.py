@@ -1382,6 +1382,7 @@ class Agent:
         take_images()   # 丢弃上一次任务可能残留的附件（如取消时没取走的）
         self.messages.append(self._build_user_message(user_input, attachments or []))
         um = self.messages[-1]
+        um["_ts"] = time.time()   # 消息时间：随会话落盘，供历史回放展示
         self._emit(
             events.USER_MESSAGE, source=events.SRC_USER, phase=events.PH_RUN_START,
             content=events.canonical_content(um.get("content")),
@@ -1531,7 +1532,8 @@ class Agent:
             self._ui_call("llm_done", turn, latency, streamed=shown)
 
             # 把助手消息（可能带 tool_calls）记进历史
-            entry: dict[str, Any] = {"role": "assistant", "content": content or ""}
+            entry: dict[str, Any] = {"role": "assistant", "content": content or "",
+                                      "_ts": time.time()}
             if tool_calls:
                 entry["tool_calls"] = tool_calls
             self.messages.append(entry)
@@ -1679,7 +1681,7 @@ class Agent:
         body = (content or "").strip() or self._max_turns_fallback()
         block = f"{head}\n\n{body}"
         # 单独成一条 assistant 消息：只追加，不改写历史里任何已结束的回答
-        self.messages.append({"role": "assistant", "content": block})
+        self.messages.append({"role": "assistant", "content": block, "_ts": time.time()})
         return block
 
     def _max_turns_fallback(self) -> str:
