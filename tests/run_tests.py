@@ -50,12 +50,13 @@ PKG = os.path.join(SRC, "core")
 
 # (文件名, 说明, 是否需要 API Key) —— 路径相对于本文件所在的 tests/
 #
-# 免费用例 27 个 + 真实用例 1 个。真实用例默认跳过（加 --real 才跑，会消耗 token）。
+# 免费用例 28 个 + 真实用例 1 个。真实用例默认跳过（加 --real 才跑，会消耗 token）。
 # 关于真实用例只有一个：它的价值是「端到端验真」—— 真模型 + 真 MCP 子进程，
 # 一次性覆盖「本端立刻停 + 通知真的发出去 + 服务端真的收手」这条完整链路，
 # 比拆成两个半覆盖的用例更省 token，也不会有「两个都跑一半」的重复开销。
 SUITES: list[tuple[str, str, bool]] = [
     ("test_loop.py", "循环层 6 项：假客户端，不碰网络", False),
+    ("test_long_task.py", "长任务回归 6 项：30 轮工具链 / 长链裁剪 / 触顶收尾 / 预算提醒 / 多轮摘要 / 中途取消", False),
     ("test_tools.py", "工具层 + MCP 层 12 项", False),
     ("test_skills.py", "技能层 9 项：frontmatter / 加载 / 冲突 / 热重载 / use_skill / 来源分类 / 消息解析 / 本轮注入", False),
     ("test_vision.py", "图片输入 5 项：嗅探 / 附件通道 / 拒绝 / 循环集成", False),

@@ -71,6 +71,7 @@ scripts\run_tests.bat --reinstall
 | 套件 | 覆盖 |
 |---|---|
 | `test_loop.py` | 循环层：假客户端，不碰网络 |
+| `test_long_task.py` | 长任务回归：30 轮工具链 / 长链裁剪 / 触顶收尾 / 轮次预算提醒 / 多轮滚动摘要 / 中途取消 |
 | `test_tools.py` | 工具层 + MCP 层 |
 | `test_skills.py` | frontmatter / 加载 / 冲突 / 热重载 / use_skill / 截断 / 启停 / 消息解析 |
 | `test_vision.py` | 图片输入：嗅探 / 附件通道 / 拒绝 / 循环集成 |
