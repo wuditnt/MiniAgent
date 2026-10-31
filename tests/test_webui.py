@@ -499,6 +499,11 @@ def scenario_chat_and_history() -> None:
     print(f"  [2] chat 模式事件序列通过（{len(types)} 个事件，无工具）")
     print(f"  [3] /api/history 通过（恢复 {len(msgs)} 条消息）")
 
+    # 会话模式随消息落盘：侧栏「对话/任务」标签与切回会话还原模式都靠这个字段
+    _s, lst = api("GET", "/api/sessions")
+    item = next((x for x in lst["sessions"] if x["id"] == "t-chat"), None)
+    assert item is not None and item.get("mode") == "chat", f"会话应落盘 mode=chat：{item}"
+
 
 def scenario_agent_tools() -> None:
     """④ agent 模式：工具轨迹按 id 配对（用非危险工具，避免触发确认）。"""

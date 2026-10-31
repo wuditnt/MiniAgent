@@ -976,8 +976,9 @@ export default function App({
     setSession(id);
   };
 
-  /** 新建对话：先在前端占一个空位（草稿），不落盘；已有占位则保持现状 */
-  const handleNewSession = () => {
+  /** 新建会话：按指定模式（对话 / 任务）；已有草稿则只切换模式，不重复占位 */
+  const handleNewSession = (nextMode: Mode = mode) => {
+    setMode(nextMode);
     if (draftWs !== null) return;
     startDraft();
   };
@@ -1013,6 +1014,9 @@ export default function App({
     }
     setDraftWs(null); // 离开草稿占位：新会话还没聊天就被切走 → 占位消失
     setDraftModel(null);
+    // 还原该会话保存的模式（老会话没有该字段时保持当前模式）
+    const target = sessions.find((s) => s.id === sid);
+    if (target?.mode) setMode(target.mode);
     pendingHit.current = hasHit ? (hitIndex as number) : null;
     setSession(sid);
   };
@@ -1264,7 +1268,7 @@ export default function App({
           sessions={sessions}
           draft={
             draftWs !== null && !sessions.some((s) => s.id === session)
-              ? { id: session, workspaceId: draftWs }
+              ? { id: session, workspaceId: draftWs, mode }
               : null
           }
           currentId={session}

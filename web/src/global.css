@@ -965,6 +965,35 @@ body,
   text-overflow: ellipsis;
 }
 
+/* 标题行：模式标签 + 标题（标题占满剩余宽度并截断） */
+.session-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.session-item-head .session-item-title {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 会话模式标签：一眼区分「对话 / 任务」 */
+.session-mode-tag {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 16px;
+  color: #8c8c8c;
+  background: #f0f0f0;
+}
+
+.session-mode-tag.chat {
+  color: #1677ff;
+  background: #e6f4ff;
+}
+
 .session-item-meta {
   font-size: 11px;
   color: #bbb;
@@ -2136,27 +2165,49 @@ body,
   background: #f0f5ff;
 }
 
-/* ---- 侧栏：新会话大按钮 ---- */
-.new-session-btn {
+/* ---- 侧栏：新会话双按钮（对话 / 任务） ---- */
+.new-session-row {
   flex: none;
+  display: flex;
+  gap: 8px;
+  /* 原来单按钮的 margin 上移到整行，两个按钮各占一半且间距一致 */
+  margin: 4px 14px 10px;
+}
+
+.new-session-btn {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  margin: 4px 14px 10px;
+  gap: 6px;
   height: 40px;
   font-size: 14px;
   font-weight: 600;
   color: #fff;
   background: #1677ff;
-  border: none;
+  border: 1px solid #1677ff;
   border-radius: 8px;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
 .new-session-btn:hover {
   background: #4096ff;
+  border-color: #4096ff;
+}
+
+/* 「任务」= 描边次按钮：白底蓝字，与实心的「对话」一眼区分 */
+.new-session-btn.secondary {
+  color: #1677ff;
+  background: #fff;
+  border-color: #1677ff;
+}
+
+.new-session-btn.secondary:hover {
+  color: #0958d9;
+  background: #f0f5ff;
+  border-color: #0958d9;
 }
 
 /* ---- 侧栏：可滚动区（功能菜单 + 工作区） ---- */

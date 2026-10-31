@@ -17,7 +17,6 @@ import {
   FolderOpenOutlined,
   HistoryOutlined,
   MenuOutlined,
-  PlusOutlined,
   RobotOutlined,
   SearchOutlined,
   SettingOutlined,
@@ -36,10 +35,10 @@ interface Props {
   onToggleCollapse: () => void;
   /** 选中会话；hitIndex 为搜索命中消息的下标（>=0 时前端会滚动定位） */
   onSelect: (sid: string, hitIndex?: number) => void;
-  /** 新建对话（用哪个工作区由 App 决定，即输入框上方那个胶囊的选择） */
-  onCreateSession: () => void;
+  /** 新建对话：mode 决定「对话（快速对话）」还是「任务（智能体）」 */
+  onCreateSession: (mode: "chat" | "agent") => void;
   /** 新会话占位（草稿）：未落盘的当前新会话，在对应工作区组下占一行 */
-  draft?: { id: string; workspaceId: string } | null;
+  draft?: { id: string; workspaceId: string; mode?: "chat" | "agent" } | null;
   onDeleteSession: (sid: string) => void;
   /** 修改某个会话的标题（在列表项上就地编辑） */
   onRenameSession: (sid: string, title: string) => void;
@@ -211,11 +210,21 @@ export default function Sidebar({
         </Tooltip>
       </div>
 
-      {/* ② 新会话大按钮 */}
-      <button className="new-session-btn" onClick={onCreateSession}>
-        <PlusOutlined />
-        <span>新会话</span>
-      </button>
+      {/* ② 新会话双按钮：对话 = 快速对话，任务 = 智能体 */}
+      <div className="new-session-row">
+        <Tooltip title="快速对话：问答与写作，不操作本机">
+          <button className="new-session-btn" onClick={() => onCreateSession("chat")}>
+            <ThunderboltOutlined />
+            <span>对话</span>
+          </button>
+        </Tooltip>
+        <Tooltip title="智能体任务：可调用本地工具完成复杂操作">
+          <button className="new-session-btn secondary" onClick={() => onCreateSession("agent")}>
+            <RobotOutlined />
+            <span>任务</span>
+          </button>
+        </Tooltip>
+      </div>
 
       {/* ③④ 可滚动区：功能菜单 + 工作区 */}
       <div className="sidebar-scroll">
@@ -331,7 +340,9 @@ export default function Sidebar({
                           onClick={() => onSelect(draftHere.id)}
                         >
                           <div className="session-item-body">
-                            <div className="session-item-title">新会话</div>
+                            <div className="session-item-title">
+                              {draftHere.mode === "chat" ? "新对话" : "新任务"}
+                            </div>
                           </div>
                         </div>
                       )}
@@ -368,8 +379,13 @@ export default function Sidebar({
                                   onBlur={commitRename}
                                 />
                               ) : (
-                                <div className="session-item-title">
-                                  {highlight(s.title, terms)}
+                                <div className="session-item-head">
+                                  <span className={`session-mode-tag ${s.mode === "chat" ? "chat" : ""}`}>
+                                    {s.mode === "chat" ? "对话" : "任务"}
+                                  </span>
+                                  <div className="session-item-title">
+                                    {highlight(s.title, terms)}
+                                  </div>
                                 </div>
                               )}
                               {s.snippet && editId !== s.id ? (

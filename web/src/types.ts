@@ -215,6 +215,8 @@ export interface SessionItem {
   reasoning?: ReasoningLevel;
   /** 本会话的联网搜索开关（每个对话独立） */
   web?: boolean;
+  /** 本会话的模式：chat=快速对话 / agent=智能体（随每轮消息落盘） */
+  mode?: Mode;
   /** 是否正在执行（来自后端内存状态，侧栏据此显示运行指示器） */
   running?: boolean;
 }

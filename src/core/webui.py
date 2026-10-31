@@ -354,6 +354,9 @@ class _Session:
         self.model_id = data.get("model_id") or None
         self.reasoning = model_config.normalize_reasoning(data.get("reasoning"))
         self.web = bool(data.get("web", False))
+        # 会话模式：每轮落盘后从这里还原，保证「打开旧会话 = 上次用的模式」
+        if data.get("mode") in ("chat", "agent"):
+            self.mode = data["mode"]
         self.created_at = data.get("created_at") or self.created_at
         self.updated_at = data.get("updated_at") or self.updated_at
         self.runs = data.get("runs") or []
@@ -428,6 +431,7 @@ class _Session:
             "model_id": self.model_id,        # 本会话的模型配置（None = 跟全局默认）
             "reasoning": self.reasoning,     # 本会话的推理等级（None = 跟全局默认）
             "web": self.web,                 # 本会话的联网搜索开关
+            "mode": self.mode,               # 本会话的模式：chat=快速对话 / agent=智能体
             "messages": messages,
             "runs": self.runs[-50:],        # 最近 50 轮的执行时间线（有上限，避免文件无限增长）
             "created_at": self.created_at,
@@ -1328,6 +1332,9 @@ def _list_session_files() -> list[dict]:
             "model_id": data.get("model_id") or "",
             "reasoning": model_config.normalize_reasoning(data.get("reasoning")) or "",
             "web": bool(data.get("web", False)),
+            # 侧栏据此显示「对话 / 任务」标签，并让前端切回该会话时还原模式；
+            # 老会话文件没有该字段时按智能体（历史默认）处理
+            "mode": data.get("mode") if data.get("mode") in ("chat", "agent") else "agent",
             "message_count": len(msgs),
             "created_at": data.get("created_at", 0),
             "updated_at": data.get("updated_at", 0),
