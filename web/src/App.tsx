@@ -2,7 +2,7 @@
  * 应用编排：模式/联网开关、消息流、SSE 消费、危险确认都在这里。
  * Chat / WelcomePane / ConfirmPanel / ToolChain 是纯展示组件。
  */
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, MoreOutlined, TeamOutlined, LockOutlined, LogoutOutlined, UserOutlined, GlobalOutlined } from "@ant-design/icons";
 import { Dropdown, Input, message, Modal, Switch, Tooltip } from "antd";
 import {
@@ -64,6 +64,17 @@ const SESSION_KEY = "miniagent.session";
 const MODE_KEY = "miniagent.mode";
 const WS_KEY = "miniagent.workspace";
 const APPROVAL_KEY = "miniagent.approval";
+const SIDEBAR_W_KEY = "miniagent.sidebar-width";
+const SIDEBAR_W_MIN = 220;
+const SIDEBAR_W_MAX = 400;
+const SIDEBAR_W_DEFAULT = 260;
+
+/** 侧栏宽度：只接受 220～400 之间的值，非法/未设置时回到 260 */
+function loadSidebarWidth(): number {
+  const raw = Number(localStorage.getItem(SIDEBAR_W_KEY));
+  if (!Number.isFinite(raw) || raw <= 0) return SIDEBAR_W_DEFAULT;
+  return Math.min(SIDEBAR_W_MAX, Math.max(SIDEBAR_W_MIN, raw));
+}
 
 /** 浏览器侧会话 id：localStorage 记忆，刷新后恢复同一会话历史 */
 function loadSession(): string {
@@ -187,6 +198,11 @@ export default function App({
   const [wsMemory, setWsMemory] = useState<WorkspaceItem | null>(null);
   // 窄屏（≤768px）默认收起侧栏，给聊天区留足空间
   const [collapsed, setCollapsed] = useState(() => typeof window !== "undefined" && window.innerWidth <= 768);
+  // 桌面端侧栏宽度：可拖拽，夹在 220～400 之间，localStorage 记住
+  const [sidebarW, setSidebarW] = useState(loadSidebarWidth);
+  // 拖拽过程直接写 CSS 变量，避免每帧重渲染整棵组件树；松手后再同步 state
+  const appRef = useRef<HTMLDivElement>(null);
+  const liveW = useRef(sidebarW);
   // 窄屏下侧栏是浮层（抽屉）：展开时点空白处应收起，所以需要知道当前是否浮层模式
   const [isMobile, setIsMobile] = useState(
     () => typeof window !== "undefined" && window.innerWidth <= 768
@@ -1253,16 +1269,61 @@ export default function App({
     setTitleEditing(false);
   };
 
+  /** 侧栏右边缘拖拽：实时写 --sidebar-w，松手后再同步 state 与 localStorage */
+  const startSidebarResize = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (isMobile || collapsed) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarW;
+    document.body.classList.add("sidebar-resizing");
+
+    const move = (ev: PointerEvent) => {
+      const w = Math.min(SIDEBAR_W_MAX, Math.max(SIDEBAR_W_MIN, startW + ev.clientX - startX));
+      liveW.current = w;
+      appRef.current?.style.setProperty("--sidebar-w", `${w}px`);
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      document.body.classList.remove("sidebar-resizing");
+      setSidebarW(liveW.current);
+      localStorage.setItem(SIDEBAR_W_KEY, String(liveW.current));
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+  };
+
+  /** 双击拖拽条：恢复默认宽度 */
+  const resetSidebarWidth = () => {
+    liveW.current = SIDEBAR_W_DEFAULT;
+    setSidebarW(SIDEBAR_W_DEFAULT);
+    localStorage.setItem(SIDEBAR_W_KEY, String(SIDEBAR_W_DEFAULT));
+  };
+
   return (
     <div
+      ref={appRef}
       className={`app ${wbFullscreen ? "wb-fullscreen" : ""}`}
-      style={{ "--sidebar-w": collapsed ? "0px" : "260px" } as CSSProperties}
+      style={{
+        "--sidebar-w": collapsed ? "0px" : `${isMobile ? SIDEBAR_W_DEFAULT : sidebarW}px`,
+      } as CSSProperties}
     >
       {/* 窄屏抽屉遮罩：点击空白处收起侧栏（桌面端侧栏常驻，不显示） */}
       {!collapsed && isMobile && (
         <div className="sidebar-backdrop" onClick={() => setCollapsed(true)} />
       )}
       <aside className={`sidebar-fixed ${collapsed ? "collapsed" : ""}`}>
+        {/* 桌面端拖拽条：拖动改宽、双击复位；窄屏抽屉不启用 */}
+        {!collapsed && !isMobile && (
+          <div
+            className="sidebar-resizer"
+            title="拖动调整宽度，双击恢复默认"
+            onPointerDown={startSidebarResize}
+            onDoubleClick={resetSidebarWidth}
+          />
+        )}
         <Sidebar
           workspaces={workspaces}
           sessions={sessions}

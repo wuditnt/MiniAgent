@@ -339,6 +339,9 @@ export default function Sidebar({
                           className={`session-item ${draftHere.id === currentId ? "active" : ""}`}
                           onClick={() => onSelect(draftHere.id)}
                         >
+                          <span className={`session-mode-tag ${draftHere.mode === "chat" ? "chat" : ""}`}>
+                            {draftHere.mode === "chat" ? "对话" : "任务"}
+                          </span>
                           <div className="session-item-body">
                             <div className="session-item-title">
                               {draftHere.mode === "chat" ? "新对话" : "新任务"}
@@ -355,13 +358,17 @@ export default function Sidebar({
                             className={`session-item ${s.id === currentId ? "active" : ""}`}
                             onClick={() => onSelect(s.id, s.hit_index)}
                           >
-                            {/* 运行中指示器：绝对定位，不占位、不让标题位移 */}
-                            {runningIds?.has(s.id) && (
+                            {/* 前导槽：运行中显示呼吸点，否则显示模式标签；两者位置一致，标题不位移 */}
+                            {runningIds?.has(s.id) ? (
                               <span
                                 className="session-running-dot"
                                 aria-label="运行中"
                                 title="正在执行"
                               />
+                            ) : (
+                              <span className={`session-mode-tag ${s.mode === "chat" ? "chat" : ""}`}>
+                                {s.mode === "chat" ? "对话" : "任务"}
+                              </span>
                             )}
                             <div className="session-item-body">
                               {editId === s.id ? (
@@ -380,9 +387,6 @@ export default function Sidebar({
                                 />
                               ) : (
                                 <div className="session-item-head">
-                                  <span className={`session-mode-tag ${s.mode === "chat" ? "chat" : ""}`}>
-                                    {s.mode === "chat" ? "对话" : "任务"}
-                                  </span>
                                   <div className="session-item-title">
                                     {highlight(s.title, terms)}
                                   </div>

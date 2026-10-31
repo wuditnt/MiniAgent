@@ -26,10 +26,11 @@ body,
   background: rgba(0, 0, 0, 0.28);
 }
 
-/* 常驻侧边栏：默认展开 260px，可折叠到 0；淡灰渐变底色 */
+/* 常驻侧边栏：宽度由 --sidebar-w 控制（220～400，可拖拽），折叠到 0；淡灰渐变底色 */
 .sidebar-fixed {
+  position: relative;
   flex: none;
-  width: 260px;
+  width: var(--sidebar-w, 260px);
   height: 100%;
   padding-top: env(safe-area-inset-top, 0px);
   box-sizing: border-box;
@@ -43,8 +44,46 @@ body,
   width: 0;
 }
 
+/* 拖拽期间关闭过渡，宽度跟手 */
+body.sidebar-resizing .sidebar-fixed {
+  transition: none;
+}
+
+body.sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+/* 右边缘拖拽条：6px 热区，悬停/拖动时显示 2px 蓝色提示线 */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  z-index: 20;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.sidebar-resizer:hover::after,
+body.sidebar-resizing .sidebar-resizer::after {
+  background: #1677ff;
+}
+
 .sidebar-fixed .sidebar {
-  width: 260px;
+  width: 100%;
   height: 100%;
   box-sizing: border-box;
   display: flex;
@@ -933,12 +972,14 @@ body,
 }
 
 /* ---- 会话侧边栏 ---- */
+/* 会话行：左侧 26px 前导槽放模式标签/运行点，正文从 26px 开始，
+   与工作区标题（.ws-head 的 4px 内边距 + 14px 图标 + 8px 间距）同列。 */
 .session-item {
   position: relative;
   display: flex !important;
   align-items: flex-start;
   gap: 8px;
-  padding: 8px 10px !important;
+  padding: 8px 10px 8px 26px !important;
   border-radius: 6px;
   cursor: pointer;
   transition: background 0.15s;
@@ -978,15 +1019,24 @@ body,
   min-width: 0;
 }
 
-/* 会话模式标签：一眼区分「对话 / 任务」 */
+/* 会话模式标签：绝对定位在左侧 20px 前导槽，左边缘与工作区文件夹图标对齐；
+   正文从 24px 开始，与文件夹标题同列。与运行点同一位置，可互换。 */
 .session-mode-tag {
-  flex: none;
-  padding: 0 4px;
+  position: absolute;
+  left: 4px;
+  top: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 16px;
+  padding: 0;
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 9px;
   line-height: 16px;
   color: #8c8c8c;
   background: #f0f0f0;
+  pointer-events: none;
 }
 
 .session-mode-tag.chat {
@@ -1000,13 +1050,10 @@ body,
   margin-top: 2px;
 }
 
-/* 运行中指示器：绝对定位在会话项左侧内边距区，不占位、不把标题挤位移。
-   呼吸节奏 1.2s，比常见的 2s 快一点 —— 它表示「有活正在干」。 */
+/* 运行中指示器：与模式标签、工作区文件夹图标左对齐（同一 4px 起点），标题不位移。 */
 .session-running-dot {
   position: absolute;
-  /* 与工作区文件夹图标同一列（图标在 .ws-head 的 4px 内边距处，
-     会话项自己还有 16px 缩进，所以这里取负值）；离标题留出约 12px。 */
-  left: -8px;
+  left: 4px;
   top: 14px;
   width: 6px;
   height: 6px;
@@ -1186,7 +1233,7 @@ body,
 .ws-head {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   padding: 7px 4px;
   border-radius: 6px;
   cursor: pointer;
@@ -1252,13 +1299,13 @@ body,
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding-left: 16px;
+  padding-left: 0;
 }
 
 .ws-empty {
   font-size: 12px;
   color: #bbb;
-  padding: 6px 10px;
+  padding: 6px 10px 6px 26px;
 }
 
 .ws-modal-error {
