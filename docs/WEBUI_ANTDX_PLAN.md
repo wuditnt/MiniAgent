@@ -1,5 +1,7 @@
 # mini-agent Web UI 方案（Ant Design X · v2 双模式）
 
+> 历史文档：术语按当时口径（插件 / 工具混用），正文未改写。
+
 > 状态：已实施（2026-10-15） ｜ 日期：2026-10-15 ｜ v2：新增 chat/agent 双模式与联网搜索开关
 > 结论先行：后端坚持零 Python 依赖（stdlib `ThreadingHTTPServer` + SSE），
 > 前端用 React + Vite + Ant Design X；**双模式 = 每会话定制工具表**，agent 核心不动；

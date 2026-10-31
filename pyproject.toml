@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mini-agent"
 version = "1.0.0"
-description = "一个可扩展的本地智能体控制台：插件目录 + MCP 双通道扩展工具"
+description = "一个可扩展的本地智能体 Web 应用：工具目录 + 连接（MCP）双通道"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -16,10 +16,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# 控制台体验。装了就自动启用彩色表格与输入补全；不装也能跑（退回纯文本）。
+# 终端富文本输出（自检脚本 / 日志表格）。不装也能跑（退回纯文本）。
 console = [
     "rich>=13.0",
-    "prompt_toolkit>=3.0",
 ]
 
 # 办公文档：装了才能读写 docx / xlsx、解析 pdf；不装也能跑（工具会提示缺哪个库）。
@@ -77,10 +76,10 @@ mini-agent = "core.main:main"
 # ---------------------------------------------------------------------------
 # 为什么是 src 布局 + 显式 package-dir？
 #
-#   src/core/    唯一的包：应用层（main/agent/repl/ui/loader/skills/tools）
+#   src/core/    唯一的包：应用层（main/agent/ui/loader/skills/tools）
 #                与核心库（registry/sandbox/cancel/mcp/schema/images）平铺其中。
 #
-# 插件作者写的是 `from core import tool`、`import tools` 这类写法，
+# 工具作者写的是 `from core import tool`、`import tools` 这类写法，
 # 其中 `import tools` 这种裸模块名不在包命名空间里，
 # 靠 core/__init__.py 里的 sys.path 铺设才能找到。
 # 所以**必须**声明 package-dir 让 setuptools 认识 src 布局，
@@ -97,7 +96,7 @@ include = ["core*"]
 # 静态检查配置
 #
 # 本项目刻意把 src/core 也当成「裸模块」导入根：main.py 脚本模式下的
-# `from _paths import ...`、插件作者写的 `import tools`，运行时由
+# `from _paths import ...`、工具作者写的 `import tools`，运行时由
 # core/_paths.py 的 install_import_paths() 铺好 sys.path。
 # 类型检查器默认只认 src/，所以这里显式补上 src/core，避免误报找不到模块。
 # ---------------------------------------------------------------------------
@@ -109,7 +108,7 @@ extraPaths = [".", "src", "src/core", "tests"]
 typeCheckingMode = "basic"
 
 # Trae 的 basedpyright 比 pyright 多出若干严格检查；本项目大量使用动态导入、
-# 插件装饰器和模块级可变配置，这些检查只产生噪音，不反映真实缺陷。
+# 工具装饰器和模块级可变配置，这些检查只产生噪音，不反映真实缺陷。
 [tool.basedpyright]
 extraPaths = [".", "src", "src/core", "tests"]
 typeCheckingMode = "basic"

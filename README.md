@@ -1,22 +1,31 @@
 # mini-agent
 
-一个**可扩展**的本地智能体控制台：核心循环 + 工具注册表 + 插件目录 + MCP 双通道。
+一个**可扩展**的本地智能体 Web 应用：核心循环 + 工具注册表 + 工具目录 + 连接（MCP）双通道。
 
 核心循环始终只有约 250 行。加工具**不需要改核心代码** —— 这是整个设计的唯一目标。
+
+**术语**
+
+| 术语 | 含义 |
+| --- | --- |
+| **工具（Tool）** | 模型可调用的一个内部能力，按来源分 core / builtin / user 三类，统一进注册表 |
+| **连接（MCP server）** | 一个外部 MCP server，经 MCP 协议把自己的工具挂进同一张注册表 |
+| **技能（Skill）** | 模型可遵循的工作流（`SKILL.md`），按需通过 `use_skill` 载入上下文 |
+| **MCP** | 协议名，仅指 Model Context Protocol，不再作为「插件」的代称 |
+| **插件（历史词）** | 旧版本对「工具模块」的称呼；新文档与界面统一改称「工具」 |
 
 ```
 mini-agent/
 ├── src/core/                     ← 包本体（源码都在这里）
 │   ├── __init__.py / __main__.py 包门面与 `python -m core` 入口
 │   ├── _paths.py                 根目录锚点：全项目「根在哪」的唯一答案
-│   ├── main.py                   入口 / CLI 参数 / .env 读取
+│   ├── main.py                   入口：启动 Web UI / 启动开关 / .env 读取
 │   ├── agent.py                  核心循环：messages → LLM(流式) → tool_calls →
 │   │                             并行执行 → 按序回填 → …
-│   ├── repl.py                   控制台：对话 / 斜杠命令 / 工具轨迹 / 危险确认
 │   ├── ui.py                     呈现层：PlainUI / RichUI（流式增量、批次轨迹）
-│   ├── loader.py                 插件发现 / 加载 / 热重载 / 故障隔离
+│   ├── loader.py                 工具发现 / 加载 / 热重载 / 故障隔离
 │   ├── skills.py                 技能发现：SKILL.md / 清单注入 / use_skill
-│   ├── tools.py                  向后兼容垫片（import tools 即加载插件）
+│   ├── tools.py                  向后兼容垫片（import tools 即加载工具）
 │   ├── registry.py               ToolRegistry：唯一的工具存放处
 │   ├── schema.py                 从类型注解 + docstring 自动推导 JSON Schema
 │   ├── sandbox.py                工作区沙箱（读写双通道 / 三档读取 / 越界写检测）/ 截断
@@ -34,8 +43,8 @@ mini-agent/
 │   ├── mhtml.py                  MHTML 解析：主 HTML + 内嵌资源（data: URL）
 │   └── images.py                 图片附件通道（view_image 的底层）
 │
-├── plugins/           自带插件（文件 / 代码 / 执行 / 网络 / 视觉 / 系统 / 数据 / 文档 / 表格 / OCR 等，共 24 个）
-├── plugins_user/      ← 你的插件放这里，丢个 .py 就多一个工具
+├── builtin_tools/                自带工具（文件 / 代码 / 执行 / 网络 / 视觉 / 系统 / 数据 / 文档 / 表格 / OCR 等，共 24 个）
+├── user_tools/       ← 你的工具放这里，丢个 .py 就多一个工具
 ├── skills/            自带技能（一个目录 + SKILL.md = 一段可复用工作流）
 ├── skills_user/       ← 你的技能放这里，丢个含 SKILL.md 的目录就多一个技能
 ├── mcp/
@@ -49,7 +58,7 @@ mini-agent/
 └── requirements.txt
 ```
 
-> **关于「根目录」**：`plugins/`、`mcp_servers.json`、`demo_case/` 都挂在**项目根**，
+> **关于「根目录」**：`builtin_tools/`、`mcp_servers.json`、`demo_case/` 都挂在**项目根**，
 > 不是包内 —— 它们是你（用户）要改、要放东西的地方，不是只读资源。
 > `src/core/_paths.py` 负责把这件事说清楚：`ROOT` 从环境变量
 > `MINI_AGENT_ROOT` 或 `__file__` 上溯解析，所以**从任何目录启动都能找到它们**。
@@ -74,7 +83,7 @@ mini-agent/
 └── .migrated            老数据迁移标记（存在即不再重复迁移）
 ```
 
-- 项目根只保留**只读资源**：`plugins/`、`skills/`、`mcp/`、`web/dist`
+- 项目根只保留**只读资源**：`builtin_tools/`、`skills/`、`mcp/`、`web/dist`
 - 自定义位置：`--data-dir PATH`，或环境变量 `MINI_AGENT_DATA_DIR`
 - **首次升级自动迁移**：若 `~/.mini-agent` 还不存在，而旧的 `<项目根>/web_data` 有数据，
   启动时会**复制**过去并打印提示；原目录保留，确认无误后可自行删除
@@ -84,9 +93,14 @@ mini-agent/
 
 | 路径       | 怎么做                         | 适合什么                                          |
 | -------- | --------------------------- | --------------------------------------------- |
-| **插件文件** | 往 `plugins_user/` 丢一个 `.py` | 你自己写的能力，进程内执行，最灵活                             |
-| **MCP**  | 在 `mcp/mcp_servers.json` 里加一段配置 | 复用现成生态（filesystem / git / sqlite / 浏览器…），独立进程 |
-| **内置插件** | 改 `plugins/*.py`            | 项目自带的基础能力                                     |
+| **工具文件** | 往 `user_tools/` 丢一个 `.py` | 你自己写的能力，进程内执行，最灵活                             |
+| **连接（MCP server）** | 在 `mcp/mcp_servers.json` 里加一段配置 | 复用现成生态（filesystem / git / sqlite / 浏览器…），独立进程 |
+| **内置工具** | 改 `builtin_tools/*.py`            | 项目自带的基础能力                                     |
+
+> **「连接」是什么？** 连接 = 一个外部 MCP server。每个连接是一个独立进程，
+> 通过 MCP 协议把它的工具挂进同一张注册表（来源标记为 `mcp`）。
+> 配置写在 `mcp/mcp_servers.json`，启动日志会打印各 server 的连接状态。
+> 界面上的「连接」入口仍在规划中，当前只支持配置文件方式。
 
 > **还有第四种扩展——技能（Skill）。** 上面三条路最终都变成 `Tool` 对象（模型能*调用*），
 > 技能则是模型能*遵循*的**工作流**：往 `skills_user/` 丢一个含 `SKILL.md` 的目录。
@@ -126,13 +140,12 @@ python -m venv .venv
 #   pip install -e ".[ocr]"         # + 扫描件 OCR（约 170MB，可选）
 #   pip install -e ".[docs-all]"    # 以上四组一次装齐
 
-python -m core --tools      # 先看看有哪些工具（不需要 Key）
-python -m core --selftest   # 工具层自检（不需要 Key）
-python -m core              # 进入控制台
+python -m core              # 启动 Web UI（浏览器打开 http://127.0.0.1:8000）
 ```
 
 > 三种启动方式等价：`python -m core`（推荐）、`python src/core/main.py`
 > （直接跑源码，不用安装）、`mini-agent`（装了 console script 之后）。
+> 项目只提供 Web UI，没有命令行对话/子命令；工具与技能在界面里查看和管理。
 
 > **务必用虚拟环境**，这不只是好习惯：MCP server 是当作 Python 子进程拉起来的，  
 > 解释器不一致会让握手超时（且报错很不直观）。细节见  
@@ -144,7 +157,7 @@ python -m core              # 进入控制台
 
 ## Web UI（浏览器界面）
 
-除了控制台，还内置一个本地 Web UI（React + Ant Design X 聊天界面），支持
+内置一个本地 Web UI（React + Ant Design X 聊天界面），支持
 **对话 / 智能体双模式**（逐消息切换，历史保留）与**会话级「智能搜索」开关**（内置
 `web_search` 工具，后端可在「系统配置 → 联网搜索」里选择：DeepSeek 官方 Search
 API 默认、Tavily / 博查 / Bing 兜底；联网在两种模式下都可用 —— 快速对话只是
@@ -153,17 +166,17 @@ API 默认、Tavily / 博查 / Bing 兜底；联网在两种模式下都可用 �
 ```powershell
 # 生产模式（推荐，运行时无需 Node）
 cd web; npm install; npm run build   # 仅首次或前端变更后需要
-python -m core --web                 # Python 托管 web/dist
-# 浏览器打开 c
+python -m core                       # Python 托管 web/dist
+# 浏览器打开 http://127.0.0.1:8000
 
 # 开发模式（前端热更新，两个终端）
-python -m core --web --port 8123     # 终端 1：后端 API + SSE
+python -m core --port 8123           # 终端 1：后端 API + SSE
 cd web; npm run dev                  # 终端 2：Vite :5173，/api 自动代理
 ```
 
 要点：
 
-- 默认监听 `0.0.0.0`（本机 + 局域网均可访问，手机/同网段设备直连；传 `--host 127.0.0.1` 可收窄为仅本机）；`--web` / `--port`（默认 8000） / `--host`（默认 `0.0.0.0`）开关，也可在 `.env` 里用 `MINI_AGENT_PORT` / `MINI_AGENT_HOST` 固定（命令行优先）
+- 默认监听 `0.0.0.0`（本机 + 局域网均可访问，手机/同网段设备直连；传 `--host 127.0.0.1` 可收窄为仅本机）；`--port`（默认 8000） / `--host`（默认 `0.0.0.0`）开关，也可在 `.env` 里用 `MINI_AGENT_PORT` / `MINI_AGENT_HOST` 固定（命令行优先）
 - chat 模式 = 快速对话（**不做推理思考，只保留联网能力**：开关打开时 `web_search` + `fetch_url`，关闭时只有本地 `fetch_url`）；agent 模式 = 全量内置工具循环（当前 94 个，含 `remember`；`request_approval` 仅 auto 档暴露），开联网时额外加载 `web_search`
 - **联网的两套实现**（由顶栏「⋯」菜单第一项的**智能搜索**开关逐轮决定，文字 + 开关样式；配置**按会话独立保存**，切到别的对话互不影响）：
   - **开**：`web_search` 走所选云端后端；`fetch_url` 优先走 **DeepSeek Fetch** `POST https://api.deepseek.com/v1/tools/fetch`（返回干净 Markdown，与 Chat 同一把 Key，按次计费），失败自动回退本地抓取
@@ -175,7 +188,7 @@ cd web; npm run dev                  # 终端 2：Vite :5173，/api 自动代理
   - **按需询问（ask，默认）**：每个危险工具执行前都弹窗确认
   - **自主判断（auto）**：普通危险操作不再打扰，系统提示词注入责任准则，模型认为有风险时主动调 `request_approval(reason)` 向你申请（弹窗展示申请理由，批准才继续）；**危险的 MCP 工具在任何档位都强制弹窗**，这是硬特例
   - **完全控制（full）**：沙箱内操作一律不弹（MCP 工具仍弹）
-  - 控制台 `/approve` 在 ask / full 两档间切换；命令行 `--approve` 默认进入 ask
+  - 仅 Web UI 提供切换入口（输入框工具栏盾牌胶囊），选择记在 localStorage
 - **内联提问卡片**：Agent 缺关键信息或需要你做抉择时会调用 `ask_user`，问题**直接渲染在助手回复气泡里**（不必自己在输入框打字）—— 给出候选时是可点选的单选 + 「其他」自定义输入，无候选时退化为纯文本输入；点击/提交后即时回传，卡片折叠为「已选择：XXX」，Agent 在**同一轮**继续执行。等待不设超时（离开多久都不会自动拒绝）；点停止或刷新/关闭页面（连接断开）按「未回答」处理（卡片转灰「已失效」），Agent 基于已有信息继续或说明所用假设。`ask / auto / full` 三档均可用；刷新页面不保留已失效卡片（答案折叠态在会话内保存）
 - **附件上传**：输入区左侧加号菜单可上传图片 / 文件（多选）。图片走视觉模型（`view_image` 通道），文件内容注入消息；助手回答中引用 `.attachments/` 路径的图片会直接渲染显示
 - **技能选择（输入区第三个按钮，仅智能体模式）**：树形列表按`系统内置`/`自定义`分组，点一下或回车即插入（面板随即关闭）；输入框里可放多个技能块（图标 + 名字，整块退格删除），最多 3 个、**允许重复**、前端不做去重。发送时技能名以「裸名字 + 不可见包裹字符」写进消息，后端运行时自己查找、去重并注入本轮 system prompt（顺序即优先级，正文总量上限 2 万字符、超出截断；不写进对话历史）。切到快速对话模式会移除已选技能块。输入 `/` 后继续打字会**实时模糊过滤**（忽略大小写与空格，按名称前缀 → 名称/目录名包含 → 描述包含排序），无匹配时面板自动隐藏、删字可恢复；默认高亮第一个匹配项，选中后连同 `/查询词` 一起替换成技能块
@@ -199,14 +212,14 @@ cd web; npm run dev                  # 终端 2：Vite :5173，/api 自动代理
 - 富渲染：GFM 表格、KaTeX 公式（`$...$`）、ECharts 图表（` ```echarts ` 代码块，柱/线/饼/散点）、内联 HTML（经白名单消毒）；配套技能 `skills/rich-render/` 教模型主动用图表达
 - **工作区管理**：左侧边栏按工作区分组管理对话，可新建 / 改名 / 移除；每个工作区的 `path` 就是 Agent 的文件操作边界（沙箱根），会话归属哪个工作区就在哪个目录里干活。默认工作区锚在**当前登录用户的数据目录**（如 `C:\Users\<you>\mini-agent`，启动时自动创建，不再拿源码目录当工作区），不可删除；组内还有对话时不允许删工作区
   - 输入框上方左侧有工作区胶囊：新对话可直接切换（不选就落在默认工作区），已开始的对话只读显示 —— 换沙箱根会让「之前写的文件在哪」变得难以理解
-- **系统配置**：左侧抽屉底部的「系统配置」按钮打开，内含「模型配置」「通用配置」「联网搜索」「记忆」「插件管理」五个页签（顶栏点模型名也能进，直接落在模型配置页）
+- **系统配置**：左侧抽屉底部的「系统配置」按钮打开，内含「模型配置」「通用配置」「联网搜索」「记忆」「工具管理」五个页签（顶栏点模型名也能进，直接落在模型配置页）
   - 模型配置：只维护「有哪些模型」（不设全局当前模型；具体用哪一份在对话输入框的模型菜单里按会话选择，新对话默认第一份）。任意 OpenAI 兼容接口 —— 内置 DeepSeek（默认，模型选项 `deepseek-flash` / `deepseek-v4-pro`）/ 智谱 / Kimi / 通义千问 / 豆包 / 千帆 / 硅基流动 / OpenAI / Ollama / vLLM 模板，可加多份「服务商 + 模型」配置；**显示名称默认等于模型名 ID**（输入模型名时自动带出，可手动改成更好读的名字，再次修改模型名会重新同步），对话输入框的模型胶囊以「显示名称 + 推理等级」呈现，模型子菜单按服务商分组、组内列出各配置的显示名称；带连接测试（`GET /models` 探测，不耗 token，401/403 与网络错误分开报）。配置存 `~/.mini-agent/models.json`，**API Key 只在本机，不上传第三方**，接口列表回显时脱敏为 `****后四位`
   - 通用配置：最大轮数、上下文字符上限、保留最近轮数、单次工具输出上限、温度、流式输出、并行工具、并发线程数、**工具档位**（`standard` 默认：常用工具常驻，低频能力由模型调 `search_tools` 按需检索加载，每轮省约 1.5 万字符 schema；`full`：一次性暴露全部工具），保存即生效（`~/.mini-agent/settings.json`，可一键恢复默认）。取值优先级：命令行显式参数 > 这里保存的值 > 环境变量 > 内置默认；页面底部还有「运行日志」开关 / 级别 / 保留天数（详见下文「运行日志」一节）
   - 通用配置 → **沙箱读取范围**（`sandbox_read`，默认 `strict`）：控制 Agent 读工作区**之外**文件的口径 —— `strict` 越界读写全拦；`whitelist` 仅白名单绝对路径可读（TextArea 每行一条）；`open` 沙箱外全部只读放开。**任何档位下，沙箱外的写入 / 删除 / 移动一律硬禁**，没有放开开关；此外 `run_python` 注入写护栏、`run_shell` 检测越界写命令、zip/tar 解压防路径穿越（混淆写法无法 100% 拦截，详见下文「沙箱」一节）
   - **联网搜索**页签：选择 `web_search` 的后端（DeepSeek 官方搜索 / Tavily / 博查 / Bing），与聊天模型解耦，任何厂商的模型都能用；**DeepSeek 联网 Key 在这里独立配置**（存 `~/.mini-agent/settings.json` 的 `deepseek_search_api_key`，`web_search` 的 Search API 与 `fetch_url` 的 Fetch API 共用），与「模型配置」里的 DeepSeek Key 完全解耦、互不引用；已配置时只显示脱敏尾号，留空保存表示不修改。开关开启时 `fetch_url` 走 DeepSeek Fetch（Markdown、按次计费），未配置 Key 或调用失败时回退本地抓取
   - **记忆**页签：编辑用户画像、开关「启用记忆 / 自动提炼」与注入预算（详见下文「记忆系统」一节）
   - **工作区记忆**（不在系统配置里）：左侧抽屉每个工作区的快捷工具区（改名按钮左边）打开，按工作区查看/编辑**项目记忆**、查看/删除该工作区的**主题摘要**
-  - 插件管理：展示当前全部工具（名称 / 来源 / 分组 / 签名），按来源标记为 core / builtin / user / mcp，支持查看 dangerous / exclusive 标记与分组汇总，便于快速了解 Agent 当前具备的能力
+  - 工具管理：展示当前全部工具（名称 / 来源 / 分组 / 签名），按来源标记为 core / builtin / user / mcp，支持查看 dangerous / exclusive 标记与分组汇总，便于快速了解 Agent 当前具备的能力
 - **右侧工作台抽屉**：顶栏最右侧图标展开/收起。初始为「开始」页，点击「工作区文件」进入目录列表；点文件新建标签页，支持代码/文本（行号+高亮）、Markdown（预览/源码）、HTML / MHTML（iframe 预览/源码，默认预览，脚本沙箱隔离）、图片、PDF（翻页/缩放）、CSV/TSV（表格分页）预览，文件行 hover 可下载；关闭全部标签后抽屉自动收起，再次打开回到开始页（只读，不修改文件）
 - **运行轨迹抽屉**：助手消息脚注区 / 侧栏会话项的时钟图标打开，按 `run_id → turn` 回放会话事件流（来源着色、可展开、单轮逐条回放、按类型过滤）。与会话 JSON 双写的事实层，详见下文「可追溯运行（事件流）」一节
 - **多会话与搜索**：对话本地持久化（`~/.mini-agent/sessions/*.json`，原子写），搜索支持标题 + 全文、空格分隔的多词 AND、命中片段高亮，点结果直接滚动定位到那条消息并闪烁
@@ -268,7 +281,7 @@ python -m core --reset-password admin
 ### 关闭登录
 
 ```powershell
-python -m core --web --no-login
+python -m core --no-login
 ```
 
 仅供本机调试与自动化测试：**任何能访问该端口的人都能直接操作本机文件与命令**。
@@ -338,7 +351,7 @@ python -m core --web --no-login
    数据 / 是否重复」，宁可空也不写噪声。主题摘要做滚动合并更新；寒暄与过短
    轮次直接跳过，不烧 token
 4. **手动**：左侧抽屉 → 工作区记忆（项目记忆 / 主题摘要）、设置 → 记忆（用户画像）；
-   控制台 `/remember 内容`；删除会话时对应摘要一并清理
+   （模型也可调用 `remember` 工具写入）；删除会话时对应摘要一并清理
 
 条目格式为 `- 2026-10-17 14:30 · [rule] 来源 — 正文`（旧格式无 `[kind]` 仍可读），
 写入时同主题按 upsert 处理（相似度 ≥0.88 用新表述替换旧条目，完全重复则跳过）；
@@ -376,7 +389,7 @@ python -m core --web --no-login
 
 | 文件 | 内容 |
 | --- | --- |
-| `logs/<日期>/app.log` | 启动与监听地址、HTTP 接口错误、会话生命周期、插件 / MCP 加载失败、记忆提炼 |
+| `logs/<日期>/app.log` | 启动与监听地址、HTTP 接口错误、会话生命周期、工具 / MCP 加载失败、记忆提炼 |
 | `logs/<日期>/llm.log` | 每轮模型调用摘要（耗时、消息数、token 用量、是否流式）、流式降级与重试 |
 | `logs/<日期>/tool.log` | 工具开始 / 结束、耗时、结果字符数、错误 |
 | `logs/<日期>/error.log` | 所有 `ERROR` 及以上（带堆栈），任何类别都汇总到这里 |
@@ -433,7 +446,7 @@ CSV / TSV 表格预览说明：
 - **视图**：按 `run_id → turn` 两级分组的时间线；每行显示序号 / 时间 / `type` 徽标 / 一行摘要，hover 出现「详情」按钮 → 展开为语法高亮的原始内容（换行不转义）。顶部过滤器 `全部 / 模型 / 工具 / 上下文 / 授权` + 「只看本轮」；每个轮次分组头有「回放」按钮，按时间顺序逐条揭示该轮事件（纯前端展示，不重发请求）。
 - **关键不变式（I1）**：`llm_request` 只存逐条消息的 `sha256` 摘要（不存正文），正文各自只存一次在 `system_prompt` / `user_message` / `llm_response` / `tool_result` 等来源事件里 —— 事件流体积不膨胀，且仅凭事件流即可完整、可校验地重建每次请求的消息列表（图片以 `#img:<sha256>` 占位）。
 - **与会话 JSON 的关系**：`.json` 仍是恢复历史、搜索、展示的主口径，事件流是事实层与兜底（双写）。删除会话时两个文件一起删。
-- **零侵入**：Agent 未挂 `event_writer`（CLI / REPL / 未启用）时埋点是纯 no-op，行为与耗时和接入前逐条一致；写入失败只吞掉，绝不影响任务。
+- **零侵入**：Agent 未挂 `event_writer`（未启用）时埋点是纯 no-op，行为与耗时和接入前逐条一致；写入失败只吞掉，绝不影响任务。
 - **实时镜像**：运行中 SSE 会附带 `trace` 帧把事件即时推进抽屉，但**不阻塞**；收到 `done / error / cancelled` 后前端再拉一次全量做磁盘兜底。
 - **开关**：设置 → 通用配置 → 「运行轨迹 → 记录会话事件流」（`events_enabled`，默认开）。关闭后不再产生新文件；旧会话（早于本能力）打开轨迹显示「无事件记录」而不报错。
 
@@ -443,7 +456,7 @@ CSV / TSV 表格预览说明：
 
 ## 加一个工具：三行
 
-新建 `plugins_user/whoami.py`：
+新建 `user_tools/whoami.py`：
 
 ```python
 from core import tool
@@ -455,7 +468,7 @@ def now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 ```
 
-然后在控制台里敲 `/reload` —— 完事。没有注册表文件、没有装饰器参数、没有 JSON。
+然后重启后端（或在开发时重启进程）—— 完事。没有注册表文件、没有装饰器参数、没有 JSON。
 
 模型看到的 schema 是这样自动生成的：
 
@@ -479,7 +492,7 @@ def count_lines(path: str, top: int = 5) -> str:
 → 名字 `count_lines`，描述取自首行，`path` 自动必填（string），  
 `top` 自动带 `default: 5`（integer），两个参数的说明从 `Args:` 段里抽取。
 
-细节与进阶写法见 [`plugins_user/README.md`](plugins_user/README.md)。
+细节与进阶写法见 [`user_tools/README.md`](user_tools/README.md)。
 
 ---
 
@@ -503,7 +516,7 @@ description: 分析 CSV 数据并产出可复核的数字结论
 3. 结论必须附带证据（计数、聚合数字、抽样行号）
 ```
 
-然后在控制台里敲 `/skills reload` —— 完事。没有注册表文件、没有装饰器。
+然后在 Web UI 的「技能」页里保存/刷新 —— 完事。没有注册表文件、没有装饰器。
 
 **它是怎么生效的（清单 + 按需加载）：**
 
@@ -561,7 +574,7 @@ frontmatter 的 `name` / `description` 都可省略：`name` 省略时用目录�
 ```
 
 启动后，这个 server 的每个工具都会以 `filesystem__<工具名>` 出现在注册表里。  
-控制台里 `/mcp` 看状态，`/mcp reload` 重新挂载。
+启动日志会打印各 server 的连接状态；改完配置后重启后端即可重新挂载。
 
 仓库自带一个 `mcp/mcp_demo_server.py` 用于验证协议链路（`now` / `sha256` / `env_info` / `sleep` /  
 `stubborn_sleep` / `cancel_log`）。它在 `mcp/mcp_servers.json` 里**默认关闭** —— 这 6 个工具只服务于测试与演示，  
@@ -573,7 +586,7 @@ frontmatter 的 `name` / `description` 都可省略：`name` 省略时用目录�
 客户端的取消会以 `notifications/cancelled{requestId, reason}` 告知服务端  
 （见「取消通知：别让对端白跑」）；服务端进程跨 run 复用，取消不会把它杀掉。
 
-> **关于 `dangerous`**：外部工具默认按危险处理 —— MCP 工具执行前若 `/approve on` 会问你。  
+> **关于 `dangerous`**：外部工具默认按危险处理 —— MCP 工具执行前在「按需询问」档会问你。  
 > 明知安全的 server（比如只读的 filesystem）可以显式设 `"dangerous": false`。
 
 ---
@@ -664,11 +677,11 @@ id 不匹配就丢弃 —— 并发时线程之间会互相取走对方的响应
 | 层                          | 做法                                                                                                             |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `run_shell` / `run_python` | 底层换成 `sandbox.run_process`：Popen + 0.15s 短轮询，取消 → 杀树 → 返回 `[cancelled]`                                        |
-| 纯 Python 工具（你写的插件）         | `from core import current_token`，长循环里 `tok.check()` 或查 `tok.cancelled()` 优雅收尾                                  |
+| 纯 Python 工具（你写的工具模块）     | `from core import current_token`，长循环里 `tok.check()` 或查 `tok.cancelled()` 优雅收尾                                  |
 | MCP 工具                     | 等待响应的循环改为短轮询；取消时**先补发 `notifications/cancelled` 再抛 `Cancelled`**。server 进程本身不受影响（连接跨 run 复用），迟到的响应被静默丢弃，后续调用照常 |
 | 流式响应                       | 每个分片之间都是检查点，取消时 `stream.close()` 断开连接（不再浪费下行流量）                                                                |
 | 卡住的非流式请求                   | 令牌的 `on_cancel` 钩子关闭 HTTP 客户端，socket 读立刻报错 → 兜底转成 `Cancelled`                                                  |
-| 控制台 / 一次性模式                | `Agent.run()` 在取消收尾时调 `ui.cancelled(reason)`；调用方用 `agent.last_cancel_notice_shown` 决定要不要再打一遍                   |
+| 调用方（Web UI 等）                | `Agent.run()` 在取消收尾时调 `ui.cancelled(reason)`；调用方用 `agent.last_cancel_notice_shown` 决定要不要再打一遍                   |
 
 ### 取消通知：别让对端白跑（MCP）
 
@@ -710,7 +723,7 @@ id 不匹配就丢弃 —— 并发时线程之间会互相取走对方的响应
    `[cancelled] 用户取消了本次任务` —— 模型下一轮能看到「哪些工具没跑完」，  
    而不是被 API 报错拒绝。
 2. **KeyboardInterrupt 不向外抛。** `Agent.run()` 把它归一化成  
-   `core.cancel.Cancelled`，调用方（REPL / 一次性模式）只需要接一种异常。  
+   `core.cancel.Cancelled`，调用方（Web UI 等）只需要接一种异常。  
    清理过程中的第二次 Ctrl+C 会正常穿透（强制退出的后门）。
 
 工具作者的两行接入：
@@ -739,58 +752,36 @@ def my_tool(...):
 
 ---
 
-## 控制台命令
+## 热重载与运维
 
-| 命令                  | 作用                                                         |
-| ------------------- | ---------------------------------------------------------- |
-| `/help`             | 帮助                                                         |
-| `/tools [关键词]`      | 列出工具，可按名字 / 描述 / **分组** / 来源过滤（如 `/tools fs`、`/tools mcp`） |
-| `/plugins`          | 列出插件模块、工具数、`PLUGIN_INFO`                                   |
-| `/reload [模块]`      | **热重载插件**，不传则全量重载（含新增/删除的插件文件）                             |
-| `/skills [reload]`  | 列出技能 / 重新扫描技能目录                                                                |
-| `/skill [名字]`       | 查看某个技能的完整指引                                                                    |
-| `/mcp [reload]`     | MCP server 状态 / 重新挂载（并显示取消通知、超时、迟到响应计数）                    |
-| `/model [名字]`       | 查看或切换模型                                                    |
-| `/stream on\|off`   | 流式输出（逐字生成）                                                 |
-| `/parallel on\|off` | 同一轮的多个工具是否并行执行                                             |
-| `/workers [N]`      | 并行工具的最大线程数                                                 |
-| `/usage`            | 本次会话的 token 与调用统计                                          |
-| `/context`          | 上下文占用与已裁剪条数                                                |
-| `/verbose on\|off`  | 是否显示工具调用轨迹                                                 |
-| `/approve on\|off`  | 切换确认模式：`on`=按需询问（ask）/ `off`=完全控制（full）；无参数在两档间切换 |
-| `/remember [user\|project] 内容` | 手动写入一条长期记忆（默认写当前项目记忆） |
-| `/memory`           | 查看当前生效的用户画像 / 项目记忆 / 主题摘要 |
-| `/reset`            | 清空对话历史                                                     |
-| `/exit`             | 退出                                                         |
-
-`/reload` 是开发体验的关键：把「改 → 退出 → 重启 → 重连 → 复现」压缩成「改 → /reload」。
+| 场景 | 操作 |
+| --- | --- |
+| 改了 `builtin_tools/` / `user_tools/` 的工具模块 | 重启后端生效 |
+| 改了 `mcp/mcp_servers.json` | 重启后端重新挂载 |
+| 技能新增 / 启停 / 编辑 / 删除 | 在 Web UI「技能」页操作，自动重载 |
+| 忘记密码 | `python -m core --reset-password admin`（终端救援通道） |
 
 ---
 
-## 命令行开关
+## 启动开关
 
 ```bash
-python -m core "任务"          # 一次性执行
-python -m core                 # 控制台
-python -m core --tools         # 列工具
-python -m core --plugins       # 列插件
-python -m core --skills        # 列技能
-python -m core --mcp-status    # 查 MCP
-python -m core --selftest      # 自检
+python -m core                   # 启动 Web UI（默认 0.0.0.0:8000）
+python -m core --port 8123       # 换端口
+python -m core --host 127.0.0.1  # 仅本机可访问
 
---model NAME          覆盖模型
---workspace PATH      工作区（沙箱根目录）
---plugin-dir A,B      替换插件目录
---skill-dir A,B       替换技能目录
---no-plugins          不加载插件
---no-skills           不加载技能
---no-mcp              不挂 MCP
---no-stream           关闭流式输出
---no-parallel         关闭并行工具执行
---workers N           并行工具线程数（默认 4）
---approve             危险工具需确认
---plain               不用彩色
--q / --quiet          不显示工具轨迹
+--model NAME           覆盖模型
+--workspace PATH       工作区（沙箱根目录）
+--data-dir PATH        数据目录（默认 ~/.mini-agent）
+--tool-dir A,B         替换工具目录
+--skill-dir A,B        替换技能目录
+--max-turns N          最大轮次（默认读通用配置）
+--no-tools             不加载工具
+--no-skills            不加载技能
+--no-mcp               不挂 MCP
+--no-login             关闭登录校验（调试用）
+--reset-password U     重置某个账号的密码后退出
+--port N / --host ADDR 监听端口 / 地址
 ```
 
 对应环境变量：`MINI_AGENT_STREAM` / `MINI_AGENT_PARALLEL` / `MINI_AGENT_MAX_WORKERS`（默认 `1` / `1` / `4`，  
@@ -819,13 +810,13 @@ scripts\run_tests.bat --real           # 额外跑真实 API 用例（消耗 tok
 
 ```bash
 .venv\Scripts\python.exe tests\test_loop.py      # 循环层 6 项：用假客户端，不碰网络
-.venv\Scripts\python.exe tests\test_plugins.py   # 插件层 + MCP 层 11 项
+.venv\Scripts\python.exe tests\test_tools.py   # 工具层 + MCP 层 11 项
 ```
 
 | 套件 | 覆盖什么 |
 |---|---|
 | `tests/test_loop.py` | 循环层 6 项：假客户端，不碰网络 |
-| `tests/test_plugins.py` | 插件层 + MCP 层 11 项 |
+| `tests/test_tools.py` | 工具层 + MCP 层 11 项 |
 | `tests/test_skills.py` | 技能层 10 项：frontmatter / 加载 / 冲突 / 热重载 / use_skill / 截断 / 来源分类 / 启停状态 / 消息解析 / 本轮注入 |
 | `tests/test_vision.py` | 图片输入 5 项：嗅探 / 附件通道 / 拒绝 / 循环集成 |
 | `tests/test_stream_parallel.py` | 流式聚合 + 并行执行 + MCP 并发 19 项 |
@@ -833,7 +824,7 @@ scripts\run_tests.bat --real           # 额外跑真实 API 用例（消耗 tok
 | `tests/test_mcp_cancel.py` | MCP 取消通知 8 项：送达 / 停手 / 迟到响应 / 幂等 / 定向 |
 | `tests/test_http_e2e.py` | 本地 mock HTTP（支持 SSE）：流式三条降级路径 + 并行收益 |
 | `tests/test_webui.py` | Web UI 端到端 25 项：SSE 事件序列 / 双模式工具表 / 停止 / 页面断开后台继续 / 运行中指示器 / 接入后台任务 / 危险确认 / 409 / 工作区 / 模型配置 / 会话搜索 / 通用配置 / 用户指令记忆 / keep-alive 请求体 |
-| `tests/test_sys_monitor.py` | 系统监控插件 8 项：CPU / 内存 / 磁盘 / 网络 / 开机时长 / 端口占用 |
+| `tests/test_sys_monitor.py` | 系统监控工具 8 项：CPU / 内存 / 磁盘 / 网络 / 开机时长 / 端口占用 |
 | `tests/test_memory.py` | 记忆系统 15 项：存储 / 保护区 / 工具不可见 / prelude / shell / 注入 / 分级淘汰 / 提炼过滤 / 检索合并 / 显式指令 |
 | `tests/test_logging.py` | 文件日志 6 项：按日目录 / 错误聚合 / 幂等重配 / 关闭 / 配置 / 清理 |
 | `tests/test_workbench.py` | 工作台文件接口 12 项：目录 / 安全 / 编码 / 图片 / HTML / MHTML / PDF / 下载 / 表格 |
@@ -856,7 +847,7 @@ Windows runner 上 `pytest tests -q`（平台行为依赖 Windows），Ubuntu �
 
 ```
   ✓ test_loop.py                 1.54s
-  ✓ test_plugins.py              2.16s
+  ✓ test_tools.py              2.16s
   ✓ test_skills.py               0.22s
   ✓ test_vision.py               1.40s
   ✓ test_stream_parallel.py      4.53s
@@ -904,10 +895,11 @@ MCP 客户端只在它恰好等于 `python` / `python3` 时才改写成 `sys.exe
 真实调用（会消耗 token，需要先在 Web UI「设置 → 模型」里配置好模型）：
 
 ```bash
-python -m core "分析 demo_case/inbox 目录，给出可复核的数字"
-python -m core --no-stream --no-parallel "…"   # 对照：传统形态
 python tests/test_real_mcp_cancel.py                 # 真实模型 + 真实 MCP server：取消通知全链路
 ```
+
+> 想在界面里验证 demo：把 `demo_case/inbox` 目录拖进附件 / 在对话框里描述任务即可，
+> 例如「分析 demo_case/inbox 目录，给出可复核的数字」。
 
 ---
 
@@ -918,14 +910,13 @@ mini-agent/
 ├── src/core/           包本体
 │   ├── _paths.py             根目录锚点：ROOT / DEFAULT_WORKSPACE / 铺 sys.path
 │   ├── agent.py              核心循环：流式接收 / 并行执行 / 上下文裁剪
-│   ├── repl.py               控制台：斜杠命令
 │   ├── ui.py                 呈现层：PlainUI / RichUI（llm_delta / tools_start / cancelled）
-│   ├── loader.py             插件加载器：发现 / 加载 / 热重载 / 故障隔离
+│   ├── loader.py             工具加载器：发现 / 加载 / 热重载 / 故障隔离
 │   ├── skills.py             技能加载器：发现 SKILL.md / 清单注入 / use_skill 工具
 │   ├── tools.py              向后兼容垫片（老代码 import tools 仍可用）
-│   ├── main.py               入口 / CLI / .env
+│   ├── main.py               入口：启动 Web UI / 启动开关 / .env
 │   ├── __main__.py           python -m core
-│   ├── __init__.py           铺 sys.path + 导出插件作者要用的 API
+│   ├── __init__.py           铺 sys.path + 导出工具作者要用的 API
 │   ├── registry.py           Tool / ToolRegistry / @tool
 │   ├── schema.py             自动 Schema 推导
 │   ├── sandbox.py            沙箱与安全策略：safe_path/read_path 双通道、三档读取、
@@ -943,7 +934,7 @@ mini-agent/
 │   ├── cancel.py             取消令牌：CancellationToken / Cancelled / 杀进程树
 │   ├── mcp.py                MCP stdio 客户端（并发安全 + 可取消 + 取消通知）+ 桥接
 │   └── images.py             图片附件通道（view_image 的底层）
-├── plugins/                  自带插件（24 个，按分组）
+├── builtin_tools/                  自带工具（24 个，按分组）
 │   ├── fs_tools.py           文件系统：read_file / write_file / list_dir / glob_files / grep
 │   ├── file_ops.py           文件操作
 │   ├── code_tools.py         代码辅助：edit_file（唯一匹配块编辑）/ re_replace /
@@ -974,7 +965,7 @@ mini-agent/
 │   ├── sys_tools.py          系统信息
 │   ├── sys_extra_tools.py    系统增强
 │   └── sys_monitor.py        系统监控：CPU / 内存 / 磁盘 / 网络 / 开机时长 / 端口占用
-├── plugins_user/             你的插件（含示例 text_tools.py 与开发指南）
+├── user_tools/             你的工具（含示例 text_tools.py 与开发指南）
 ├── skills/                   自带技能（8 个，清单见「加一个技能」）
 ├── skills_user/              你的技能（含约定说明，一个目录 + SKILL.md）
 ├── mcp/
@@ -996,11 +987,11 @@ mini-agent/
 ## 几个设计决定，以及为什么
 
 **1. 为什么工具要统一成 `Tool` 对象？**
-因为一旦「内置 / 插件 / MCP」在核心循环里长得一样，加通道就不需要改循环。
+因为一旦「内置工具 / 用户工具 / 连接（MCP）」在核心循环里长得一样，加通道就不需要改循环。
 `agent.py` 从头到尾没出现过 `isinstance` 或来源判断。
 
 **2. 为什么把沙箱独立成模块？**
-工具会被不断扩展，但边界必须只有一处定义。沙箱提供两个通道，插件作者按语义二选一：
+工具会被不断扩展，但边界必须只有一处定义。沙箱提供两个通道，工具作者按语义二选一：
 `from core import safe_path, read_path`
 
 - `safe_path(p)` —— **写通道**（写 / 删 / 移动 / 编辑 / 解压落地点）：目标必须在工作区内，
@@ -1023,8 +1014,8 @@ mini-agent/
 所以「区外硬禁写入」的可靠底座仍是文件系统层 —— 工具通道、prelude、命令检测是纵深防御，
 不是绝对边界。读取三档同理：`open` 只降低读门槛，写门槛永远不变。
 
-**3. 为什么坏插件不中断启动？**
-加载报告会把失败记成 `{模块: 错误}`，其它插件照常加载。可扩展系统的头号杀手是
+**3. 为什么坏工具不中断启动？**
+加载报告会把失败记成 `{模块: 错误}`，其它工具照常加载。可扩展系统的头号杀手是
 "加了个坏东西，整个程序起不来"，而不是"某个工具不好用"。
 
 **4. 为什么异常要转成文本？**
@@ -1044,7 +1035,7 @@ ask 每个危险工具都问；auto 把判断权部分交给模型 —— 系统
 这是个真实的坑（开发时就踩了）：`ToolRegistry` 定义了 `__len__`，
 **空注册表是 falsy**，这行代码会把空注册表静默换成全局注册表，
 表现为"工具注册成功但注册错了地方"。正确写法是 `registry if registry is not None else REGISTRY`。
-`tests/test_plugins.py` 里有对应的回归用例。
+`tests/test_tools.py` 里有对应的回归用例。
 
 **7. 为什么判断"是不是流"用的是 `__next__` 而不是 `__iter__`？**
 `openai` 的 `ChatCompletion` 是 pydantic 模型，它**也**实现了 `__iter__`。
@@ -1053,8 +1044,8 @@ ask 每个危险工具都问；auto 把判断权部分交给模型 —— 系统
 （这类"能跑但判断依据不牢"的写法，只有在换模型/换服务端时才炸。）
 
 **8. 流式为什么要问 UI "你刚才真的显示了吗"？**
-因为"显示过了"这个事实只有 UI 知道。如果 UI 被 `/verbose off` 关掉、
-流式内容一个字都没打，Agent 却仍然告诉控制台"已经打过了"，
+因为"显示过了"这个事实只有 UI 知道。如果 UI 没有真正渲染、
+流式内容一个字都没打，Agent 却仍然告诉前端"已经打过了"，
 最终回答就会**凭空消失**（两边都以为对方打了）。
 所以 `ui.llm_delta()` 返回布尔值，Agent 据此设置 `last_answer_streamed`。
 
@@ -1064,7 +1055,7 @@ ask 每个危险工具都问；auto 把判断权部分交给模型 —— 系统
 UI 也不被迫为并发加锁（`ui.py` 里仍备了一把可重入锁，作为纵深防御）。
 
 **10. 为什么取消令牌是模块级变量而不是线程局部？**
-一次只有一个 `Agent.run()` 在跑（REPL 是串行对话模型），
+一次只有一个 `Agent.run()` 在跑（同一会话串行执行），
 但**工具运行在工作线程里** —— 线程局部反而会让它们读不到令牌。
 模块级 + 进出配对恢复（`set_current_token` 返回旧值）最简单也最正确。
 

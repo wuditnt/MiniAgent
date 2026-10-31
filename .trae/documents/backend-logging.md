@@ -2,14 +2,14 @@
 
 ## 1. 目标
 
-给后端补一套**本地文件日志**：关键路径（启动、HTTP 接口、对话轮次、LLM 调用、工具执行、插件/MCP、记忆提炼、异常）按类别分别落到 `logs/` 下的文件中，便于排障。
+给后端补一套**本地文件日志**：关键路径（启动、HTTP 接口、对话轮次、LLM 调用、工具执行、工具/MCP、记忆提炼、异常）按类别分别落到 `logs/` 下的文件中，便于排障。
 
 约束与已确认的选择：
 - 只用 Python 标准库 `logging`，不新增依赖。
 - 文件按类别划分：`app.log` / `llm.log` / `tool.log` / `error.log`。
 - **不记录 LLM 请求/响应正文**，只记模型、耗时、token 用量、消息条数、字符数等摘要。
 - 日志开关、级别、保留天数放在「设置 → 通用配置」，持久化到 `web_data/settings.json`，改动即时生效。
-- 控制台现有 `print()` 输出保持不变（日志只落文件，避免双份刷屏）。
+- UI 现有输出保持不变（日志只落文件，避免双份刷屏）。
 
 ## 2. 现状分析
 
@@ -22,7 +22,7 @@
   - [`agent.py#L725-L825`](file:///d:/codeworks/mini-agent/src/core/agent.py#L725-L825) `_run_loop()` 每轮 turn、流式空回退、`llm_done` 事件。
   - [`agent.py#L1112-L1130`](file:///d:/codeworks/mini-agent/src/core/agent.py#L1112-L1130) `_call_tool()` / `_invoke()` 已统计工具耗时。
   - [`registry.py#L171-L193`](file:///d:/codeworks/mini-agent/src/core/registry.py#L171-L193) `ToolRegistry.call()` 把所有工具异常收敛成 `[error]` 文本，是工具错误日志的唯一出口。
-  - [`loader.py#L119-L183`](file:///d:/codeworks/mini-agent/src/core/loader.py#L119-L183) 插件加载失败已有完整堆栈 `_last_traceback`。
+  - [`loader.py#L119-L183`](file:///d:/codeworks/mini-agent/src/core/loader.py#L119-L183) 工具加载失败已有完整堆栈 `_last_traceback`。
   - [`mcp.py#L409-L410`](file:///d:/codeworks/mini-agent/src/core/mcp.py#L409-L410) MCP 已有 `stderr_tail()`，启动失败写入 `state.error`。
   - [`settings.py#L24-L77`](file:///d:/codeworks/mini-agent/src/core/settings.py#L24-L77) 配置体系（DEFAULTS / RANGES / INT_KEYS / BOOL_KEYS / ENUM_KEYS）可直接扩展。
   - [`webui.py#L1300-L1318`](file:///d:/codeworks/mini-agent/src/core/webui.py#L1300-L1318) 设置保存后调用 `settings.apply_to_runtime()`，可在此触发日志重配置。
@@ -77,9 +77,8 @@ def get_logger(category: str): ...    # "app" | "llm" | "tool" → mini-agent.<c
 ### 3.3 `main.py`
 
 - `main()` 中 `settings.apply_to_runtime()` 之后立即 `logging_setup.init()`（幂等，reconfigure 已完成实际配置）。
-- 启动时写 `app` INFO：`启动 mode=web/console/prompt workspace=... model=... host=... port=...`。
+- 启动时写 `app` INFO：`启动 workspace=... model=... host=... port=...`。
 - `_run_web()`：`OSError` 分支用 `logger.exception` 记录端口占用/绑定失败（保留现有 print）。
-- `_run_prompt_once()`：结束时记录 usage 摘要。
 
 ### 3.4 `webui.py`
 
@@ -117,7 +116,7 @@ def get_logger(category: str): ...    # "app" | "llm" | "tool" → mini-agent.<c
 
 ### 3.7 `loader.py` / `mcp.py`
 
-- `PluginLoader.load_one()` 失败：ERROR + `last_traceback()` 全文。
+- `ToolLoader.load_one()` 失败：ERROR + `last_traceback()` 全文。
 - `MCPManager.start()` 及各 server 启动失败：ERROR + `state.error` + `stderr_tail()`。
 
 ### 3.8 前端设置页
@@ -149,7 +148,7 @@ def get_logger(category: str): ...    # "app" | "llm" | "tool" → mini-agent.<c
 
 ## 4. 决策与假设
 
-- **不接入控制台 handler**：现有 `print()`/UI 已经承担终端展示，日志只写文件，避免重复。
+- **不接入终端 handler**：UI 已经承担展示，日志只写文件，避免重复。
 - **单进程假设**：当前是单进程 `ThreadingHTTPServer`；多线程写入由 `logging` 自身锁保证安全。未来多进程再考虑 `QueueHandler`。
 - **保留策略按天**：`TimedRotatingFileHandler` 每天切分，`backupCount=log_retention_days`；不按大小切分（项目日志量小）。
 - **不记录 LLM 正文**：只记摘要；如后续需要复盘，再单独加 DEBUG 开关（本次不做）。
@@ -170,9 +169,9 @@ def get_logger(category: str): ...    # "app" | "llm" | "tool" → mini-agent.<c
 - 单元测试：`.venv\Scripts\python.exe tests\run_tests.py`（新增日志套件 + 全量回归）。
 - 前端：`web` 目录 `npm.cmd run build`（含 `tsc`）。
 - 手工冒烟：
-  1. `python main.py --web --host 0.0.0.0 --port 8000`
+  1. `python src/core/main.py --host 0.0.0.0 --port 8000`
   2. 发一条对话 → 检查 `logs/app.log` / `llm.log` / `tool.log` 生成且有对应记录。
   3. 触发一次工具报错（如调用不存在文件）→ `tool.log` WARNING + `error.log`。
   4. 设置页改级别为 DEBUG → 保存后立即生效（访问日志出现）；改回 INFO → 不再刷。
   5. 设置 `log_enabled=false` → 保存后不再写新文件（已有文件保留）。
-- 回归点：控制台输出与 Web UI 行为不变；测试环境不产生 `logs/` 污染（测试用临时目录）。
+- 回归点：UI 输出与 Web UI 行为不变；测试环境不产生 `logs/` 污染（测试用临时目录）。

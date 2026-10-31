@@ -13,7 +13,7 @@ import zipfile
 
 from core import is_memory_path, read_path, safe_path, tool, workspace
 
-PLUGIN_INFO = {"name": "压缩归档", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "压缩归档", "version": "1.0", "author": "mini-agent"}
 
 
 def _detect_kind(path: str) -> str:

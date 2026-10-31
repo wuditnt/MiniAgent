@@ -16,7 +16,7 @@ import re
 
 from core import decode_bytes, is_memory_path, looks_binary, read_bytes, read_path, safe_path, tool, workspace
 
-PLUGIN_INFO = {"name": "代码辅助", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "代码辅助", "version": "1.0", "author": "mini-agent"}
 
 
 @tool(

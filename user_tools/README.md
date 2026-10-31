@@ -1,21 +1,21 @@
-# plugins_user —— 你自己的工具放这里
+# user_tools —— 你自己的工具放这里
 
 ## 三条约定
 
 1. 文件名**不要**以下划线开头（下划线开头的会被加载器忽略）
 2. 用 `from core import tool` 装饰你的函数
-3. 改完不用重启，控制台里敲 `/reload` 即可生效
+3. 改完重启后端（`python -m core`）生效，不需要改任何配置文件
 
 > **为什么 `from core import tool` 能直接写？**
-> `core` 是 `src/mini_agent/core/` 这个包。加载器在导入插件前会把
-> `src/mini_agent/` 放上 `sys.path`（见 `loader.PluginLoader._ensure_on_path`
-> 与 `src/mini_agent/_paths.py`），所以插件里不需要写
-> `from mini_agent.core import tool` 这种长前缀。
-> 两种写法都支持，短的这种是给插件作者留的便利。
+> `core` 是 `src/core/` 这个包。加载器在导入工具前会把 `src/core/` 与
+> `src/` 放上 `sys.path`（见 `loader.ToolLoader._ensure_on_path` 与
+> `src/core/_paths.py`），所以工具里不需要写 `from core.tool import ...`
+> 这种长前缀。
+> 两种写法都支持，短的这种是给工具作者留的便利。
 
 ## 最小示例：写个普通函数就够了
 
-新建 `plugins_user/my_tools.py`：
+新建 `user_tools/my_tools.py`：
 
 ```python
 from core import tool, safe_path
@@ -32,7 +32,7 @@ def count_words(path: str, top: int = 10) -> str:
     return f"共 {len(words)} 个词"
 ```
 
-保存后在控制台敲 `/reload`，然后 `/tools count_words` 就能看到它。
+保存后重启后端，在 Web UI 的「工具管理」里就能看到它。
 
 **你没有写一行 JSON** —— 名字取自函数名，描述取自 docstring 首行，
 参数类型从类型注解推导，`path` 自动成为必填、`top` 自动带上默认值，
@@ -49,8 +49,8 @@ def count_words(path: str, top: int = 10) -> str:
         "where": {"type": "string", "description": "SQL WHERE 片段"},
     },
     required=["table"],
-    group="数据库",                      # 控制台里的分组
-    dangerous=True,                     # 标记为危险 → /approve on 时需人工确认
+    group="数据库",                      # Web UI 里的分组
+    dangerous=True,                     # 标记为危险 → 「按需询问」模式下需人工确认
     exclusive=True,                     # 独占：它一出现，本轮所有工具都退回串行
     tags=("db", "write"),
 )
@@ -88,21 +88,21 @@ Args:                     |  :param path: 文件路径
 - **失败用文本表达，不要抛异常**。写 `return "[error] 文件不存在：xxx"`，
   循环会把这段文本交给模型，它自己会换策略；抛异常则会中断当前轮次。
 - **碰文件系统必须过 `safe_path()`**。这是工作区沙箱的唯一入口，别绕过它。
-- **危险操作用 `dangerous=True` 标注**。这样在 `/approve on` 模式下会先问你。
+- **危险操作用 `dangerous=True` 标注**。这样在「按需询问」模式下会先问你。
 - **线程安全**：同一轮的多个工具默认**并行**执行，所以你的工具不能依赖
   "上一个工具刚改过的模块级全局变量"。要么用 `exclusive=True` 声明串行，
   要么把状态放在参数里显式传递。返回值、日志、临时文件都要考虑并发。
 
-## 子目录形式的插件
+## 子目录形式的工具
 
 功能多了可以做成包：
 
 ```
-plugins_user/
+user_tools/
   my_tools/
     __init__.py      <- 必须存在
     fs.py
     db.py
 ```
 
-加载器会自动把它当成 `plugins_user.my_tools` 加载。
+加载器会自动把它当成 `user_tools.my_tools` 加载。

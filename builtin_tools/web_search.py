@@ -23,7 +23,7 @@ import urllib.request
 
 from core import clip, tool
 
-PLUGIN_INFO = {"name": "联网搜索", "version": "1.1", "author": "mini-agent"}
+TOOL_INFO = {"name": "联网搜索", "version": "1.1", "author": "mini-agent"}
 
 MAX_BYTES = 1024 * 1024          # 单次响应最多读 1MB
 SNIPPET_LEN = 200                # 每条摘要截断长度

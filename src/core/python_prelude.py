@@ -2,7 +2,7 @@
 run_python 的写护栏（prelude）。
 
 背景：
-    run_python 是在子进程里跑用户/模型给的任意 Python，插件层的 safe_path()
+    run_python 是在子进程里跑用户/模型给的任意 Python，工具层的 safe_path()
     管不到它 —— 脚本里一句 open(r"C:\\...", "w") 就能绕过工作区沙箱。
     因此每次执行前，在用户代码前面拼一段 prelude：它在子进程内 monkey-patch
     open / os / shutil / pathlib / sqlite3 的写入口，统一用内联的工作区常量

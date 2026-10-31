@@ -8,8 +8,8 @@ OCR 工具组：对图片或扫描件 PDF 做文字识别。
 
 设计取舍：
   · OCR 引擎第一次调用要初始化（几秒），用模块级缓存 + 锁，避免重复加载。
-  · 两个库都懒加载：缺库只让对应工具返回提示，不影响插件整体加载。
-  · 读走 read_path，与其他插件一样受路径沙箱约束；本组只读不写。
+  · 两个库都懒加载：缺库只让对应工具返回提示，不影响工具整体加载。
+  · 读走 read_path，与其他工具一样受路径沙箱约束；本组只读不写。
   · 扫描件识别慢且结果噪声大，页数/字符数都带上限。
 """
 
@@ -20,7 +20,7 @@ import threading
 
 from core import clip, read_path, tool
 
-PLUGIN_INFO = {
+TOOL_INFO = {
     "name": "OCR 文字识别",
     "version": "1.0",
     "author": "mini-agent",

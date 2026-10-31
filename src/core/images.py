@@ -3,7 +3,7 @@
 
 为什么需要它？
     工具的返回值永远是字符串（「工具与模型通过文本对话」是本项目的一条约定，
-    见 plugins_user/README.md），但图片必须以 content 数组的 image_url 分片
+    见 user_tools/README.md），但图片必须以 content 数组的 image_url 分片
     进消息才能被视觉模型看到。所以工具的返回值只写一句「附了什么」，
     真正的图片数据走这条旁路：
 

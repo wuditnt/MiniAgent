@@ -1,5 +1,5 @@
 """
-示例用户插件：文本统计。
+示例用户工具：文本统计。
 
 这个文件的重点是演示「零样板」——
 函数上只有类型注解和一个 docstring，schema 会被自动推导出来：
@@ -20,11 +20,11 @@ from collections import Counter
 
 from core import read_path, tool
 
-PLUGIN_INFO = {
+TOOL_INFO = {
     "name": "文本统计",
     "version": "1.0",
     "author": "示例",
-    "desc": "演示自动 Schema 推导的最小插件",
+    "desc": "演示自动 Schema 推导的最小工具",
 }
 
 

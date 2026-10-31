@@ -20,7 +20,7 @@ import time
 
 from core import tool
 
-PLUGIN_INFO = {"name": "系统监控", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "系统监控", "version": "1.0", "author": "mini-agent"}
 
 _IS_WIN = sys.platform == "win32"
 

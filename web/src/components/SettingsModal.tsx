@@ -38,7 +38,7 @@ interface Props {
   workspaceId: string;
 }
 
-export type SettingsTab = "model" | "general" | "search" | "memory" | "plugins";
+export type SettingsTab = "model" | "general" | "search" | "memory" | "tools";
 
 /** 每个字段的界面元信息：标签、说明、区间、步进 */
 const FIELDS: {
@@ -133,7 +133,7 @@ const NAV: {
   { key: "general", label: "通用配置", icon: <SettingOutlined />, group: "设置" },
   { key: "search", label: "联网搜索", icon: <GlobalOutlined />, group: "设置" },
   { key: "memory", label: "记忆", icon: <BulbOutlined />, group: "数据与扩展" },
-  { key: "plugins", label: "插件管理", icon: <AppstoreOutlined />, group: "数据与扩展" },
+  { key: "tools", label: "工具管理", icon: <AppstoreOutlined />, group: "数据与扩展" },
 ];
 
 /** 联网搜索后端选项：与聊天模型解耦，任何厂商的模型都能用 */
@@ -488,23 +488,23 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
             </Spin>
           )}
           {active === "memory" && <MemoryPanel workspaceId={workspaceId} />}
-          {active === "plugins" && (
+          {active === "tools" && (
             <Spin spinning={toolsLoading}>
-              <div className="plugins-list">
+              <div className="tools-list">
                 {tools.map((t) => (
-                  <div className="plugin-item" key={t.name}>
-                    <div className="plugin-header">
-                      <span className="plugin-name">{t.name}</span>
+                  <div className="tool-item" key={t.name}>
+                    <div className="tool-header">
+                      <span className="tool-name">{t.name}</span>
                       <Tag color={t.source === "core" ? "blue" : t.source === "builtin" ? "green" : t.source === "user" ? "orange" : "purple"}>
                         {t.source}
                       </Tag>
                       {t.dangerous && <Tag color="red">危险</Tag>}
                       {t.exclusive && <Tag color="cyan">独占</Tag>}
                     </div>
-                    <div className="plugin-desc">{t.description}</div>
-                    <div className="plugin-meta">
-                      <span className="plugin-sig">{t.signature}</span>
-                      <span className="plugin-group">分组：{t.group}</span>
+                    <div className="tool-desc">{t.description}</div>
+                    <div className="tool-meta">
+                      <span className="tool-sig">{t.signature}</span>
+                      <span className="tool-group">分组：{t.group}</span>
                     </div>
                   </div>
                 ))}

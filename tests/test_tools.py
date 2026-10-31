@@ -1,10 +1,10 @@
 """
-插件层与 MCP 层的测试。不需要 API Key，不花任何费用。
+工具层与 MCP 层的测试。不需要 API Key，不花任何费用。
 
 覆盖四类容易出错的地方：
   1. Schema 自动推导 —— 类型映射、必填判定、docstring 抽取、Optional 处理
   2. 注册表语义     —— 冲突检测、按模块热删除、分组/来源检索
-  3. 插件加载器     —— 发现、热重载、坏插件隔离
+  3. 工具加载器     —— 发现、热重载、坏工具隔离
   4. MCP 通道       —— 命名合规、真实握手、调用、错误上报
 """
 
@@ -20,7 +20,7 @@ from bootstrap import PACKAGE_ROOT as HERE
 
 from core.registry import ToolRegistry, tool  # noqa: E402
 from core.schema import schema_from_callable  # noqa: E402
-from loader import PluginLoader  # noqa: E402
+from loader import ToolLoader  # noqa: E402
 
 
 # ============================================================ 1. Schema 推导
@@ -161,9 +161,9 @@ def test_call_converts_errors():
     print("✓ 注册表：工具抛异常 / 参数不匹配 都被转成文本，绝不冒泡")
 
 
-# ============================================================ 3. 插件加载器
+# ============================================================ 3. 工具加载器
 
-PROBE = "_probe_plugins"
+PROBE = "_probe_tools"
 
 
 def _write(path: str, content: str) -> None:
@@ -188,7 +188,7 @@ def test_loader_discover_reload_and_isolation():
 
     try:
         reg = ToolRegistry()
-        ldr = PluginLoader(HERE, dirs=[PROBE], registry=reg)
+        ldr = ToolLoader(HERE, dirs=[PROBE], registry=reg)
 
         found = ldr.discover()
         assert found == [f"{PROBE}.broken_mod", f"{PROBE}.ok_mod"], found
@@ -197,7 +197,7 @@ def test_loader_discover_reload_and_isolation():
         assert f"{PROBE}.ok_mod" in rep.loaded, rep.loaded
         assert f"{PROBE}.broken_mod" in rep.failed, rep.failed
         assert reg.get("probe_one") is not None
-        print(f"✓ 加载器：发现 {len(found)} 个模块；坏插件被隔离（{rep.failed[f'{PROBE}.broken_mod'][:30]}…）")
+        print(f"✓ 加载器：发现 {len(found)} 个模块；坏工具被隔离（{rep.failed[f'{PROBE}.broken_mod'][:30]}…）")
 
         # 热重载：往同一个文件里加一个工具，reload 后应该变成 2 个
         _write(os.path.join(base, "ok_mod.py"), (
@@ -216,12 +216,12 @@ def test_loader_discover_reload_and_isolation():
         assert reg.get("probe_one").description == "探针工具一（改过描述）。", "描述应更新"
         print("✓ 加载器：热重载生效（工具数 1→2，旧工具不丢，描述已更新）")
 
-        # 删除插件文件后 reload，工具应被摘掉
+        # 删除工具文件后 reload，工具应被摘掉
         os.remove(os.path.join(base, "ok_mod.py"))
         rep3 = ldr.reload()
         assert f"{PROBE}.ok_mod" in rep3.removed, rep3.removed
         assert reg.get("probe_one") is None and reg.get("probe_two") is None
-        print("✓ 加载器：插件文件被删后重载，其工具被正确摘除")
+        print("✓ 加载器：工具文件被删后重载，其工具被正确摘除")
 
         # 把同名文件加回来：必须真的重新导入（sys.modules 里不能留着旧模块对象）
         _write(os.path.join(base, "ok_mod.py"), (
@@ -233,14 +233,14 @@ def test_loader_discover_reload_and_isolation():
         rep4 = ldr.reload(f"{PROBE}.ok_mod")
         assert f"{PROBE}.ok_mod" in rep4.loaded, rep4
         assert reg.get("probe_three") is not None, "删除后重新加回的文件应重新导入并注册"
-        print("✓ 加载器：插件删除后再加回，能重新导入（无残留 sys.modules 缓存）")
+        print("✓ 加载器：工具删除后再加回，能重新导入（无残留 sys.modules 缓存）")
 
         # 重载失败（语法错）不能把已有工具清空
         _write(os.path.join(base, "ok_mod.py"), "def broken(:\n")
         rep5 = ldr.reload(f"{PROBE}.ok_mod")
         assert f"{PROBE}.ok_mod" in rep5.failed, rep5
         assert reg.get("probe_three") is not None, "重载失败时旧工具必须保留"
-        print("✓ 加载器：重载失败时旧工具被恢复（一次失败不会清空插件能力）")
+        print("✓ 加载器：重载失败时旧工具被恢复（一次失败不会清空工具能力）")
     finally:
         shutil.rmtree(base, ignore_errors=True)
 

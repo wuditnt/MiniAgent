@@ -480,7 +480,7 @@ export async function fetchSettings(): Promise<SettingsInfo> {
   return res.json();
 }
 
-/** 获取全部工具列表（插件管理界面用） */
+/** 获取全部工具列表（工具管理界面用） */
 export async function fetchTools(): Promise<{ tools: ToolInfo[]; groups: Record<string, ToolInfo[]>; sources: Record<string, number> }> {
   const res = await req("/api/tools");
   if (!res.ok) throw new Error(await readError(res));

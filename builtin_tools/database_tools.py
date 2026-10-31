@@ -15,7 +15,7 @@ import sqlite3
 
 from core import SandboxError, decode_bytes, read_bytes, read_path, safe_path, tool
 
-PLUGIN_INFO = {"name": "数据库", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "数据库", "version": "1.0", "author": "mini-agent"}
 
 
 def _format_table(cursor: sqlite3.Cursor, rows: list, limit: int) -> str:

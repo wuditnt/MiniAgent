@@ -1,11 +1,11 @@
 """
-插件加载器：发现 → 导入 → 注册 → 热重载。
+工具加载器：发现 → 导入 → 注册 → 热重载。
 
 设计原则：
-  1. 约定优于配置 —— 只要是 plugins/ 或 plugins_user/ 下的 .py（或含 __init__.py 的子目录），
+  1. 约定优于配置 —— 只要是 builtin_tools/ 或 user_tools/ 下的 .py（或含 __init__.py 的子目录），
      就会被自动发现，无需注册表文件、无需改核心代码。
-  2. 故障隔离 —— 某个插件导入失败只记录在报告里，不影响其它插件和主程序启动。
-  3. 可热重载 —— 改完插件不用重启，在控制台敲 /reload 即可（开发体验的决定性差异）。
+  2. 故障隔离 —— 某个工具导入失败只记录在报告里，不影响其它工具和主程序启动。
+  3. 可热重载 —— 技能在 Web UI 里编辑/启停会立即重新扫描，无需重启后端。
 """
 
 from __future__ import annotations
@@ -20,24 +20,24 @@ from core import envs
 from core.logging_setup import get_logger
 from core.registry import REGISTRY, ToolRegistry, use_registry
 
-DEFAULT_PLUGIN_DIRS = ("plugins", "plugins_user")
+DEFAULT_TOOL_DIRS = ("builtin_tools", "user_tools")
 
 _log = get_logger("app")
 
 
 def default_dirs() -> list[str]:
-    """插件目录。可用环境变量 AGENT_PLUGIN_DIRS 覆盖（逗号或分号分隔）。
+    """工具目录。可用环境变量 AGENT_TOOL_DIRS 覆盖（逗号或分号分隔）。
 
     注意：当自定义目录时会**替换**默认目录，而不是追加 —— 这样行为可预测。
-    想追加就写全：AGENT_PLUGIN_DIRS=plugins,plugins_user,my_plugins
+    想追加就写全：AGENT_TOOL_DIRS=builtin_tools,user_tools,extra_tools
 
-    设 AGENT_NO_PLUGINS=1 可完全关闭插件加载（调试核心循环时有用）。
+    设 AGENT_NO_TOOLS=1 可完全关闭工具加载（调试核心循环时有用）。
     """
-    if envs.get_bool("MINI_AGENT_NO_PLUGINS", False, alias="AGENT_NO_PLUGINS"):
+    if envs.get_bool("MINI_AGENT_NO_TOOLS", False, alias="AGENT_NO_TOOLS"):
         return []
-    raw = envs.get_str("MINI_AGENT_PLUGIN_DIRS", alias="AGENT_PLUGIN_DIRS")
+    raw = envs.get_str("MINI_AGENT_TOOL_DIRS", alias="AGENT_TOOL_DIRS")
     if not raw:
-        return list(DEFAULT_PLUGIN_DIRS)
+        return list(DEFAULT_TOOL_DIRS)
     return [d.strip() for d in raw.replace(";", ",").split(",") if d.strip()]
 
 
@@ -67,8 +67,8 @@ class LoadReport:
         return " | ".join(bits)
 
 
-class PluginLoader:
-    """管理若干个插件目录。"""
+class ToolLoader:
+    """管理若干个工具目录。"""
 
     def __init__(
         self,
@@ -98,7 +98,7 @@ class PluginLoader:
     # ------------------------------------------------------------ 发现
 
     def discover(self) -> list[str]:
-        """扫描插件目录，返回可导入的模块名，如 plugins.fs_tools。"""
+        """扫描工具目录，返回可导入的模块名，如 builtin_tools.fs_tools。"""
         self._ensure_on_path()
         found: list[str] = []
         for d in self.dirs:
@@ -138,11 +138,11 @@ class PluginLoader:
         importlib.invalidate_caches()
         # 重载前先把旧工具摘下来（否则同名注册会撞车），但留一份快照：
         # 重载失败（语法错 / 导入期异常）时要把它们原样装回去 ——
-        # 一次失败的 /reload 不该把插件的能力整片清空。
+        # 一次失败的重载不该把工具的能力整片清空。
         snapshot = [t for t in self.registry.all() if t.module == module_name]
         try:
             # 关键：在导入/重载期间把默认注册表切到 self.registry，
-            # 插件里的 `@tool` 才会注册进我们指定的注册表。
+            # 工具里的 `@tool` 才会注册进我们指定的注册表。
             with use_registry(self.registry):
                 if module_name in sys.modules and module_name in self._loaded:
                     self.registry.remove_module(module_name)
@@ -153,12 +153,12 @@ class PluginLoader:
                     report.loaded.append(module_name)
             self._loaded[module_name] = module
             self._record(module_name, report)
-        except Exception as e:  # noqa: BLE001 —— 插件炸了不能带走主程序
+        except Exception as e:  # noqa: BLE001 —— 工具炸了不能带走主程序
             self._restore(module_name, snapshot)
             tb = traceback.format_exc().strip().splitlines()
             report.failed[module_name] = f"{type(e).__name__}: {e}"
             self._last_traceback = "\n".join(tb)
-            _log.error("plugin.load_failed module=%s\n%s", module_name, self._last_traceback)
+            _log.error("tool.load_failed module=%s\n%s", module_name, self._last_traceback)
 
     def _restore(self, module_name: str, tools: list) -> None:
         """把重载前的旧工具装回去（只在本模块已被注册表接纳时生效）。"""
@@ -170,16 +170,16 @@ class PluginLoader:
             except ValueError:
                 # 重载过程中已经注册出同名工具（半成功）→ 以新的为准
                 continue
-        _log.warning("plugin.reload_restored module=%s tools=%d", module_name, len(tools))
+        _log.warning("tool.reload_restored module=%s tools=%d", module_name, len(tools))
 
     # ------------------------------------------------------------ 热重载
 
     def reload(self, module_name: str | None = None) -> LoadReport:
-        """重载指定插件；不传则重载全部，并处理新增/删除的插件文件。"""
+        """重载指定工具；不传则重载全部，并处理新增/删除的工具文件。"""
         report = LoadReport()
         on_disk = set(self.discover())
 
-        # 1) 磁盘上已经被删掉的插件 —— 把它的工具摘掉
+        # 1) 磁盘上已经被删掉的工具 —— 把它的工具摘掉
         for gone in [m for m in self._loaded if m not in on_disk]:
             self.registry.remove_module(gone)
             self._loaded.pop(gone, None)
@@ -191,7 +191,7 @@ class PluginLoader:
         targets = [module_name] if module_name else sorted(on_disk)
         for m in targets:
             if m not in on_disk:
-                report.failed[m] = "找不到该插件模块（检查文件名拼写）"
+                report.failed[m] = "找不到该工具模块（检查文件名拼写）"
                 continue
             self._import(m, report)
 
@@ -204,12 +204,12 @@ class PluginLoader:
         return sorted(self._loaded)
 
     def last_traceback(self) -> str:
-        """最近一次插件导入失败的完整堆栈；没有失败过则为空串。"""
+        """最近一次工具导入失败的完整堆栈；没有失败过则为空串。"""
         return self._last_traceback
 
     def module_info(self, module_name: str) -> dict:
         mod = self._loaded.get(module_name)
-        info = getattr(mod, "PLUGIN_INFO", None) if mod else None
+        info = getattr(mod, "TOOL_INFO", None) if mod else None
         return {
             "module": module_name,
             "file": getattr(mod, "__file__", ""),
@@ -219,6 +219,6 @@ class PluginLoader:
         }
 
 
-def load_plugins(project_root: str, dirs: list[str] | None = None) -> LoadReport:
-    """便捷入口：一次性加载全部插件。"""
-    return PluginLoader(project_root, dirs).load_all()
+def load_tools(project_root: str, dirs: list[str] | None = None) -> LoadReport:
+    """便捷入口：一次性加载全部工具。"""
+    return ToolLoader(project_root, dirs).load_all()

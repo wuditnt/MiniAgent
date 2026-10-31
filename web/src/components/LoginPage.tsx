@@ -44,7 +44,7 @@ export default function LoginPage({ onSuccess }: { onSuccess: (u: User) => void 
       <div className="login-card">
         <div className="login-brand">
           <span className="login-logo">mini-agent</span>
-          <span className="login-sub">本地智能体控制台</span>
+          <span className="login-sub">本地智能体 Web UI</span>
         </div>
 
         <Form layout="vertical" onFinish={submit}>

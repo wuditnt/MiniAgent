@@ -1,7 +1,7 @@
 """
 命令执行工具组。
 
-这两个工具是 dangerous 的 —— 控制台在 `approve` 模式下会在执行前询问用户，
+这两个工具是 dangerous 的 —— Web UI 在「按需询问」档会在执行前询问用户，
 这是比"黑名单"更可靠的一道防线（黑名单只能拦已知模式）。
 
 关于取消：底层用 sandbox.run_process（Popen + 短轮询）而不是 subprocess.run，
@@ -22,7 +22,7 @@ from core import (
 )
 from core.python_prelude import build_prelude
 
-PLUGIN_INFO = {"name": "命令执行", "version": "1.2", "author": "mini-agent"}
+TOOL_INFO = {"name": "命令执行", "version": "1.2", "author": "mini-agent"}
 
 
 @tool(

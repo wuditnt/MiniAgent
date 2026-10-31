@@ -58,13 +58,13 @@ if not exist "%ROOT%\.env" if exist "%ROOT%\.env.example" (
 )
 
 echo ==^> tool-layer self-test (no API key needed)
-"%PY%" "%ROOT%\src\core\main.py" --selftest
+"%PY%" -c "import sys; sys.path.insert(0, r'%ROOT%\src'); import tools; print(tools.load_report().summary())"
 
 echo.
 echo ==^> done. Next steps:
-echo     1) start --web and configure the model in Settings -^> Models (API key stays in local models.json)
+echo     1) start the backend and configure the model in Settings -^> Models (API key stays in local models.json)
 echo     2) dev: startup_dev.bat   prod: startup.bat
-echo     3) or run: .venv\Scripts\python.exe src\core\main.py --web
+echo     3) or run: .venv\Scripts\python.exe src\core\main.py
 goto :eof
 
 :fail_venv

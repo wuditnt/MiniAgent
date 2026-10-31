@@ -15,7 +15,7 @@ import uuid
 
 from core import tool
 
-PLUGIN_INFO = {"name": "随机与标识", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "随机与标识", "version": "1.0", "author": "mini-agent"}
 
 
 @tool(

@@ -59,9 +59,9 @@ if [ ! -f "$ROOT/.env" ] && [ -f "$ROOT/.env.example" ]; then
 fi
 
 echo "==> 工具层自检（不需要 API Key）"
-"$PY" "$ROOT/src/core/main.py" --selftest
+"$PY" -c "import sys; sys.path.insert(0, '$ROOT/src'); import tools; print(tools.load_report().summary())"
 
 echo
 echo "==> 完成。接下来:"
-echo "    1) 启动 --web，在浏览器「设置 → 模型」里配置模型（API Key 存本机 models.json）"
-echo "    2) 启动开发后端: $PY src/core/main.py --web --port 8123 --host 0.0.0.0"
+echo "    1) 启动后端，在浏览器「设置 → 模型」里配置模型（API Key 存本机 models.json）"
+echo "    2) 启动开发后端: $PY src/core/main.py --port 8123 --host 0.0.0.0"

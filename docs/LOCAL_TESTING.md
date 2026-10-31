@@ -18,7 +18,7 @@ Windows 上其实连激活都不用，两个批处理直接双击/运行即可�
 
 ```bat
 scripts\setup_venv.bat        :: 建 .venv、装依赖、跑自检
-scripts\run_tests.bat         :: 跑全部免费用例（7 个套件）
+scripts\run_tests.bat         :: 跑全部免费用例（24 个套件）
 scripts\run_tests.bat --real  :: 额外跑真实 API 用例（消耗 token）
 ```
 
@@ -68,7 +68,7 @@ scripts\setup_venv.bat 3.13
 ```
 
 脚本做四件事：建 `.venv` → 升级 pip → 按 `requirements.txt` 装依赖 → 跑一次
-`main.py --selftest`（不需要 Key）。自检过了才算成功。
+工具加载自检（不需要 Key）。自检过了才算成功。
 
 ### 2.2 手工建（等价，照着敲更放心）
 
@@ -104,11 +104,11 @@ source .venv/Scripts/activate       :: Git Bash
 source .venv/bin/activate           :: macOS / Linux
 ```
 
-激活之后 `python` 就是 `.venv` 里的那个，可以直接 `python -m mini_agent`。
+激活之后 `python` 就是 `.venv` 里的那个，可以直接 `python -m core`。
 **不想激活也能用**：所有脚本内部都会自己找 `.venv`，显式写
-`.venv\Scripts\python.exe -m mini_agent` 一样跑。
+`.venv\Scripts\python.exe -m core` 一样跑。
 
-> 依赖里有两个**可选**项：`rich`（彩色表格）与 `prompt_toolkit`（输入补全）。
+> 依赖里有一个**可选**项：`rich`（彩色表格）。
 > 不装程序照常跑，会自动退回纯文本输出。所以「依赖装不全」不会让测试变红。
 
 ### 2.4 依赖清单
@@ -116,8 +116,8 @@ source .venv/bin/activate           :: macOS / Linux
 | 包 | 用途 | 不装会怎样 |
 |---|---|---|
 | `openai>=1.30.0` | 模型接入 | 跑不了任何真实调用；`tests/test_loop.py` 等假客户端用例仍可跑 |
-| `rich>=13.0` | 控制台彩色输出、表格、markdown 渲染 | 自动退回 `PlainUI`，功能不变、观感朴素 |
-| `prompt_toolkit>=3.0` | `>>>` 提示符的输入补全与历史 | 退回 `input()`，不影响功能 |
+| `rich>=13.0` | 终端彩色输出、表格、markdown 渲染（自检/脚本） | 自动退回 `PlainUI`，功能不变、观感朴素 |
+
 
 ---
 
@@ -127,11 +127,11 @@ source .venv/bin/activate           :: macOS / Linux
 
 ```
 mini-agent/                     ← 项目根：所有相对路径的基准
-├── src/mini_agent/             ← 包本体（源码）
+├── src/core/                   ← 包本体（源码）
 │   ├── _paths.py               ← ROOT 的定义处；路径问题的第一站
-│   ├── agent.py  repl.py  ui.py  loader.py  tools.py  main.py
-│   └── core/                   ← registry / schema / sandbox / cancel / mcp
-├── plugins/  plugins_user/     ← 工具目录（挂项目根，不在包内）
+│   ├── agent.py  ui.py  loader.py  tools.py  main.py
+│   └── registry / schema / sandbox / cancel / mcp 等
+├── builtin_tools/  user_tools/     ← 工具目录（挂项目根，不在包内）
 ├── mcp/                        ← mcp_servers.json + mcp_demo_server.py
 ├── tests/                      ← 测试套件；bootstrap.py 是共用引导
 ├── scripts/                    ← setup_venv / run_tests / make_demo_case
@@ -145,15 +145,15 @@ mini-agent/                     ← 项目根：所有相对路径的基准
 
 - **测试进程的 `cwd` 是项目根，但测试文件在 `tests/`。** 所以测试里引用
   `demo_case/inbox/x.csv` 这类相对路径是对的，而 `import agent` 靠的是
-  `tests/bootstrap.py` 铺的 `sys.path`（把 `src/` 与 `src/mini_agent/` 都加上）。
-- **`plugins/` 在本轮重构后留在项目根，没有进包。** 它们是给你改的，
+  `tests/bootstrap.py` 铺的 `sys.path`（把 `src/` 与 `src/core/` 都加上）。
+- **`builtin_tools/` 在本轮重构后留在项目根，没有进包。** 它们是给你改的，
   放进包里 `pip install` 会把你的改动一起覆盖掉。
 
 ### 3.1 一条命令跑全套
 
 ```bat
-scripts\run_tests.bat                     :: 7 个套件（免费用例）
-scripts\run_tests.bat loop plugins        :: 只跑名字含 loop / plugins 的
+scripts\run_tests.bat                     :: 24 个套件（免费用例）
+scripts\run_tests.bat loop tools         :: 只跑名字含 loop / tools 的套件
 scripts\run_tests.bat --list              :: 列出所有套件
 scripts\run_tests.bat --fail-fast         :: 第一个失败就停
 scripts\run_tests.bat --timeout 600       :: 单套件超时（默认 300s）
@@ -171,23 +171,23 @@ scripts\run_tests.bat --reinstall         :: 先同步依赖再跑
 ```
 解释器：C:\...\mini-agent\.venv\Scripts\python.exe
 工作区：C:\...\mini-agent
-套件数：7（免费用例；加 --real 可包含真实 API 用例）
+套件数：24（免费用例；加 --real 可包含真实 API 用例）
 已跳过：tests/test_real_mcp_cancel.py
-[1/7] tests/test_loop.py  —— 循环层 6 项：假客户端，不碰网络
+[1/24] tests/test_loop.py  —— 循环层 6 项：假客户端，不碰网络
           → PASS（12.4s）
 ...
   ✓ tests/test_loop.py                12.35s
-  ✓ tests/test_plugins.py             20.45s
+  ✓ tests/test_tools.py             20.45s
   ✓ tests/test_stream_parallel.py     10.93s
   ✓ tests/test_cancel.py              13.14s
   ✓ tests/test_mcp_cancel.py          28.03s
   ✓ tests/test_http_e2e.py            27.89s
 
-  6/6 通过 | 累计耗时 112.8s
+  24/24 通过 | 累计耗时约 4 分钟
 全部通过 ✓
 ```
 
-约两分钟。失败时脚本会把**该套件的完整输出**原样贴出来（不用往回翻屏），
+约四分钟（含系统监控套件的等待）。失败时脚本会把**该套件的完整输出**原样贴出来（不用往回翻屏），
 并以退出码 1 结束（方便接 CI）。
 
 ### 3.2 单跑某个套件
@@ -199,9 +199,9 @@ scripts\run_tests.bat --reinstall         :: 先同步依赖再跑
 | 套件 | 覆盖什么 | 耗时 |
 |---|---|---|
 | `tests/test_loop.py` | 循环层 6 项：假客户端，不碰网络 | ~12s |
-| `tests/test_plugins.py` | 插件层 + MCP 层 11 项 | ~20s |
+| `tests/test_tools.py` | 工具层 + MCP 层 12 项 | ~20s |
 | `tests/test_stream_parallel.py` | 流式聚合 + 并行执行 + MCP 并发 19 项 | ~11s |
-| `tests/test_cancel.py` | 取消机制 10 项：令牌 / 杀进程 / 流中断 / 消息补齐 / 原因送达 | ~13s |
+| `tests/test_cancel.py` | 取消机制 11 项：令牌 / 杀进程 / 组隔离 / 流中断 / 消息补齐 / 原因送达 | ~13s |
 | `tests/test_mcp_cancel.py` | MCP 取消通知 8 项：送达 / 停手 / 迟到响应 / 幂等 / 定向 | ~28s |
 | `tests/test_http_e2e.py` | 本地 mock HTTP（支持 SSE）：流式三条降级路径 + 并行收益 | ~28s |
 
@@ -209,10 +209,10 @@ scripts\run_tests.bat --reinstall         :: 先同步依赖再跑
 
 ```bat
 scripts\run_tests.bat --real
-python -m mini_agent "分析 demo_case/inbox 目录，给出可复核的数字"
-python -m mini_agent --no-stream --no-parallel "…"      :: 对照：传统形态
 python tests/test_real_mcp_cancel.py                    :: 真模型 + 真 MCP：取消通知全链路
 ```
+
+界面里的手动验证：启动 Web UI，在输入框发「分析 demo_case/inbox 目录，给出可复核的数字」。
 
 需要先在 Web UI「设置 → 模型」里配置好模型（存 `~/.mini-agent/models.json`）。用 DeepSeek 的话，一次真实用例约几千 token。
 
@@ -276,7 +276,7 @@ def _resolve_command(command: str) -> str:
 .venv\Scripts\activate
 
 :: ② 永远显式用 venv 的解释器
-.venv\Scripts\python.exe -m mini_agent
+.venv\Scripts\python.exe -m core
 ```
 
 `run_tests.py` 已经用 `sys.executable` 拉起所有测试进程，所以这一条不会在测试里翻车。
@@ -299,8 +299,8 @@ Git Bash 下 venv 的解释器在 `.venv/Scripts/python.exe`（不是 `bin/pytho
 `./scripts/run_tests.sh` 会两种布局都试，但你自己写命令时要注意：
 
 ```bash
-.venv/Scripts/python.exe main.py        # Git Bash on Windows
-.venv/bin/python -m mini_agent                # macOS / Linux
+.venv/Scripts/python.exe src/core/main.py       # Git Bash on Windows
+.venv/bin/python -m core                        # macOS / Linux
 ```
 
 ### 5.4 批处理文件必须 CRLF + GBK
@@ -315,18 +315,16 @@ Git Bash 下 venv 的解释器在 `.venv/Scripts/python.exe`（不是 `bin/pytho
 ## 6. 边开发边测
 
 ```bat
-:: 控制台里改完插件立即生效，不用重启
-python -m mini_agent
->>> /reload              :: 全量热重载
->>> /reload text_tools   :: 只重载一个模块
->>> /tools fs            :: 按分组看工具
->>> /mcp                 :: MCP 状态 + 取消通知计数
+:: 改完工具模块后重启后端（Web UI 不提供工具热重载）
+startup_dev.bat
+
+:: 在 Web UI「设置 → 系统配置 → 工具管理」查看已加载工具与来源
 ```
 
-改插件之后最常用的验证组合：
+改工具之后最常用的验证组合：
 
 ```bat
-.venv\Scripts\python.exe tests/test_plugins.py      :: Schema / 注册表 / 加载器
+.venv\Scripts\python.exe tests/test_tools.py      :: Schema / 注册表 / 加载器
 .venv\Scripts\python.exe tests/test_cancel.py       :: 取消后消息序列是否仍合法
 ```
 
@@ -339,7 +337,7 @@ mini-agent/
 ├── scripts\setup_venv.bat / .sh      ← 一键建环境（CRLF+GBK / POSIX）
 ├── scripts\run_tests.bat / .sh       ← 一键跑测试（薄封装，真正的逻辑在 run_tests.py）
 ├── run_tests.py              ← 测试编排：筛选 / 超时 / 汇总 / 环境准备
-├── requirements.txt          ← 依赖（openai 必装，rich / prompt_toolkit 可选）
+├── requirements.txt          ← 依赖（openai 必装，rich 可选）
 ├── .env.example              ← 复制为 .env 填 Key
 ├── test_*.py
 ├── demo_case/                ← 有标准答案的沙箱数据

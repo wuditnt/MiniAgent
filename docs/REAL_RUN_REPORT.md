@@ -1,5 +1,8 @@
 # mini-agent 真实运行报告
 
+> 历史文档：命令行入口与一次性任务模式已移除，正文中的 `python -m mini_agent …`
+> 命令按当时口径保留；现在请用 `python -m core` 启动 Web UI。
+
 > 运行时间：2026-10-14 20:03
 > 模型：DeepSeek `deepseek-chat`（OpenAI 兼容接口）
 > 脚本：`main.py` · 任务书：`demo_case/TASK.md`

@@ -2,15 +2,15 @@
 """
 办公文档工具组：Word(.docx) / Excel(.xlsx) / PDF。
 
-和邻居插件的分工：
+和邻居工具的分工：
   · data_tools   管「纯文本里的结构化内容」（CSV / JSON / JSONL）
   · office_tools 管「二进制文档容器」（docx / xlsx / pdf）
   · archive_tools 管压缩包本身，不解析内部内容
 
 设计取舍：
   · 第三方库一律**懒加载**（在函数体内 import）：没装时只让这一个工具
-    返回可读提示，而不是让整个插件加载失败。装了哪个库就多哪项能力。
-  · 读走 read_path、写走 safe_path，和其他插件一样受路径沙箱约束。
+    返回可读提示，而不是让整个工具加载失败。装了哪个库就多哪项能力。
+  · 读走 read_path、写走 safe_path，和其他工具一样受路径沙箱约束。
   · 输出统一 clip 截断，避免把上下文刷爆（表格与页数都带上限参数）。
 """
 
@@ -27,7 +27,7 @@ from core import (
     workspace,
 )
 
-PLUGIN_INFO = {
+TOOL_INFO = {
     "name": "办公文档",
     "version": "1.1",
     "author": "mini-agent",

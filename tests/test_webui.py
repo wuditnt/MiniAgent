@@ -188,14 +188,14 @@ def collect(payload: dict) -> list[dict]:
 
 def scenario_registry_matrix() -> None:
     """① 每会话工具表矩阵：不改 agent.py 就能实现双模式的根基。"""
-    import tools  # noqa: F401  —— 确保插件已加载（测试进程可能尚未初始化）
+    import tools  # noqa: F401  —— 确保工具已加载（测试进程可能尚未初始化）
     from core.registry import REGISTRY
     from core.webui import _CHAT_MODE_TOOLS, _session_registry
 
     all_names = {t.name for t in REGISTRY.all()}
     missing = {"web_search", "fetch_url"} - all_names
     assert not missing, (
-        f"插件未加载：缺 {missing}；REGISTRY 共 {len(all_names)} 个：{sorted(all_names)[:12]}"
+        f"工具未加载：缺 {missing}；REGISTRY 共 {len(all_names)} 个：{sorted(all_names)[:12]}"
     )
     whitelist = set(_CHAT_MODE_TOOLS)
     assert whitelist <= all_names, f"快速对话白名单里有不存在的工具：{sorted(whitelist - all_names)}"
@@ -576,7 +576,7 @@ def scenario_stop() -> None:
     assert "cancelled" in types, f"应有 cancelled 终态：{types}"
     assert "done" not in types, "停止后不应再有 done"
     # 注意：令牌会直接杀掉注册的子进程，工具结果可能是 [exit=1] 而非 [cancelled]
-    # （控制台路径同样如此，属既有取消语义），所以这里不断言 tool_end 的 ok 值。
+    # （串行路径同样如此，属既有取消语义），所以这里不断言 tool_end 的 ok 值。
     ends = [e["type"] for e in events if e["type"] == "tool_end"]
     print(f"  [5] 停止任务通过（cancelled 终态，tool_end×{len(ends)}）")
 

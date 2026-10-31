@@ -16,7 +16,7 @@ import urllib.parse
 
 from core import decode_bytes, read_bytes, read_path, tool
 
-PLUGIN_INFO = {"name": "文本增强", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "文本增强", "version": "1.0", "author": "mini-agent"}
 
 
 @tool(

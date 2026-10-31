@@ -1,5 +1,5 @@
 """
-系统监控插件测试：验证 sys_monitor.py 里的工具在当前平台真实返回数据。
+系统监控工具测试：验证 sys_monitor.py 里的工具在当前平台真实返回数据。
 
 不花 API Key，不调外部服务，只读本机计数器。
 """
@@ -17,14 +17,14 @@ _done = False
 
 
 def _ensure_loaded() -> None:
-    """把内置插件目录加载进全局注册表（只做一次，避免同名工具进 skipped）。"""
+    """把内置工具目录加载进全局注册表（只做一次，避免同名工具进 skipped）。"""
     global _done
     if _done:
         return
-    from loader import PluginLoader
+    from loader import ToolLoader
     from bootstrap import PACKAGE_ROOT as HERE
 
-    ldr = PluginLoader(HERE, dirs=["plugins"], registry=REGISTRY)
+    ldr = ToolLoader(HERE, dirs=["builtin_tools"], registry=REGISTRY)
     ldr.load_all()
     _done = True
 

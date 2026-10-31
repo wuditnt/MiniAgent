@@ -3,8 +3,8 @@
 
 为什么把沙箱独立成一个模块？
     因为「工具」会不断被扩展，而「边界」必须只有一处定义。
-    插件作者只要 `from core import safe_path`，就自动继承了工作区限制；
-    核心代码则完全不需要知道任何一个具体插件长什么样。
+    工具作者只要 `from core import safe_path`，就自动继承了工作区限制；
+    核心代码则完全不需要知道任何一个具体工具长什么样。
 """
 
 from __future__ import annotations
@@ -278,7 +278,7 @@ def check_command(command: str) -> str | None:
     """危险命令检查。返回 None 表示放行，否则返回拦截原因。
 
     注意：这是「兜底」，不是「主要防线」。
-    主要防线是控制台层面的交互式确认（见 repl.py 的 /approve）。
+    主要防线是 Web UI 层面的交互式确认（见 approval.py 的三档模式）。
     """
     if ALLOW_DANGEROUS:
         return None

@@ -1,7 +1,7 @@
 """
 工具注册表：整个 Agent 的能力都挂在这里。
 
-三方（内置工具 / 你的插件 / MCP 外部工具）最终都会变成同一个 `Tool` 对象，
+三方（内置工具 / 你的工具 / MCP 外部工具）最终都会变成同一个 `Tool` 对象，
 进入同一个 REGISTRY。对 Agent 循环来说，它们没有任何区别 —— 这正是「可扩展」的含义。
 
 一个工具需要什么？
@@ -9,7 +9,7 @@
     description 模型靠它决定什么时候用这个工具
     parameters  JSON Schema，描述参数
     func        真正执行的 Python 函数
-附加元信息（不发给模型，供控制台与权限判断使用）：
+附加元信息（不发给模型，供界面展示与权限判断使用）：
     group / dangerous / source / module / origin / tags
 """
 
@@ -58,7 +58,7 @@ class Tool:
         }
 
     def signature(self) -> str:
-        """给控制台看的简短签名，例如 read_file(path, offset=1)。"""
+        """给界面看的简短签名，例如 read_file(path, offset=1)。"""
         props = self.parameters.get("properties", {})
         required = set(self.parameters.get("required", []))
         parts = []
@@ -72,15 +72,15 @@ class Tool:
 
 
 def _default_group(module: str) -> str:
-    """plugins.fs_tools -> fs ；plugins_user.git_tools -> git"""
+    """builtin_tools.fs_tools -> fs ；user_tools.git_tools -> git"""
     leaf = module.rsplit(".", 1)[-1]
     return leaf[:-6] if leaf.endswith("_tools") else leaf
 
 
 def _default_source(module: str) -> str:
-    if module.startswith("plugins_user"):
+    if module.startswith("user_tools"):
         return "user"
-    if module.startswith("plugins"):
+    if module.startswith("builtin_tools"):
         return "builtin"
     return "core"
 
@@ -202,12 +202,12 @@ class ToolRegistry:
         return result if t.no_clip else clip(result)
 
 
-# 全局注册表：所有插件、内置工具、MCP 工具都注册到这里
+# 全局注册表：所有工具、内置工具、MCP 工具都注册到这里
 REGISTRY = ToolRegistry()
 
-# 插件模块里的 `@tool` 默认往哪注册。
-# 正常情况下就是 REGISTRY；PluginLoader 会在导入插件期间临时切到它自己的注册表，
-# 这样「把插件装进指定注册表」才真正成立（而不是嘴上说说）。
+# 工具模块里的 `@tool` 默认往哪注册。
+# 正常情况下就是 REGISTRY；ToolLoader 会在导入工具期间临时切到它自己的注册表，
+# 这样「把工具装进指定注册表」才真正成立（而不是嘴上说说）。
 _ACTIVE: contextvars.ContextVar[ToolRegistry] = contextvars.ContextVar(
     "active_tool_registry", default=REGISTRY
 )
@@ -220,9 +220,9 @@ def active_registry() -> ToolRegistry:
 
 @contextmanager
 def use_registry(reg: ToolRegistry):
-    """临时切换默认注册表。插件导入期间使用。
+    """临时切换默认注册表。工具导入期间使用。
 
-    用 ContextVar 而不是全局变量：Web UI 可能并发导入/重载插件，全局槽位
+    用 ContextVar 而不是全局变量：Web UI 可能并发导入/重载工具，全局槽位
     会让 A 的切换覆盖 B，把工具装到错误的注册表里（甚至装进别人的临时表后丢弃）。
     """
     token = _ACTIVE.set(reg)
@@ -233,7 +233,7 @@ def use_registry(reg: ToolRegistry):
 
 
 # 「本次运行在哪个工具表里执行」—— 与上面的 _ACTIVE 不是一回事：
-#   _ACTIVE       = @tool 往哪个表里注册（导入插件时临时切换）
+#   _ACTIVE       = @tool 往哪个表里注册（导入工具时临时切换）
 #   _CURRENT      = Agent.run 期间实际使用/执行的表（会话级克隆，可能被裁过）
 # 工具若需要「给当前会话动态加载能力」（如 search_tools），必须读后者，
 # 否则会把工具装进全局表，污染别的会话。
@@ -314,7 +314,7 @@ def tool(
         try:
             reg.add(t)
         except ValueError as e:
-            # 注册失败不抛异常 —— 一个坏插件不该阻断整个程序启动
+            # 注册失败不抛异常 —— 一个坏工具不该阻断整个程序启动
             reg.skipped[t.name] = str(e)
             return fn
         setattr(fn, "__tool__", t)

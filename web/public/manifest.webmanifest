@@ -1,7 +1,7 @@
 {
   "name": "mini-agent",
   "short_name": "mini-agent",
-  "description": "本地智能体控制台",
+  "description": "本地智能体 Web UI",
   "lang": "zh-CN",
   "start_url": "/",
   "scope": "/",

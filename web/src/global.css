@@ -1540,7 +1540,7 @@ body,
 
 /* 内容区已有统一滚动条，内部面板不再各自滚动 */
 .settings-content .ms-panel,
-.settings-content .plugins-list {
+.settings-content .tools-list {
   max-height: none;
   overflow: visible;
   padding-right: 0;
@@ -2279,42 +2279,42 @@ body,
   color: #1677ff;
 }
 
-/* ---- 插件管理列表 ---- */
-.plugins-list {
+/* ---- 工具管理列表 ---- */
+.tools-list {
   max-height: 420px;
   overflow-y: auto;
 }
 
-.plugin-item {
+.tool-item {
   padding: 10px 0;
   border-bottom: 1px solid #f0f0f0;
 }
 
-.plugin-item:last-child {
+.tool-item:last-child {
   border-bottom: none;
 }
 
-.plugin-header {
+.tool-header {
   display: flex;
   align-items: center;
   gap: 6px;
   margin-bottom: 4px;
 }
 
-.plugin-name {
+.tool-name {
   font-weight: 600;
   font-size: 13px;
   color: rgba(0, 0, 0, 0.88);
 }
 
-.plugin-desc {
+.tool-desc {
   font-size: 12px;
   color: #595959;
   margin-bottom: 4px;
   line-height: 1.5;
 }
 
-.plugin-meta {
+.tool-meta {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -2322,7 +2322,7 @@ body,
   color: #8c8c8c;
 }
 
-.plugin-sig {
+.tool-sig {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   background: #f5f5f5;
   padding: 1px 6px;
@@ -2561,7 +2561,7 @@ body,
     grid-template-columns: repeat(2, 1fr);
   }
 
-  .plugin-meta {
+  .tool-meta {
     flex-direction: column;
     align-items: flex-start;
     gap: 4px;

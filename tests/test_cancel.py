@@ -456,9 +456,9 @@ def test_no_cancel_regression():
 def test_cancel_reason_reaches_ui():
     """取消的另一半（对人）：说清「为什么停」，并且不重复说。
 
-    MCP 有对端要通知，控制台前坐着的人同样是「对端」。UI 事件返回 bool、
+    MCP 有对端要通知，屏幕前坐着的人同样是「对端」。UI 事件返回 bool、
     agent 记 last_cancel_notice_shown —— 跟 llm_delta / last_answer_streamed
-    同一套约定，让 repl 与 UI 不会把同一件事打两遍。
+    同一套约定，让调用方与 UI 不会把同一件事打两遍。
     """
     import agent as agent_mod
     from ui import PlainUI

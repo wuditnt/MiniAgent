@@ -1,8 +1,8 @@
 """
 MCP（Model Context Protocol）客户端 —— 扩展通道之二。
 
-与「插件目录」的区别：
-    插件目录：你自己写 Python 函数，进程内执行。
+与「工具目录」的区别：
+    工具目录：你自己写 Python 函数，进程内执行。
     MCP     ：挂载别人写好的工具服务，独立进程，通过 stdio 上的 JSON-RPC 通信。
 
 对 Agent 循环来说两者没有区别 —— MCP 工具会被桥接成同样的 `Tool` 对象，
@@ -135,7 +135,7 @@ class MCPStdioClient:
         self._next_id = 1
         self._send_lock = threading.Lock()
         self.server_info: dict = {}
-        # 取消相关的可观测数字：控制台 /mcp 与测试都靠它断言「通知真的发了」
+        # 取消相关的可观测数字：界面与测试都靠它断言「通知真的发了」
         self.stats: dict[str, int] = {
             "requests": 0, "cancellations": 0, "late_responses": 0, "timeouts": 0,
         }
@@ -602,7 +602,7 @@ class MCPManager:
         self.clients.clear()
 
     def cancel_stats(self) -> dict[str, int]:
-        """汇总所有连接的取消相关统计（控制台 /mcp 用来显示「通知真的发出去了吗」）。"""
+        """汇总所有连接的取消相关统计（界面用来显示「通知真的发出去了吗」）。"""
         keys = ("requests", "cancellations", "late_responses", "timeouts")
         total = dict.fromkeys(keys, 0)
         for c in self.clients.values():

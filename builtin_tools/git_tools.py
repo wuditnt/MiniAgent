@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from core import check_command, run_process, safe_path, tool, workspace
 
-PLUGIN_INFO = {"name": "Git", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "Git", "version": "1.0", "author": "mini-agent"}
 
 
 def _git(args: str, cwd: str | None = None, timeout: int = 30) -> tuple[int, str, str]:

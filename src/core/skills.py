@@ -13,7 +13,7 @@
     2. 模型判断任务命中某个 skill 时，调用内置的 use_skill 工具，
        把该 skill 的正文拉进上下文，再照着做。
 
-设计原则（与 PluginLoader 一脉相承）：
+设计原则（与 ToolLoader 一脉相承）：
     1. 约定优于配置 —— skills/、skills_user/ 下的子目录只要含 SKILL.md 就被发现。
     2. 故障隔离 —— 某个 skill 解析失败只记录在报告里，不影响其它 skill。
     3. 可热重载 —— /skills reload 重新扫描，不用重启。
@@ -303,7 +303,7 @@ class SkillLoader:
 def register_use_skill_tool(registry: ToolRegistry, loader: SkillLoader) -> Tool:
     """把 use_skill 注册成一个「技能通道」的内置工具。
 
-    它不属于任何插件模块，直接进注册表，group=技能。模型在 system prompt 里
+    它不属于任何工具模块，直接进注册表，group=技能。模型在 system prompt 里
     看到技能清单后，按需调用它把某个 skill 的正文拉进上下文。
     """
 

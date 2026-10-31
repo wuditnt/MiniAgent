@@ -15,7 +15,7 @@ import json
 import bootstrap  # noqa: F401  —— 必须最先导入：铺 sys.path + 定工作区
 
 from core import net_mode  # noqa: E402
-from plugins import net_tools as nt  # noqa: E402
+from builtin_tools import net_tools as nt  # noqa: E402
 
 
 def test_dispatch_local_and_cloud() -> None:

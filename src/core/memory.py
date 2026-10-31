@@ -624,7 +624,7 @@ def register(reg=None) -> None:
     target.add(_REMEMBER_TOOL)
 
 
-# 手动构造（不用 @tool）：与 approval.request_approval 同理，避免插件加载期
+# 手动构造（不用 @tool）：与 approval.request_approval 同理，避免工具加载期
 # 误注册进 loader 的临时注册表；register() 由启动代码显式调用。
 _REMEMBER_TOOL = Tool(
     name="remember",

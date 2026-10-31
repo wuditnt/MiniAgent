@@ -1,12 +1,12 @@
 """
-控制台呈现层。
+终端呈现层（PlainUI / RichUI）。
 
 为什么要单独抽一层？
     Agent 循环只应该关心「调用工具、拿到结果」；至于结果怎么显示给人类看，
-    是控制台的事。把两者分开之后：
+    是呈现层的事。把两者分开之后：
       · 跑测试时用 PlainUI(enabled=False)，一行输出都没有
-      · 跑控制台时用 RichUI，有颜色、有耗时、有工具轨迹
-      · 将来想做 Web / TUI，只要再实现一个 UI 类
+      · 需要终端输出时用 RichUI（rich 缺失自动退回 PlainUI）
+      · Web UI 走自己的事件回调，不依赖这一层
 
 UI 需要实现的方法（全部可选，缺失时自动降级）：
     notice(text)                      普通提示
@@ -34,7 +34,7 @@ from typing import Any
 
 
 def brief(value: Any, limit: int = 70) -> str:
-    """把参数值压成单行短文本，避免把控制台刷屏。"""
+    """把参数值压成单行短文本，避免把终端输出刷屏。"""
     if isinstance(value, str):
         s = value.replace("\n", "⏎")
     else:
@@ -301,7 +301,7 @@ class RichUI(PlainUI):
         danger = "[red]危险[/red] " if tool.dangerous else ""
         with self._lock:
             # 预览来自模型给出的参数（完全可控的字符串）：不转义会让
-            # `[bold]`/`[red]` 这类片段被 rich 当标记执行，控制台显示被搅乱。
+            # `[bold]`/`[red]` 这类片段被 rich 当标记执行，终端显示被搅乱。
             self.console.print(
                 f"  [cyan]⚙[/cyan] {danger}[bold]{self._escape(tool.name)}[/bold]"
                 f"[dim]({self._escape(preview)})[/dim]"

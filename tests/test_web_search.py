@@ -17,7 +17,7 @@ import bootstrap  # noqa: F401  —— 必须最先导入：铺 sys.path + 定�
 
 import core.model_config as mc  # noqa: E402
 import core.settings as st  # noqa: E402
-from plugins import web_search as ws  # noqa: E402
+from builtin_tools import web_search as ws  # noqa: E402
 
 
 def _isolate() -> None:

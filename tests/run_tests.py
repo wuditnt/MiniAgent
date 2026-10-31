@@ -3,7 +3,7 @@
 用法（先激活虚拟环境，或直接用 .venv 里的解释器）：
 
     python tests/run_tests.py            # 跑全部免费用例（不需要 API Key）
-    python tests/run_tests.py loop       # 只跑名字含 loop / plugins 的套件
+    python tests/run_tests.py loop       # 只跑名字含 loop / tools 的套件
     python tests/run_tests.py --list     # 列出所有套件
     python tests/run_tests.py --real     # 额外跑真实 API 用例（会消耗 token）
     python tests/run_tests.py --fail-fast  # 第一个失败就停
@@ -20,7 +20,7 @@
       本脚本在对子进程的调用里显式使用 sys.executable，并把
       MINI_AGENT_PYTHON 传给测试进程 —— 见 _env()。
 
-      坑二 —— 测试文件住在 tests/，但它们引用的 demo_case/、插件目录、
+      坑二 —— 测试文件住在 tests/，但它们引用的 demo_case/、工具目录、
       mcp_servers.json 都在**项目根**。所以子进程的 cwd 必须是 ROOT，
       不是本文件所在目录。这两个概念在这里被刻意分成两个变量，
       混用会让「路径越界」的报错看起来毫无头绪。
@@ -38,7 +38,7 @@ import time
 
 #: 本文件所在目录 —— `tests/`
 HERE = os.path.dirname(os.path.abspath(__file__))
-#: 项目根目录 —— 沙箱根、插件目录、mcp_servers.json 的基准。测试进程的 cwd。
+#: 项目根目录 —— 沙箱根、工具目录、mcp_servers.json 的基准。测试进程的 cwd。
 ROOT = os.path.dirname(HERE)
 #: 源码布局根 —— `src/`，要放上 sys.path 才能 `import core`
 SRC = os.path.join(ROOT, "src")
@@ -56,7 +56,7 @@ PKG = os.path.join(SRC, "core")
 # 比拆成两个半覆盖的用例更省 token，也不会有「两个都跑一半」的重复开销。
 SUITES: list[tuple[str, str, bool]] = [
     ("test_loop.py", "循环层 6 项：假客户端，不碰网络", False),
-    ("test_plugins.py", "插件层 + MCP 层 12 项", False),
+    ("test_tools.py", "工具层 + MCP 层 12 项", False),
     ("test_skills.py", "技能层 9 项：frontmatter / 加载 / 冲突 / 热重载 / use_skill / 来源分类 / 消息解析 / 本轮注入", False),
     ("test_vision.py", "图片输入 5 项：嗅探 / 附件通道 / 拒绝 / 循环集成", False),
     ("test_stream_parallel.py", "流式聚合 + 并行执行 + MCP 并发 19 项", False),
@@ -65,7 +65,7 @@ SUITES: list[tuple[str, str, bool]] = [
     ("test_http_e2e.py", "本地 mock HTTP（支持 SSE）：流式三条降级路径 + 并行收益", False),
     ("test_robustness.py", "健壮性回归 4 项：迁移不覆盖 / NaN 配置 / 工作区路径校验 / MCP 非对象 JSON", False),
     ("test_webui.py", "Web UI 端到端 25 项：SSE 事件序列 / 双模式工具表 / 轨迹回放 / 停止 / 断连后台继续 / 运行中指示器 / 接入后台任务 / 确认 / 409 / 用户指令记忆 / 重启后会话模型恢复 / keep-alive / 接口兜底与限权", False),
-    ("test_sys_monitor.py", "系统监控插件 8 项：CPU / 内存 / 磁盘 / 网络 / 开机时长 / 端口占用", False),
+    ("test_sys_monitor.py", "系统监控工具 8 项：CPU / 内存 / 磁盘 / 网络 / 开机时长 / 端口占用", False),
     ("test_memory.py", "记忆系统 15 项：存储 / 保护区 / 工具不可见 / prelude / shell / 注入 / 分级淘汰 / 提炼过滤 / 检索合并 / 显式指令", False),
     ("test_logging.py", "文件日志 6 项：按日目录 / 错误聚合 / 幂等重配 / 关闭 / 配置 / 清理", False),
     ("test_workbench.py", "工作台文件接口 9 项：目录 / 安全 / 编码 / 图片 / HTML / MHTML", False),

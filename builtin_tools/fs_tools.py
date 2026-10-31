@@ -1,7 +1,7 @@
 """
 文件系统工具组。
 
-这是插件写法的参考实现：所有文件操作先过 safe_path（路径沙箱），
+这是工具写法的参考实现：所有文件操作先过 safe_path（路径沙箱），
 返回值一律是字符串（模型只能看到文本）。
 """
 
@@ -23,7 +23,7 @@ from core import (
     workspace,
 )
 
-PLUGIN_INFO = {"name": "文件系统", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "文件系统", "version": "1.0", "author": "mini-agent"}
 
 # 二进制文件的「下一步该用哪个工具」——按扩展名路由到办公文档专用工具。
 # 目的是让模型一步到位，不必先读一遍十六进制流才发现该换工具。

@@ -11,7 +11,7 @@
 用户主动取消则直接终止，不做回退。
 
 刻意做得很小：只提供一个 GET 抓取，不提供任意抓取后执行的能力。
-插件扩展的边界应该由核心决定，而不是由模型决定。
+工具扩展的边界应该由核心决定，而不是由模型决定。
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import urllib.request
 from core import clip, net_mode, tool
 from core.cancel import Cancelled as CancelledError
 
-PLUGIN_INFO = {"name": "网络", "version": "1.2", "author": "mini-agent"}
+TOOL_INFO = {"name": "网络", "version": "1.2", "author": "mini-agent"}
 
 MAX_BYTES = 2 * 1024 * 1024
 LOCAL_TIMEOUT = 20

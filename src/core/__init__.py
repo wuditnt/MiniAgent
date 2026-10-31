@@ -2,15 +2,14 @@
 core —— mini-agent 唯一的包：应用层与核心库都平铺在这里。
 
     ┌─ 应用层（入口与循环）──────────────────────────────┐
-    │  main.py      入口 / CLI 参数 / .env 读取           │
+    │  main.py      入口：启动 Web UI / .env 读取          │
     │  agent.py     核心循环：模型 → 工具 → 再一轮          │
-    │  repl.py      交互式控制台（/tools /reload /skills …）│
     │  ui.py        呈现层（PlainUI / RichUI，可替换）      │
-    │  loader.py    插件发现 → 导入 → 注册 → 热重载         │
+    │  loader.py    工具发现 → 导入 → 注册 → 热重载         │
     │  skills.py    技能发现 → SKILL.md → use_skill         │
-    │  tools.py     向后兼容垫片（导入即加载插件）           │
+    │  tools.py     向后兼容垫片（导入即加载工具）           │
     └─────────────────────────────────────────────────────┘
-    ┌─ 核心库（插件作者 `import core` 就拿到的全部）────────┐
+    ┌─ 核心库（工具作者 `import core` 就拿到的全部）────────┐
     │  registry.py  Tool / ToolRegistry / @tool            │
     │  schema.py    自动 Schema 推导                        │
     │  sandbox.py   沙箱 / 输出截断 / 危险命令策略           │
@@ -20,12 +19,12 @@ core —— mini-agent 唯一的包：应用层与核心库都平铺在这里。
     └─────────────────────────────────────────────────────┘
 
 启动方式：
-    python -m core          推荐；需要 src/ 在 sys.path 上
-    mini-agent              装了 console script 之后
+    python -m core          启动 Web UI；需要 src/ 在 sys.path 上
+    mini-agent              装了 console script 之后，同上
 
 关于导入风格 —— 请看 _paths.install_import_paths() 的说明：
 本包先铺好 sys.path，所以既支持「带包前缀」（from core import tool），
-又支持「裸模块名」（import tools / import agent），后者让插件作者写
+又支持「裸模块名」（import tools / import agent），后者让工具作者写
 `from core import tool` 时不必关心目录结构。
 """
 
@@ -39,7 +38,7 @@ install_import_paths()
 
 __version__ = "1.0.0"
 
-# ---- 核心 API 导出（插件作者只需要 import 这一个包）----
+# ---- 核心 API 导出（工具作者只需要 import 这一个包）----
 from .cancel import (  # noqa: E402,F401
     Cancelled,
     CancellationToken,

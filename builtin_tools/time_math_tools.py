@@ -12,7 +12,7 @@ import datetime as _dt
 
 from core import tool
 
-PLUGIN_INFO = {"name": "时间运算", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "时间运算", "version": "1.0", "author": "mini-agent"}
 
 _FMTS = [
     "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",

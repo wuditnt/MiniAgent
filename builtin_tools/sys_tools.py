@@ -14,7 +14,7 @@ import sys
 
 from core import tool, workspace
 
-PLUGIN_INFO = {"name": "系统信息", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "系统信息", "version": "1.0", "author": "mini-agent"}
 
 
 @tool(
@@ -29,7 +29,7 @@ def system_info() -> str:
 
     # 关键依赖是否就位（不强制 import，缺了就标缺失）
     deps = {}
-    for pkg in ("openai", "rich", "prompt_toolkit"):
+    for pkg in ("openai", "rich"):
         try:
             m = __import__(pkg)
             deps[pkg] = getattr(m, "__version__", "已装")
@@ -213,7 +213,7 @@ def _processes_ps() -> list[tuple[int, float, str]]:
 def env_info() -> str:
     keys = [
         "MINI_AGENT_HOST", "MINI_AGENT_PORT",
-        "MINI_AGENT_WORKSPACE", "MINI_AGENT_NO_PLUGINS", "MINI_AGENT_PLUGIN_DIRS",
+        "MINI_AGENT_WORKSPACE", "MINI_AGENT_NO_TOOLS", "MINI_AGENT_TOOL_DIRS",
         "MINI_AGENT_NO_SKILLS", "MINI_AGENT_SKILL_DIRS", "MINI_AGENT_STREAM",
         "MINI_AGENT_PARALLEL", "MINI_AGENT_MAX_WORKERS", "MINI_AGENT_MAX_OUTPUT",
     ]

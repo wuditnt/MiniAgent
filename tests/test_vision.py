@@ -16,7 +16,7 @@ import bootstrap  # noqa: F401  —— 必须最先导入：铺 sys.path + 定�
 from bootstrap import PACKAGE_ROOT as HERE
 
 from core.images import attach_image, take_images  # noqa: E402
-from plugins.vision_tools import MAX_IMAGE_BYTES, _sniff  # noqa: E402
+from builtin_tools.vision_tools import MAX_IMAGE_BYTES, _sniff  # noqa: E402
 
 # 标准 1x1 透明 PNG（仅用于魔数与大小校验，不需要真的解码）
 PNG_1X1 = (

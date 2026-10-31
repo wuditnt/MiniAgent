@@ -1,8 +1,8 @@
 """
 向后兼容层。
 
-历史版本的 mini-agent 把所有工具都写在本文件里，现在工具已经拆成了插件
-（见 plugins/ 与 plugins_user/）。本文件保留下来，
+历史版本的 mini-agent 把所有工具都写在本文件里，现在工具已经拆成了独立模块
+（见 builtin_tools/ 与 user_tools/）。本文件保留下来，
 让老的写法继续可用：
 
     import tools
@@ -23,9 +23,9 @@ import os
 
 from core._paths import ROOT
 
-#: 插件目录（plugins/、plugins_user/）挂在项目根下，不是包内。
+#: 工具目录（builtin_tools/、user_tools/）挂在项目根下，不是包内。
 #: 旧代码里这是 os.path.dirname(__file__) —— 包化之后两者不再相等，
-#: 用错了会导致「一个插件都没加载」还找不到原因。
+#: 用错了会导致「一个工具都没加载」还找不到原因。
 PROJECT_ROOT = ROOT
 
 from core.registry import (  # noqa: E402,F401
@@ -52,17 +52,17 @@ from core.sandbox import (  # noqa: E402,F401
     set_workspace,
     workspace,
 )
-from core.loader import PluginLoader  # noqa: E402
+from core.loader import ToolLoader  # noqa: E402
 
 # 兼容旧的私有名
 _clip = clip
 _safe_path = safe_path
 
-# 导入即加载插件 —— 保持 `import tools` 就能拿到全部工具的旧行为
-_LOADER = PluginLoader(PROJECT_ROOT)
+# 导入即加载工具 —— 保持 `import tools` 就能拿到全部工具的旧行为
+_LOADER = ToolLoader(PROJECT_ROOT)
 _REPORT = _LOADER.load_all()
 
-# 核心工具：三档确认模式之「自主判断」用的授权申请（幂等，不受插件加载时序影响）
+# 核心工具：三档确认模式之「自主判断」用的授权申请（幂等，不受工具加载时序影响）
 from core.approval import register as _register_approval  # noqa: E402
 from core.ask import register as _register_ask  # noqa: E402
 from core.memory import register as _register_memory  # noqa: E402
@@ -76,13 +76,13 @@ _register_subagent()
 _register_tool_search()
 
 
-def loader() -> PluginLoader:
-    """拿到插件加载器（控制台的 /reload、/plugins 用它）。"""
+def loader() -> ToolLoader:
+    """拿到工具加载器（加载报告与重载都走它）。"""
     return _LOADER
 
 
 def load_report():
-    """最近一次插件加载报告。"""
+    """最近一次工具加载报告。"""
     return _REPORT
 
 

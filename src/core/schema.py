@@ -2,7 +2,7 @@
 从函数签名自动推导 JSON Schema。
 
 这是「丢一个 .py 文件就多一个工具」的关键：
-    插件作者只要写一个带类型注解和 docstring 的普通函数，
+    工具作者只要写一个带类型注解和 docstring 的普通函数，
     装饰器就能自动生成模型需要的 function-calling schema，
     不需要手写任何 JSON。
 

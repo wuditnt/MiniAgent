@@ -202,7 +202,7 @@ class EventWriter:
 
 ### 4.2 `agent.py` 埋点（8 个点，全部在主线程）
 
-新增成员：`self.event_writer: EventWriter | None = None`、`self._run_id`、`self._system_sha`，以及薄封装 `self._emit(type, *, source, phase, turn, **kw)`（writer 为 None 时直接返回，保证 CLI / repl / 既有 13 套测试**零成本、零行为变化**）。
+新增成员：`self.event_writer: EventWriter | None = None`、`self._run_id`、`self._system_sha`，以及薄封装 `self._emit(type, *, source, phase, turn, **kw)`（writer 为 None 时直接返回，保证 Web UI / 既有测试**零成本、零行为变化**）。
 
 | # | 位置 | 事件 |
 | --- | --- | --- |
@@ -357,7 +357,7 @@ export interface TrajectoryData { session: string; events: TraceEvent[]; last_se
 - **D4 · P0 不做压缩**。既有截断已保证单次 run 体量可控（§2.3）；`events_keep_runs` 作为预留配置先落地但不启用，压缩策略等真实数据出现后再定（拱手交给后续阶段）。
 - **D5 · 事件只由会话层写入、不经过沙箱**。写入方是 `webui._run_worker` / `EventWriter`，落点 `web_data/sessions/`（既有目录），不新增工具、不扩大任何工具的写权限 —— 硬底线①不受影响。
 - **D6 · `approval` 事件只记录结果**，`_needs_confirm`（[L1167-L1182](file:///d:/codeworks/mini-agent/src/core/agent.py#L1167-L1182)）语义不变，MCP 危险工具在 `full` 档仍强制弹窗 —— 硬底线②不受影响。
-- **D7 · 埋点零侵入**：`_emit` 在 `event_writer is None` 时是纯 no-op，确保 CLI、repl、既有 14 个套件的行为与耗时完全不变（由用例 6 保护）。
+- **D7 · 埋点零侵入**：`_emit` 在 `event_writer is None` 时是纯 no-op，确保 Web UI、既有套件的行为与耗时完全不变（由用例 6 保护）。
 - **D8 · 实时镜像为可选**。`mirror` 回调让运行中也能看到轨迹，但**不阻塞**：它异常吞掉、且前端始终以 `done` 后拉取的全量为准（避免磁盘与内存不一致）。
 
 ---

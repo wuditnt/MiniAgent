@@ -433,7 +433,7 @@ export interface SettingsInfo {
   secrets?: Record<string, string>;
 }
 
-/** 工具信息（GET /api/tools 返回，插件管理界面用） */
+/** 工具信息（GET /api/tools 返回，工具管理界面用） */
 export interface ToolInfo {
   name: string;
   description: string;

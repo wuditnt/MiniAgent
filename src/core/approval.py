@@ -119,7 +119,7 @@ def request_approval(reason: str) -> str:
     )
 
 
-# 手动构造（不走 @tool 装饰器）：避免模块在插件加载期被首次 import 时，
+# 手动构造（不走 @tool 装饰器）：避免模块在工具加载期被首次 import 时，
 # 误注册进 loader 的临时注册表。register() 由启动代码显式调用。
 _REQUEST_APPROVAL_TOOL = Tool(
     name="request_approval",

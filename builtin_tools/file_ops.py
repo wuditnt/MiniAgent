@@ -5,7 +5,7 @@
   · fs_tools 管「读」（read_file / list_dir / grep / glob）
   · file_ops 管「改」（写、复制、移动、删除、重命名、追加、对比）
 
-破坏性操作（move / delete）标 dangerous=True，控制台 approve 模式下会先问用户。
+破坏性操作（move / delete）标 dangerous=True，Web UI 的「按需询问」档会先问用户。
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import shutil
 
 from core import read_path, safe_path, tool, workspace
 
-PLUGIN_INFO = {"name": "文件操作", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "文件操作", "version": "1.0", "author": "mini-agent"}
 
 
 @tool(

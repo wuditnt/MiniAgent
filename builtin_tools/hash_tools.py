@@ -13,7 +13,7 @@ import os
 
 from core import read_bytes, read_path, tool
 
-PLUGIN_INFO = {"name": "哈希与编码", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "哈希与编码", "version": "1.0", "author": "mini-agent"}
 
 _SUPPORTED = ("md5", "sha1", "sha256", "sha512")
 

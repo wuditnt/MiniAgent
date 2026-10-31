@@ -81,7 +81,7 @@ if not exist "web\node_modules\.bin\vite.cmd" (
 
 REM ---- 4) start backend + frontend ---------------------------
 echo ==^> starting backend on http://0.0.0.0:%API_PORT%
-start "mini-agent backend :%API_PORT%" cmd /k ".venv\Scripts\python.exe src\core\main.py --web --port %API_PORT% --host 0.0.0.0"
+start "mini-agent backend :%API_PORT%" cmd /k ".venv\Scripts\python.exe src\core\main.py --port %API_PORT% --host 0.0.0.0"
 
 echo ==^> starting frontend on http://localhost:%WEB_PORT%
 REM Vite reads VITE_API_TARGET from the environment; the child cmd inherits it

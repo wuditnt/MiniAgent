@@ -12,7 +12,7 @@ import time as _time
 
 from core import tool
 
-PLUGIN_INFO = {"name": "时间", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "时间", "version": "1.0", "author": "mini-agent"}
 
 
 @tool(

@@ -16,7 +16,7 @@ Agent 核心循环：整个「智能体」最本质的部分。
   · 危险操作确认（ui.ask_confirm，永远在主线程串行做）
   · 轮次上限（防止模型死循环）
 
-关于「工具」：本循环不关心工具从哪来 —— 内置的、你写的插件、还是 MCP 外部服务，
+关于「工具」：本循环不关心工具从哪来 —— 内置的、你写的工具、还是 MCP 外部服务，
 在 `self.registry` 里都只是同一个 Tool 对象。加工具不需要改这个文件，一行都不用。
 
 设计说明：openai 库采用懒加载，`client=` 可注入任意客户端，
@@ -44,7 +44,7 @@ try:  # 懒加载：没装 openai 也能跑工具层和循环测试
 except ImportError:  # pragma: no cover
     OpenAI = None  # type: ignore[assignment]
 
-import tools  # noqa: F401  —— 导入即加载插件；同时保留 agent.tools 的旧用法
+import tools  # noqa: F401  —— 导入即加载工具；同时保留 agent.tools 的旧用法
 from core import approval, ask, events, logging_setup, memory
 from core.cancel import CancellationToken, Cancelled, current_token, set_current_token
 from core.images import take_images
@@ -395,7 +395,7 @@ class Agent:
         max_context_chars: int | None = None,
         client: Any = None,                 # 注入点：测试时传假客户端
         registry: ToolRegistry | None = None,
-        ui: Any = None,                     # 注入点：控制台传 RichUI
+        ui: Any = None,                     # 注入点：Web UI 传 RichUI
         approve: bool = False,              # 旧开关：危险工具是否要人工确认（approval_mode 缺省时按它推断）
         approval_mode: str | None = None,   # 三档确认：ask / auto / full（见 core.approval）
         keep_recent_turns: int | None = None,  # 滑动窗口保留轮数
@@ -407,17 +407,17 @@ class Agent:
         reasoning_spec: dict | None = None,    # 厂家的推理参数说明（None = 通用 effort）
     ) -> None:
         self.model = model or _resolve_model()
-        # 会话级端点：显式传入则优先，否则走全局 resolve_active()（CLI / 测试的行为不变）
+        # 会话级端点：显式传入则优先，否则走全局 resolve_active()（Web UI / 测试的行为不变）
         if base_url is not None or api_key is not None:
             self._endpoint: tuple[str, str] | None = (base_url or "", api_key or "")
         else:
             self._endpoint = None
-        # 推理等级 / 参数风格：webui 按会话传入；CLI 留 None = 请求时读全局
+        # 推理等级 / 参数风格：webui 按会话传入；其他调用方留 None = 请求时读全局
         self.reasoning_level = reasoning_level
         self.reasoning_spec = reasoning_spec
         # 快速对话（chat 模式）：True 时显式关闭思考（见 _apply_thinking_off）
         self.chat_mode = False
-        # 本轮联网模式（Web 层逐轮设置）：cloud=云端搜索/抓取，local=本地抓取；None=CLI 不注入提示
+        # 本轮联网模式（Web 层逐轮设置）：cloud=云端搜索/抓取，local=本地抓取；None=不注入联网提示
         self.net_mode: str | None = None
         self.system_prompt = system_prompt
         # 本轮附加指引（如 Web UI 里用户显式选择的技能正文）：只在这一次 run 生效，
@@ -435,7 +435,7 @@ class Agent:
         self.ui = ui if ui is not None else PlainUI(enabled=verbose)
         self.approve = approve
         # 显式三档优先；否则由旧开关推断：approve=True → ask（逐次询问），
-        # approve=False → full（不确认，控制台/测试的历史行为）
+        # approve=False → full（不确认，测试与内部调用的历史行为）
         self.approval_mode = approval.normalize(
             approval_mode if approval_mode is not None
             else (approval.ASK if approve else approval.FULL)
@@ -443,7 +443,7 @@ class Agent:
         self.stream = bool(_pick(stream, "stream", True))
         self.parallel_tools = bool(_pick(parallel_tools, "parallel_tools", True))
         self.max_workers = max(1, int(_pick(max_workers, "max_workers", 4)))
-        # 记忆系统：主题摘要的文件键（webui 传会话 id；repl 用固定 "repl"）
+        # 记忆系统：主题摘要的文件键（webui 传会话 id；无会话 id 时按通用键）
         self.session_id = session_id
         self._client = client
         self._owns_client = client is None   # False = 外部注入的客户端，取消时只关不丢
@@ -451,7 +451,7 @@ class Agent:
         self.cancel_token: CancellationToken | None = None  # 每次 run() 新建
 
         # 上一轮 run() 的最终回答是否已经「边生成边打印」过了。
-        # 控制台/一次性模式据此决定要不要再 print 一遍，避免同一段文字出现两次。
+        # 调用方据此决定要不要再输出一遍，避免同一段文字出现两次。
         self.last_answer_streamed = False
         self._empty_answer_retried = False   # 「空回答」重试标记（每轮 run 重置，只重试一次）
         # 委派提醒：本 run 已执行多少次工具、是否已经派过子代理、已经提醒过几次
@@ -465,7 +465,7 @@ class Agent:
         # 上下文被服务端判超长后的应急压缩重试次数（每次 run 重置，防死循环）
         self._overflow_retries = 0
 
-        # 取消提示是否已经由 UI 层显示过（同上：避免控制台重复打印）。
+        # 取消提示是否已经由 UI 层显示过（同上：避免重复打印）。
         self.last_cancel_notice_shown = False
 
         # 运行统计：真实生产环境里这几项决定成本与延迟，值得默认采集
@@ -481,7 +481,7 @@ class Agent:
 
         # ---- 会话事件流（可追溯运行，P0）----
         # 由会话层（webui._run_worker / 其他宿主）挂上 EventWriter；为 None 时
-        # _emit 是纯 no-op，CLI / repl / 既有测试的行为与耗时完全不变（决策 D7）。
+        # _emit 是纯 no-op，既有测试的行为与耗时完全不变（决策 D7）。
         self.event_writer: events.EventWriter | None = None
         self._system_sha: str | None = None   # 已 emit 的 system prompt 哈希（变了才重发）
         self._turn = 0                        # 当前轮次：给 _prepare 等非轮参场景用
@@ -530,7 +530,7 @@ class Agent:
             if self._endpoint is not None:
                 base_url, api_key = self._endpoint      # 会话级模型配置
             else:
-                base_url, api_key = _resolve_endpoint()  # 全局（CLI / 测试）
+                base_url, api_key = _resolve_endpoint()  # 全局（测试 / 未传会话端点时）
             self._client = OpenAI(
                 api_key=api_key or None,
                 base_url=base_url or None,
@@ -552,7 +552,7 @@ class Agent:
 
         为什么需要这一层？
           1. UI 是可选能力（自定义 UI 可以只实现一部分方法），缺失时应静默跳过；
-          2. 控制台读写终端时可能抛异常（管道关闭等），不该因此中断整个任务；
+          2. UI 实现读写输出时可能抛异常（管道关闭等），不该因此中断整个任务；
           3. 自定义 UI 可能用的是旧签名（没有 streamed= 这类新参数），
              这时去掉关键字参数再试一次，免得逼所有人跟着核心升级。
         """
@@ -735,7 +735,7 @@ class Agent:
             return None
 
     def context_stats(self) -> dict:
-        """给控制台 /context 命令用。"""
+        """上下文用量快照（调试与界面展示用）。"""
         return {
             "messages": len(self.messages),
             "chars": self._context_chars(),
@@ -772,7 +772,7 @@ class Agent:
         不论走哪条路径，收尾都做同样三件事，缺一不可：
           · token 已取消（补一次，保证子进程/网络句柄被清理）；
           · 补齐缺失的 tool 回复（消息序列仍然合法，下一轮还能发出去）；
-          · 通过 UI 把「为什么取消」告诉人（repl/main 靠
+          · 通过 UI 把「为什么取消」告诉人（调用方靠
             last_cancel_notice_shown 判断要不要再打一遍）。
         """
         token = CancellationToken()
@@ -836,7 +836,7 @@ class Agent:
             _llm_log.info("run.cancelled session=%s reason=%s", self.session_id or "-", e)
             if not token.cancelled():
                 # 协作式取消理论上都伴随一次 token.cancel()；这里兜住
-                # 「某个插件自己抛了 Cancelled」这种情况，别让清理被跳过。
+                # 「某个工具自己抛了 Cancelled」这种情况，别让清理被跳过。
                 token.cancel(str(e) or "任务被取消")
             self._patch_cancelled_replies()
             self._emit(
@@ -948,7 +948,7 @@ class Agent:
         except Exception:  # noqa: BLE001 —— 记忆故障绝不允许影响主循环
             return ""
 
-    #: 联网模式提示：只在 Web 层显式设置 net_mode 时注入（CLI 保持原样）
+    #: 联网模式提示：只在 Web 层显式设置 net_mode 时注入（默认不注入）
     _NET_HINT = {
         "cloud": (
             "\n\n## 联网\n本轮已开启联网（这是本轮的实时状态，优先级高于历史对话里的任何说法）："
@@ -1472,7 +1472,7 @@ class Agent:
                     # 取消钩子关掉客户端后，卡在流读取上的请求会抛各种传输异常
                     # （APIConnectionError/ReadError…）。令牌已取消时它们都是
                     # 「取消的表现形式」，统一归一化成 Cancelled —— 否则
-                    # 程序化取消（repl /stop、Web UI 停止按钮）会被误报成错误。
+                    # 程序化取消（Web UI 停止按钮等）会被误报成错误。
                     if tok is not None and tok.cancelled():
                         raise Cancelled("LLM 流式响应被取消") from None
                     raise
@@ -2013,7 +2013,7 @@ class Agent:
                         results[i] = result
                         secs[i] = seconds
                         longest = max(longest, seconds)
-                        # 打印放在主线程：轨迹行不会互相插队，控制台也不用为并发加锁
+                        # 打印放在主线程：轨迹行不会互相插队，输出也不用为并发加锁
                         self._ui_call("tool_end", turn, tool, result, seconds)
                         if token is not None and token.cancelled():
                             raise Cancelled("工具批次被取消")
@@ -2133,7 +2133,7 @@ class Agent:
         """执行单个工具，并把所有「意外」都收敛成一段文本。
 
         这是 `_run_tools` 的单调用形态，保留下来有两个用途：
-        控制台的调试入口，以及 test_plugins.py 里对「危险工具确认」的直接测试。
+        调试入口，以及 test_tools.py 里对「危险工具确认」的直接测试。
 
         三种情形：
           1. 工具不存在       → 告诉模型有哪些可用，让它自己换

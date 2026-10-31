@@ -2,14 +2,14 @@
 """
 大数据表格分析工具组（基于 polars）。
 
-和邻居插件的分工：
+和邻居工具的分工：
   · data_tools       管「小文件的读一眼」（read_csv / read_json，纯 stdlib，够用就行）
   · database_tools  管「sqlite 与 CSV 的 SQL 查询」（内存 sqlite，小数据）
   · dataframe_tools 管「大文件的真分析」（列式内存、惰性扫描、SQL、落 Parquet）
 
 设计取舍：
-  · polars 懒加载：没装只让这几个工具返回提示，不影响插件整体加载。
-  · 只读走 read_path、写走 safe_path，与其他插件一样受路径沙箱约束。
+  · polars 懒加载：没装只让这几个工具返回提示，不影响工具整体加载。
+  · 只读走 read_path、写走 safe_path，与其他工具一样受路径沙箱约束。
   · CSV 默认按 UTF-8 读；读不动（如 Excel 导出的 GBK）再按探测到的编码解码后重试。
 """
 
@@ -27,7 +27,7 @@ from core import (
     tool,
 )
 
-PLUGIN_INFO = {
+TOOL_INFO = {
     "name": "表格分析",
     "version": "1.0",
     "author": "mini-agent",

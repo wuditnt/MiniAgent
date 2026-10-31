@@ -16,7 +16,7 @@ from subprocess import PIPE, Popen
 
 from core import check_command, read_path, run_process, tool
 
-PLUGIN_INFO = {"name": "系统增强", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "系统增强", "version": "1.0", "author": "mini-agent"}
 
 
 @tool(

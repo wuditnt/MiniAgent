@@ -13,7 +13,7 @@ import os
 
 from core import read_path, safe_path, tool
 
-PLUGIN_INFO = {"name": "图片元信息", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "图片元信息", "version": "1.0", "author": "mini-agent"}
 
 
 def _has_pillow():

@@ -43,7 +43,7 @@ from core import settings
 from core import workspace_config
 from core.images import ATTACH_NOTE
 from core.tool_search import STANDARD_HIDDEN_GROUPS
-# brief 不再从 core.ui 导入：它会把 \n 换成 ⏎ 给控制台单行展示用，
+# brief 不再从 core.ui 导入：它会把 \n 换成 ⏎ 给终端单行展示用，
 # SSE 路径（confirm_request / tool 事件）需要保留真实换行让前端代码块渲染。
 
 # ---------------------------------------------------------------- 常量
@@ -796,7 +796,7 @@ class WebUI:
 def _brief_args(args: dict, limit: int = 1200) -> dict:
     """参数过墙：每值截断，防止超大参数把事件流撑爆。
 
-    注意：不用 core.ui.brief —— 它会把 \\n 换成 ⏎ 给控制台单行展示用，
+    注意：不用 core.ui.brief —— 它会把 \\n 换成 ⏎ 给终端单行展示用，
     但 SSE 路径需要保留真实换行，让前端代码块正常渲染。
     """
     def _clip(v: object) -> object:
@@ -946,7 +946,7 @@ def _remember_from_message(message: str) -> dict | None:
 def _search_backend() -> str:
     """探测当前搜索后端，供 /api/state 报告（工具未加载时返回 unknown）。"""
     try:
-        import plugins.web_search as ws
+        import builtin_tools.web_search as ws
 
         return ws._backend()
     except Exception:  # noqa: BLE001
@@ -2961,10 +2961,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.web.reset_agents()          # 等级变化 → 已有会话 Agent 重建
         self._json({"ok": True, "reasoning": level})
 
-    # ------------------------------------------------ 工具 / 插件列表 API
+    # ------------------------------------------------ 工具列表 API
 
     def _handle_tools_list(self) -> None:
-        """返回全部可用工具列表（供插件管理界面展示）。"""
+        """返回全部可用工具列表（供工具管理界面展示）。"""
         from core.registry import REGISTRY
 
         tools = []
@@ -4101,7 +4101,7 @@ def serve(
     login_enabled: bool = True,
     skill_loader=None,
 ) -> None:
-    """便捷入口：构建服务并阻塞运行（main.py 的 --web 走这里）。"""
+    """便捷入口：构建服务并阻塞运行（main.py 启动时走这里）。"""
     settings.apply_to_runtime()      # 通用配置里的运行时项（工具输出上限、日志）先落地
     if login_enabled:
         auth.init_db()

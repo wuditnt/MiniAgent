@@ -30,7 +30,7 @@ from core import (
     workspace,
 )
 
-PLUGIN_INFO = {"name": "结构化数据", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "结构化数据", "version": "1.0", "author": "mini-agent"}
 
 # 单次读取的最大行数，防止 CSV 几百万行直接吃满上下文
 MAX_ROWS = 200

@@ -3,9 +3,9 @@
 
 为什么需要这个文件？
     项目里几乎所有路径都是相对的（`demo_case/inbox/x.csv`、`mcp_servers.json`、
-    插件目录 `plugins/`），而且有三个互相独立的东西需要知道「根」在哪：
+    工具目录 `builtin_tools/`），而且有三个互相独立的东西需要知道「根」在哪：
 
-      1. 运行时的包（找 mcp_servers.json、找插件目录、定沙箱根）
+      1. 运行时的包（找 mcp_servers.json、找工具目录、定沙箱根）
       2. 脚本层（setup_venv / run_tests 这些要 cd 到根）
       3. 测试层（把根放上 sys.path 才能 import 到东西）
 
@@ -18,7 +18,7 @@
     有兜底：优先读环境变量 MINI_AGENT_ROOT，其次才靠 __file__ 推算。
 
 为什么不用 importlib.resources？
-    因为 `plugins/`、`plugins_user/`、`demo_case/` 是**用户要改、要放东西**的
+    因为 `builtin_tools/`、`user_tools/`、`demo_case/` 是**用户要改、要放东西**的
     目录，不是包内只读资源。它们必须在仓库里、可写、能被 os.listdir 扫到。
     放进包内再用 resources API 读，反而把「约定优于配置」的设计搞坏了。
 """
@@ -55,15 +55,15 @@ def _detect_root() -> str:
     # 3) 退化：把 src/ 当成根（至少 sys.path 注入能工作）
     #    注意返回 SRC_DIR 而不是 candidate —— candidate 就是第 2 步刚否定掉的值
     #    （site-packages 里的 lib/pythonX.Y），拿它当根会把整个标准库目录
-    #    塞进 sys.path，插件/配置查找也会指错地方。
+    #    塞进 sys.path，工具/配置查找也会指错地方。
     return SRC_DIR
 
 
-#: 项目根目录（绝对路径）。仓库里的 plugins/、mcp_servers.json、demo_case/ 都在它下面。
+#: 项目根目录（绝对路径）。仓库里的 builtin_tools/、mcp_servers.json、demo_case/ 都在它下面。
 ROOT = _detect_root()
 
 #: 默认工作区（沙箱根）—— 落在**当前登录用户的数据目录**，而不是源码目录。
-#: 为什么不能是 ROOT？ROOT 只是「放插件/配置/资源的地方」，而工作区是
+#: 为什么不能是 ROOT？ROOT 只是「放工具/配置/资源的地方」，而工作区是
 #: 「智能体读写文件的地方」；两者混在一起，智能体就会把项目源码当工作区改。
 #: 例：Windows → C:\Users\<you>\mini-agent；macOS/Linux → /home/<you>/mini-agent
 #: 运行时若设了 AGENT_WORKSPACE（--workspace）则覆盖它。（测试也用该变量指回 ROOT）

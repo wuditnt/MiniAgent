@@ -15,7 +15,7 @@ import socket
 
 from core import check_command, run_process, tool
 
-PLUGIN_INFO = {"name": "网络增强", "version": "1.0", "author": "mini-agent"}
+TOOL_INFO = {"name": "网络增强", "version": "1.0", "author": "mini-agent"}
 
 
 @tool(

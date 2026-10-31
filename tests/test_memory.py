@@ -224,7 +224,7 @@ def test_tools_invisible():
         with open(os.path.join(ws, "visible.txt"), "w", encoding="utf-8") as f:
             f.write("普通文本 secret-token\n")
 
-        import tools  # noqa: F401  —— 加载插件注册表
+        import tools  # noqa: F401  —— 加载工具注册表
         from core.registry import REGISTRY
 
         listing = REGISTRY.call("list_dir", {"path": "."})

@@ -110,10 +110,10 @@ Agent 主循环是同步的（同步 OpenAI SDK、阻塞式子进程、工具线
 | 日志 | `logs/`（`logging_setup.py:27`） | `<data>/logs/` |
 
 - 新增 `MINI_AGENT_DATA_DIR` 环境变量 / `--data-dir` 参数，在 `_paths.py` 里统一算出 `DATA_DIR`
-- `ROOT` 继续表示「只读资源根」：插件、技能、`web/dist`、`mcp/`
+- `ROOT` 继续表示「只读资源根」：工具、技能、`web/dist`、`mcp/`
 - 桌面版默认 `data-dir = %APPDATA%/mini-agent`，浏览器版默认仍为 `ROOT`（行为不变）
-- 用户插件 / 技能：打包后 `plugins_user/`、`skills_user/` 应落在数据目录而不是安装目录，
-  通过 `AGENT_PLUGIN_DIRS` / `AGENT_SKILL_DIRS` 传**绝对路径**即可（loader 与 skills 的
+- 用户工具 / 技能：打包后 `user_tools/`、`skills_user/` 应落在数据目录而不是安装目录，
+  通过 `AGENT_TOOL_DIRS` / `AGENT_SKILL_DIRS` 传**绝对路径**即可（loader 与 skills 的
   `os.path.join(root, d)` 对绝对路径会直接采用，无需改代码）
 
 **落点**：`src/core/_paths.py`、`settings.py`、`model_config.py`、`workspace_config.py`、
@@ -347,7 +347,7 @@ new BrowserWindow({
 
 - **PyInstaller `--onedir`**（不用 onefile：启动快、杀软误报少、便于 diff 更新）
 - 必须显式收集的动态内容（否则打包后工具全没）：
-  - `plugins/`、`skills/`、`mcp/`（运行时扫描目录，静态分析抓不到）
+  - `builtin_tools/`、`skills/`、`mcp/`（运行时扫描目录，静态分析抓不到）
   - `web/dist`（若不由 Electron 侧单独分发）
   - `rapidocr_onnxruntime` 的模型文件与 `onnxruntime` 的 DLL（PyInstaller hook 可能不全，
     需 `--collect-data` / `--collect-binaries` 验证）
@@ -375,7 +375,7 @@ new BrowserWindow({
 - `electron-builder`，Windows 产 `nsis`（用户级安装，无需管理员）+ `portable` 备选
 - 后端 onedir 作为 `extraResources/server/`
 - 安装目录只读；所有可写数据在 `%APPDATA%/mini-agent`
-- 首次启动写入默认 `desktop-config.json`，并复制示例插件/技能到数据目录（若没有）
+- 首次启动写入默认 `desktop-config.json`，并复制示例工具/技能到数据目录（若没有）
 - 代码签名（Authenticode）避免 SmartScreen 拦截；无签名时安装包会被拦，需在文档说明
 - 自动更新：`electron-updater`；后端二进制与前端 dist 必须与新版本一起替换
   → 建议整包更新，不做增量
@@ -457,7 +457,7 @@ new BrowserWindow({
 
 - PyInstaller onedir + 内置 docs / docs-fast / dataframe / OCR（单包）
 - electron-builder NSIS + portable
-- 首次启动初始化数据目录与示例插件
+- 首次启动初始化数据目录与示例工具
 - 签名与自动更新
 - 文档：`README` 新增「桌面版」章节、`docs/DESKTOP.md`
 
@@ -470,7 +470,7 @@ new BrowserWindow({
 
 | 风险 | 影响 | 应对 |
 |---|---|---|
-| PyInstaller 漏收动态插件/模型文件 | 打包后工具缺失、OCR 报错 | 每次打包跑冒烟脚本：列工具数、跑一次 OCR、读写 docx |
+| PyInstaller 漏收动态工具/模型文件 | 打包后工具缺失、OCR 报错 | 每次打包跑冒烟脚本：列工具数、跑一次 OCR、读写 docx |
 | 单包体积约 200–300 MB（OCR 占 ~170 MB） | 下载与安装耗时、占用磁盘 | 已决策整体打包；在下载页标注体积与所需空间，安装器显示解压进度 |
 | 端口 8317 被占用 | 无法启动 | 不做回退；结构化 `PORT_IN_USE` + 对话框提示 + 一键复制 `netstat` 排查命令；Electron 启动前先自探测 |
 | 开启局域网后攻击面扩大 | 同网段设备可访问 API（能读写文件、执行命令） | 默认关闭；开启时强提示「请确认当前网络可信」；`lan_enabled=true` 时**强制启用 token 鉴权**（忽略 `--no-auth`）；`Host` 头校验 |
