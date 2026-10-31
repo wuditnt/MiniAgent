@@ -1,7 +1,7 @@
 """
 Web UI 端到端验证：真实 WebServer + mock OpenAI 兼容服务，断言 SSE 事件序列。
 
-覆盖（对应 docs/WEBUI_ANTDX_PLAN.md 验收标准的服务端部分）：
+覆盖（对应 docs/02-architecture.md 中 SSE 与服务端行为的说明）：
   ① 会话工具表矩阵：chat 不联网=零工具 / chat 联网=仅 web_search / agent 全量（纯注册表检查，不发网络）
   ② chat 模式：turn/delta/llm_done/done 事件齐全，全程无 tool 事件
   ③ /api/history：对话后能恢复 user/assistant 消息

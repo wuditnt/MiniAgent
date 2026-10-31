@@ -1,7 +1,7 @@
 """
 Web UI 后端：把 Agent 的 9 个 UI 回调翻译成 SSE 事件流，浏览器即另一块「屏幕」。
 
-设计要点（对应 docs/WEBUI_ANTDX_PLAN.md）：
+设计要点（对应 docs/02-architecture.md）：
   · 零依赖：stdlib http.server（ThreadingHTTPServer）+ 手写 SSE 帧
   · 双模式 = 每消息定制工具表：chat 关联网 → 空注册表；chat 开联网 → {web_search}；
     agent → 全量 REGISTRY（关联网时剔除 web_search）。Agent.run() 全程走

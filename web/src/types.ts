@@ -1,5 +1,5 @@
 /**
- * 前端类型定义：与后端 SSE 协议（docs/WEBUI_ANTDX_PLAN.md §6）一一对应。
+ * 前端类型定义：与后端 SSE 协议（见 docs/02-architecture.md）一一对应。
  */
 
 /** 交互模式：chat = 纯对话；agent = 工具循环 */
