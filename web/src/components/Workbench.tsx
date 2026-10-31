@@ -135,6 +135,23 @@ export default function Workbench({
     setActive(id);
   };
 
+  /** 图片翻页：原地替换当前文件标签；目标已打开时直接切过去，避免重复标签 */
+  const navigateFile = (entry: WorkspaceEntry) => {
+    const id = `file:${entry.path}`;
+    if (tabs.some((t) => t.id === id)) {
+      setActive(id);
+      return;
+    }
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.kind === "file" && t.id === active
+          ? { id, kind: "file", title: entry.name, path: entry.path, ext: entry.ext }
+          : t
+      )
+    );
+    setActive(id);
+  };
+
   const closeTab = (id: string) => {
     const idx = tabs.findIndex((t) => t.id === id);
     const next = tabs.filter((t) => t.id !== id);
@@ -272,6 +289,7 @@ export default function Workbench({
                 path={current.path}
                 name={current.title}
                 ext={current.ext}
+                onNavigate={navigateFile}
               />
             )}
           </div>
