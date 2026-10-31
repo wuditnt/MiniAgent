@@ -21,7 +21,7 @@ Agent 核心循环  src/core/agent.py      ← 消息 → LLM(流式) → tool_c
         │
         ├── 工具注册表  src/core/registry.py
         │      ├── core     核心工具（approval / ask / memory / tool_search / subagent / use_skill）
-        │      ├── builtin  builtin_tools/（24 个模块）
+        │      ├── builtin  builtin_tools/（28 个模块）
         │      ├── user     user_tools/
         │      └── mcp      MCP server 桥接出的工具
         │

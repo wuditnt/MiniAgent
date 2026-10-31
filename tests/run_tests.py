@@ -50,7 +50,7 @@ PKG = os.path.join(SRC, "core")
 
 # (文件名, 说明, 是否需要 API Key) —— 路径相对于本文件所在的 tests/
 #
-# 免费用例 22 个 + 真实用例 1 个。真实用例默认跳过（加 --real 才跑，会消耗 token）。
+# 免费用例 27 个 + 真实用例 1 个。真实用例默认跳过（加 --real 才跑，会消耗 token）。
 # 关于真实用例只有一个：它的价值是「端到端验真」—— 真模型 + 真 MCP 子进程，
 # 一次性覆盖「本端立刻停 + 通知真的发出去 + 服务端真的收手」这条完整链路，
 # 比拆成两个半覆盖的用例更省 token，也不会有「两个都跑一半」的重复开销。
@@ -79,6 +79,9 @@ SUITES: list[tuple[str, str, bool]] = [
     ("test_concurrency.py", "并发与全局状态 4 项：询问通道隔离 / copy_context 传播 / 注册表切换 / 配置并发写", False),
     ("test_tool_search.py", "工具检索 6 项：档位矩阵 / 按需加载 / 无命中清单 / 下轮回可见 / 缓存统计 / schema 稳定", False),
     ("test_subagent.py", "子智能体 15 项：任务包隔离 / 只读工具 / 截断 / 取消传导 / 超时 / 失败降级 / 触发规则 / 开关 / 委派提醒", False),
+    ("test_office_tools.py", "办公文档 5 项：模块拆分 / Word / Excel / PDF / PPTX", False),
+    ("test_office_advanced.py", "办公增强 5 项：Office 转 PDF / PDF 转图片 / 水印 / 压缩 / 加密解密", False),
+    ("test_sheet_advanced.py", "表格增强 6 项：合并 / 拆分 / CSV 互转 / 格式化 / 批量公式", False),
     ("test_real_mcp_cancel.py", "真实模型 + 真 MCP server：取消通知全链路", True),
 ]
 

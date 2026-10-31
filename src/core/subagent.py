@@ -49,7 +49,7 @@ SUBAGENT_TOOL_NAMES = frozenset({
     "count_lines", "count_code_lines", "search_symbol", "detect_encoding", "file_hash",
     # 文档与表格（只读）
     "read_csv", "read_json", "read_jsonl", "read_xlsx", "read_docx",
-    "read_pdf", "read_pdf_tables", "docx_to_markdown", "py_syntax_check",
+    "read_pdf", "read_pdf_tables", "read_pptx", "docx_to_markdown", "py_syntax_check",
     "view_image", "ocr_image", "ocr_pdf", "list_archive", "image_info",
     # 联网
     "web_search", "fetch_url",

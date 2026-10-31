@@ -9,7 +9,7 @@
 | 来源 | 位置 | 说明 |
 |---|---|---|
 | `core` | `src/core/*.py` | 核心工具：`request_approval`、`ask_user`、`remember`、`search_tools`、`delegate`、`use_skill` |
-| `builtin` | `builtin_tools/` | 24 个模块，文件 / 代码 / 执行 / 网络 / 视觉 / 系统 / 数据 / 文档 / 表格 / OCR 等 |
+| `builtin` | `builtin_tools/` | 28 个模块、109 个工具，文件 / 代码 / 执行 / 网络 / 视觉 / 系统 / 数据 / 文档 / 表格 / 文档转换 / OCR 等 |
 | `user` | `user_tools/` | 你自己写的工具，丢一个 `.py` 就多一个 |
 | `mcp` | `mcp/mcp_servers.json` | 外部 MCP server 桥接的工具，名形如 `server__tool` |
 
@@ -43,6 +43,20 @@ def switch_branch(name: str) -> str: ...
 @tool(dangerous=True, group="系统")
 def kill_process(pid: int) -> str: ...
 ```
+
+## 办公文档工具组
+
+办公文档按文件类型拆成 5 个互不依赖的模块，一条用户任务只对应一个入口：
+
+| 模块 | 工具 | 路由 |
+|---|---|---|
+| `word_tools.py` | `read_docx` `write_docx` `docx_to_markdown` | `.docx` |
+| `sheet_tools.py` | `read_xlsx` `write_xlsx` `xlsx_merge` `xlsx_split` `xlsx_to_csv` `csv_to_xlsx` `xlsx_format` `xlsx_formula` | `.xlsx/.xlsm/.xls/.xlsb/.ods`、CSV 互转 |
+| `pdf_tools.py` | `read_pdf` `read_pdf_tables` `write_pdf` `pdf_merge` `pdf_split` `pdf_rotate` `pdf_extract_images` `images_to_pdf` `pdf_to_images` `pdf_watermark` `pdf_compress` `pdf_encrypt` `pdf_decrypt` | `.pdf`、图片合成 PDF |
+| `pptx_tools.py` | `read_pptx` `write_pptx` | `.pptx` |
+| `convert_tools.py` | `office_to_pdf` | Office 文档 → `.pdf` |
+
+五个模块只依赖 `core` 的 `clip` / `read_path` / `safe_path` / `tool`，不互相 import。PDF 写类工具默认直接覆盖同名输出，输出路径与源文件相同时先写临时文件再原子替换；`pdf_extract_images` 只提取内嵌位图，扫描页请走 `ocr_pdf`；`office_to_pdf` 依赖本机 LibreOffice（`MINI_AGENT_SOFFICE` 可指定路径），没装时返回安装提示。
 
 ## 工具管理页
 

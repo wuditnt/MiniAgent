@@ -92,6 +92,9 @@ scripts\run_tests.bat --reinstall
 | `test_auth.py` | 建库 / 默认超管 / scrypt / 会话 / 限流 / 超管保护 / 改密 / 写入节流 |
 | `test_tool_search.py` | 档位矩阵 / 按需加载 / 无命中清单 / 下轮回可见 / 缓存命中 |
 | `test_subagent.py` | 任务包隔离 / 只读子集 / 请求体一致 / 结果截断 / 取消传导 / 超时 / 失败降级 / 开关 |
+| `test_office_tools.py` | 办公文档：模块拆分 / Word 往返 / Excel 往返 / PDF 合并拆分旋转提图 / PPTX 生成读取 |
+| `test_office_advanced.py` | 办公增强：Office 转 PDF / PDF 转图片 / 水印 / 压缩 / 加密解密 |
+| `test_sheet_advanced.py` | 表格增强：合并 / 拆分 / CSV 互转 / 格式化 / 批量公式 |
 
 真实用例（默认跳过，`--real` 才跑）：`test_real_mcp_cancel.py`，一次跑完「真模型调工具 → 中途取消 → 通知送达 → 服务端停手 → 序列合法」全链路。
 

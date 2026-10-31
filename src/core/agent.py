@@ -79,7 +79,10 @@ DEFAULT_SYSTEM_PROMPT = """你是一个能操作本地环境的智能体。
 工作原则：
 1. 按类型直接选工具：办公文档认扩展名直达对应工具 —— .docx 要转 Markdown 用 docx_to_markdown
    （高保真，保留标题/列表/加粗斜体/表格；需逐段查看正文或读元信息时才用 read_docx）、
-   .xlsx/.xlsm→read_xlsx、.pdf→read_pdf（表格型再试 read_pdf_tables）、.csv→read_csv、.json→read_json。
+   .xlsx/.xlsm→read_xlsx、.pdf→read_pdf（表格型再试 read_pdf_tables）、.csv→read_csv、.json→read_json、
+   .pptx→read_pptx（生成演示文稿用 write_pptx）。Office 文档转 PDF 用 office_to_pdf；
+   Excel 合并/拆分/CSV 互转/格式化/批量公式用 xlsx_* 系列；
+   PDF 合并/拆分/旋转/转图片/水印/压缩/加密解密用 pdf_* 系列。
    **不要先用 read_file / run_shell / run_python 去读这些文件的二进制流**（read_file 遇到二进制
    只会返回十六进制预览，白白浪费一轮）。只有扩展名缺失或格式确实未知时，才用 run_shell 探测魔数。
 2. 工具报错不是终点：换一种方式重试，或先补环境（如装依赖）再重试。

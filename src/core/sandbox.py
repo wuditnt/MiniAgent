@@ -461,7 +461,10 @@ def run_process(
         while True:
             try:
                 out, err = p.communicate(timeout=poll_interval)
-                return int(p.returncode or 0), out or "", err or "", False
+                # 取消钩子可能在这轮轮询期间已经杀掉进程，communicate 会先返回。
+                # 这里必须复检令牌，否则「被取消」会被误报成普通退出码。
+                cancelled = token is not None and token.cancelled()
+                return int(p.returncode or 0), out or "", err or "", cancelled
             except subprocess.TimeoutExpired:
                 pass   # 没死透就继续轮询；已读到的输出不会丢
             if token is not None and token.cancelled():
