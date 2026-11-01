@@ -91,8 +91,13 @@ start "mini-agent frontend :%WEB_PORT%" cmd /k "npm run dev -- --port %WEB_PORT%
 popd
 
 REM ---- 5) wait until both ports answer -----------------------
+REM Probe ports from PowerShell instead of a batch label loop: after the
+REM start commands, goto/call to a label fails with "cannot find the batch
+REM label specified" and the wait gives up even though the port is listening.
 echo ==^> waiting for services to become ready ...
-call :wait_port %WEB_PORT% 90
+set "WAIT_PORT=%WEB_PORT%"
+set "WAIT_TIMEOUT=90"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=[int]$env:WAIT_PORT;$t=[int]$env:WAIT_TIMEOUT;for($i=0;$i -lt $t;$i++){try{(New-Object Net.Sockets.TcpClient('127.0.0.1',$p)).Close();exit 0}catch{Start-Sleep -Seconds 1}};exit 1"
 if errorlevel 1 (
   echo [x] Frontend did not listen on port %WEB_PORT% within 90s.
   echo     Check the "mini-agent frontend" window for errors.
@@ -100,7 +105,8 @@ if errorlevel 1 (
   echo       rmdir /s /q web\node_modules\.vite
   goto fail
 )
-call :wait_port %API_PORT% 90
+set "WAIT_PORT=%API_PORT%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=[int]$env:WAIT_PORT;$t=[int]$env:WAIT_TIMEOUT;for($i=0;$i -lt $t;$i++){try{(New-Object Net.Sockets.TcpClient('127.0.0.1',$p)).Close();exit 0}catch{Start-Sleep -Seconds 1}};exit 1"
 if errorlevel 1 (
   echo [x] Backend did not listen on port %API_PORT% within 90s.
   echo     Check the "mini-agent backend" window for errors.
@@ -113,20 +119,6 @@ start "" "http://localhost:%WEB_PORT%"
 
 endlocal
 exit /b 0
-
-REM ------------------------------------------------------------
-REM :wait_port <port> <timeout-seconds>
-REM   0 = listening, 1 = timed out (checked once per second)
-REM ------------------------------------------------------------
-:wait_port
-set /a _waited=0
-:wait_port_loop
-netstat -ano | findstr /R /C:":%~1 .*LISTENING" >nul 2>nul
-if not errorlevel 1 exit /b 0
-if %_waited% GEQ %~2 exit /b 1
-ping -n 2 127.0.0.1 >nul 2>nul
-set /a _waited+=1
-goto wait_port_loop
 
 :fail
 echo.
