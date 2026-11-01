@@ -441,6 +441,12 @@ def run_process(
     if token is not None:
         token.check()   # 还没开始就被取消 —— 不必启动
 
+    # 下面按 UTF-8 解码子进程输出，所以子进程也必须按 UTF-8 写：在非中文代码页
+    # （英文 Windows 的 cp1252）上，Python 打印中文会在 stdout.write 抛
+    # UnicodeEncodeError。只定 stdio 编码，不动子进程文件读写的默认编码。
+    env = os.environ.copy()
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+
     p = subprocess.Popen(
         cmd,
         shell=shell,
@@ -450,6 +456,7 @@ def run_process(
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=env,
         # POSIX：让子进程自成进程组，killpg 才能一次杀干净
         start_new_session=(sys.platform != "win32"),
     )
