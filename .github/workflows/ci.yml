@@ -25,10 +25,12 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      # 办公文档 / PDF 用例需要 docs + docs-fast 这组依赖，缺了会整组跳过，
+      # CI 就失去对 write_docx / pdf_* / office_to_pdf 的覆盖（不含体积很大的 OCR 组）。
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
+          pip install -e ".[docs,docs-fast]"
           pip install pytest
 
       - name: 运行测试

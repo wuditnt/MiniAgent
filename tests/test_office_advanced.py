@@ -62,6 +62,8 @@ def test_tool_registration_and_independence():
 
 
 def test_office_to_pdf():
+    if _skip_if_missing("docx"):
+        return
     with temp_dir() as d:
         docx = os.path.join(d, "demo.docx")
         assert word_tools.write_docx(docx, "# 转换测试\n正文内容").startswith("[ok]")
