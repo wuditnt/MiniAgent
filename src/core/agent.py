@@ -86,7 +86,9 @@ DEFAULT_SYSTEM_PROMPT = """你是一个能操作本地环境的智能体。
    **不要先用 read_file / run_shell / run_python 去读这些文件的二进制流**（read_file 遇到二进制
    只会返回十六进制预览，白白浪费一轮）。只有扩展名缺失或格式确实未知时，才用 run_shell 探测魔数。
 2. 工具报错不是终点：换一种方式重试，或先补环境（如装依赖）再重试。
-3. 结论必须有证据：给出结论时附上可复核的数字（大小、哈希、计数、行号）。
+3. 结论要有依据，但依据是给人看的：必要时给出关键数字、文件名、行号；
+   不要罗列哈希、逐项修正表等内部核对产物。最终答复只回答用户的问题，
+   不描述工具调用、验证或修正过程（用户明确要求核对细节时才例外）。
 4. 大输出自己收敛：不要在回复里粘贴超长原始数据，只保留关键片段。
 5. 不确定就问，不要臆测用户意图；涉及删除/覆盖等破坏性操作前先说明。
 6. Python 依赖：生成的代码用到第三方库时，在开头用 `# pip install xxx` 注释列出依赖；需要安装时用 run_shell 执行 `python -m pip install xxx`（装进后端虚拟环境，避免用裸 `pip install` 落到系统环境），装完再运行。
@@ -117,28 +119,51 @@ CHAT_SYSTEM_PROMPT = """你是一个简洁、可靠的对话助手。
 # 取消时给模型看的统一占位文本（也是给用户看的轨迹内容）
 CANCELLED_TEXT = "[cancelled] 用户取消了本次任务，该工具未执行完成。"
 
-# 有副作用的内置工具：本轮执行过它们，交付前就应该先验证（收尾验证门的触发条件）。
-# 不在集合里的工具若标了 dangerous 也算（覆盖 MCP 等外部写操作）；
-# 集合按「写文件 / 改内容 / 执行命令 / 改外部状态」维护，只读工具一律不收。
-_SIDE_EFFECT_TOOLS = frozenset({
+#: 会产出或修改交付物的内置工具：收尾验证门只由它们触发。
+#: 命令类工具（run_shell / run_python）可能只是只读计算（取色、统计、语法检查），
+#: 不单独触发验证门；它们真正写了文件时，write_file 等工具会自行触发。
+_ARTIFACT_TOOLS = frozenset({
     "write_file", "append_to_file", "edit_file", "re_replace",
     "write_csv", "df_to_parquet",
-    "run_shell", "run_python",
     "copy_file", "move_file", "delete_file", "make_dir", "rename",
     "git_commit", "zip_create", "zip_extract",
     "http_post", "clipboard_write", "kill_process",
 })
 
+#: 命令类工具：只读用法很常见，收尾验证门默认放过
+_COMMAND_TOOLS = frozenset({"run_shell", "run_python"})
+
 # 收尾验证门注入的提醒（user 角色 + _injected 标记：与 max_turns_wrapup 同一口径，
 # webui 落盘与展示跳过它，不会打断用户可见的对话气泡）
 _VERIFY_GATE_NOTE = (
-    "【系统提示，不是用户发言】本轮你执行过写文件 / 执行命令类操作，交付前请先验证再收尾：\n"
+    "【系统提示，不是用户发言】本轮改动过文件或外部状态，结束前请内部自查：\n"
     "- 写了或改了文件（文档 / 报告 / 表格等）：读回关键部分，确认内容完整、格式正确、存到了指定位置；\n"
-    "- 整理或引用了数据 / 资料：核对关键数字、名称、时间、出处，确认与来源一致、没有遗漏或臆造；\n"
-    "- 跑了命令：看完整输出与结果是否符合预期，不要只看「执行成功」。\n"
-    "验证发现问题就先修复再验证；全部通过后，用一两句话说明「验证过什么、结果如何」，再交付最终结果。\n"
-    "如果你刚才已经做过等价验证，直接说明验证依据并交付，不要重复劳动。"
+    "- 整理了数据 / 资料：核对关键数字、名称、时间、出处，确认与来源一致、没有遗漏或臆造；\n"
+    "- 改了外部状态：确认目标对象与预期一致。\n"
+    "自查发现问题就先修复再确认；全部通过后直接给出结论。\n"
+    "验证只用于你自己的核对，不要在最终答复里复述验证步骤、哈希、修正记录；"
+    "只有用户明确要求核对细节时才给出。"
 )
+
+#: 最终答复里的「过程泄漏」特征：命中其一才考虑成稿改写。
+#: 只覆盖最常见的形态，宁可漏判也不误伤正常技术文档（例如用户确实在讨论哈希）。
+_PROCESS_LEAK_PATTERNS = (
+    re.compile(r"^[\s>*#\-【\[]*(?:（\s*)?(?:验证|自查|复核)\s*(?:依据|过程|结果|通过|无误)"),
+    re.compile(r"验证依据|验证过程|复核无误|复核通过|自查通过|逐项修正|修正（\d|修正\(\d", re.I),
+    re.compile(r"\b(?:md5|sha-?256)\b", re.I),
+)
+
+#: 用户明确要看核对细节时，不做改写
+_DETAIL_REQUEST_PATTERN = re.compile(
+    r"核对|验证细节|验证过程|验证依据|证明|哈希|md5|sha-?256|逐项|日志", re.I
+)
+
+#: 成稿提示：只删过程、不改结论、不新增事实
+_REWRITE_SYSTEM_PROMPT = """你是答案整理器。把用户问题的草稿改写为可以直接展示的最终答复。
+只做删减与重组：删除工具调用、验证/自查步骤、哈希与校验值、逐项修正记录、自我核对过程。
+必须保留全部结论、关键数字、文件名、路径与限制条件；不得新增事实，不得改变结论。
+如果删掉过程后草稿已经简洁，就保持原样输出。
+只输出改写后的正文，不要任何前言、说明或代码块包裹。"""
 
 # 服务端拒绝「上下文超长」类请求的错误特征（各家服务商措辞不同，小写匹配）
 _OVERFLOW_HINTS = (
@@ -408,6 +433,7 @@ class Agent:
         session_id: str | None = None,    # 会话 id：主题摘要按它分文件（None 则不注入/沉淀主题）
         reasoning_level: str | None = None,   # 推理等级（None = 每次请求时读全局配置）
         reasoning_spec: dict | None = None,    # 厂家的推理参数说明（None = 通用 effort）
+        rewrite_final_answer: bool | None = None,  # None = 读通用配置（默认开）
     ) -> None:
         self.model = model or _resolve_model()
         # 会话级端点：显式传入则优先，否则走全局 resolve_active()（Web UI / 测试的行为不变）
@@ -465,6 +491,9 @@ class Agent:
         self.verify_before_done = bool(_pick(None, "verify_before_done", True))
         self._side_effect_this_run = False   # 本 run 是否执行过写/执行类工具
         self._verify_nudged = False          # 验证提醒每次 run 最多注入一次
+        # 成稿改写：最终答复里发现验证/核对过程时，用一次非流式调用重写；
+        # 只影响智能体模式且有工具调用的任务，快速对话不触发
+        self.rewrite_final_answer = bool(_pick(rewrite_final_answer, "rewrite_final_answer", True))
         # 上下文被服务端判超长后的应急压缩重试次数（每次 run 重置，防死循环）
         self._overflow_retries = 0
 
@@ -1042,10 +1071,13 @@ class Agent:
         )
 
     def _is_side_effect_call(self, tc: dict) -> bool:
-        """这次工具调用是否有副作用（写文件 / 执行命令 / 改外部状态）。"""
+        """这次工具调用是否产生了交付物或改动外部状态（收尾验证门的触发条件）。"""
         name = (tc.get("function") or {}).get("name") or ""
-        if name in _SIDE_EFFECT_TOOLS:
+        if name in _ARTIFACT_TOOLS:
             return True
+        # 命令类工具只读用法很常见：图片取色、语法检查、统计等都不该被拦一轮
+        if name in _COMMAND_TOOLS:
+            return False
         tool = self.registry.get(name)
         return bool(tool is not None and tool.dangerous)
 
@@ -1057,6 +1089,65 @@ class Agent:
             and not self._verify_nudged
             and turn < self.max_turns
         )
+
+    def _last_user_text(self) -> str:
+        """最近一条用户消息的纯文本（多模态消息只取文本分片）。"""
+        for m in reversed(self.messages):
+            if m.get("role") == "user" and not m.get("_injected"):
+                content = m.get("content")
+                if isinstance(content, str):
+                    return content
+                if isinstance(content, list):
+                    return "".join(
+                        p.get("text", "") for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                return ""
+        return ""
+
+    def _should_rewrite_final(self, content: str) -> bool:
+        """最终答复是否需要在交付前整理成稿（只处理过程泄漏，不重做验证）。"""
+        if not self.rewrite_final_answer or self.chat_mode:
+            return False
+        # 没调过工具的纯问答不需要成稿；快速对话上面已排除
+        if self._tool_calls_this_run <= 0:
+            return False
+        text = content or ""
+        if len(text) < 40:
+            return False
+        # 用户就是要核对细节时，保留原始过程信息
+        if _DETAIL_REQUEST_PATTERN.search(self._last_user_text()):
+            return False
+        return any(p.search(text) for p in _PROCESS_LEAK_PATTERNS)
+
+    def _rewrite_answer(self, question: str, draft: str) -> str | None:
+        """一次非流式成稿调用：只删过程、不改结论。失败返回 None，调用方保留草稿。"""
+        try:
+            client = self._get_client()
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": _REWRITE_SYSTEM_PROMPT},
+                    {"role": "user", "content": f"用户问题：\n{question}\n\n草稿：\n{draft}"},
+                ],
+                "temperature": 0.2,
+            }
+            resp = client.chat.completions.create(**payload, stream=False, timeout=30)
+            text, _calls, usage = self._consume(resp)
+        except Exception as e:  # noqa: BLE001 —— 成稿是善后，失败不能让任务失败
+            token = self.cancel_token
+            if token is not None and token.cancelled():
+                return None
+            _llm_log.warning("answer.rewrite_failed error=%s: %s", type(e).__name__, e)
+            return None
+        if usage is not None:
+            self._account(usage)
+        text = (text or "").strip()
+        # 明显异常（空回答、极端缩短）直接放弃，宁可保留草稿也不丢事实
+        if len(text) < 20 or len(text) < len(draft) * 0.2:
+            return None
+        _llm_log.info("answer.rewrite chars=%d->%d", len(draft), len(text))
+        return text
 
     def _sync_system_prompt(self, user_input: str = "") -> None:
         """每轮 run() 刷新 messages[0] = 基础提示词 + auto 责任准则 + 联网提示 + 记忆块。
@@ -1554,8 +1645,7 @@ class Agent:
                 # 最后一轮不拦（拦了也没有余量再执行验证工具）。
                 if self._verify_gate_needed(turn):
                     self._verify_nudged = True
-                    _llm_log.info("verify.gate turn=%d：交付前注入验证提醒", turn)
-                    self._ui_call("notice", "[yellow]· 交付前请先验证（读回文件 / 核对内容 / 查看命令结果）[/yellow]")
+                    _llm_log.info("verify.gate turn=%d：交付前注入内部自查提醒", turn)
                     self.messages.append(
                         {"role": "user", "content": _VERIFY_GATE_NOTE, "_injected": "verify_gate"}
                     )
@@ -1565,6 +1655,13 @@ class Agent:
                         kind=events.KIND_VERIFY_GATE, content=_VERIFY_GATE_NOTE,
                     )
                     continue
+                # 成稿：正文里混入验证/核对过程时，整理成面向用户的结论。
+                # 只改写展示文本（不动结论与数字）；失败/取消自动保留草稿。
+                if self._should_rewrite_final(content or ""):
+                    rewritten = self._rewrite_answer(self._last_user_text(), content or "")
+                    if rewritten:
+                        content = rewritten
+                        self.messages[-1]["content"] = rewritten
                 self.last_answer_streamed = shown
                 return content or ""
 

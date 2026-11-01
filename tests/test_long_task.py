@@ -144,8 +144,9 @@ def test_long_chain_hits_max_turns_with_wrapup():
 
     assert "已达最大轮次（20 轮），任务未完成" in out, out
     assert "已完成 20 步" in out, out
-    # 收尾是末尾新增的一条 assistant；工具轮里的 assistant 保持原样
-    assert a.messages[-1] == {"role": "assistant", "content": out}
+    # 收尾是末尾新增的一条 assistant；工具轮里的 assistant 保持原样（_ts 为落盘时间戳，忽略）
+    last = a.messages[-1]
+    assert last["role"] == "assistant" and last["content"] == out, last
     tool_rounds = [m for m in a.messages
                    if m.get("role") == "assistant" and m.get("tool_calls")]
     assert len(tool_rounds) == 20, len(tool_rounds)

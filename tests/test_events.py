@@ -562,7 +562,9 @@ def test_events_disabled_noop():
         w2.close()
 
         assert out_on == out_off
-        assert a_on.messages == a_off.messages, "开关只影响记录，绝不该改变消息序列"
+        # _ts 是落盘用的时间戳（两次运行天然不同），比较消息序列时忽略它
+        norm = lambda ms: [{k: v for k, v in m.items() if k != "_ts"} for m in ms]
+        assert norm(a_on.messages) == norm(a_off.messages), "开关只影响记录，绝不该改变消息序列"
         assert events.events_exist(sid_on)
         assert not events.events_exist(sid_off), "关闭事件流不该产生任何文件"
         print("✓ 事件流：关闭开关 = 纯 no-op（不建文件、messages 逐条相同）")

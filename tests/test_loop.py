@@ -471,6 +471,8 @@ def test_verify_gate_nudges_once_after_side_effects():
     gates = [m for m in a.messages if m.get("_injected") == "verify_gate"]
     assert len(gates) == 1, f"验证提醒应恰好注入一次，实际 {len(gates)}"
     assert gates[0]["role"] == "user", gates[0]
+    # 自查只作为内部质检：提示词里必须明确禁止把验证过程写进最终答复
+    assert "不要在最终答复里复述验证步骤" in gates[0]["content"], gates[0]
     assert len(a._client.chat.completions.calls) == 3, a._client.chat.completions.calls
     print("✓ 收尾验证门：有副作用操作时拦一次，验证后交付")
 
@@ -502,7 +504,67 @@ def test_verify_gate_skips_readonly_and_disabled():
                         registry=_fake_registry(("custom_write", True), ("custom_read", False)))
     assert c._is_side_effect_call({"function": {"name": "custom_write"}})
     assert not c._is_side_effect_call({"function": {"name": "custom_read"}})
-    print("✓ 收尾验证门：纯读不触发 / 开关可关 / dangerous 工具纳入副作用")
+    # 命令类工具常被用于只读计算（取色、统计、语法检查），不触发验证门
+    assert not c._is_side_effect_call({"function": {"name": "run_python"}})
+    assert not c._is_side_effect_call({"function": {"name": "run_shell"}})
+    assert c._is_side_effect_call({"function": {"name": "write_file"}})
+    print("✓ 收尾验证门：纯读/只读命令不触发 / 开关可关 / dangerous 外部工具纳入")
+
+
+def test_final_answer_rewrite_strips_process():
+    """成稿改写：答复含验证过程时调一次成稿；干净答案/用户要细节/开关关闭都不调。"""
+    draft = (
+        "验证依据：list_dir 返回 3 项，MD5 为 8f14e45fceea167a5a36dedd4bea2543。\n"
+        "修正（2 处）后复核无误。\n\n最终结论：目录里有 a.md、b.py、c.txt 三个文件。"
+    )
+    fixed = "目录里有 3 个文件：a.md、b.py、c.txt。"
+
+    # 1) 命中泄漏 → 多一次成稿调用，展示与落盘都用成稿
+    script = [
+        _Msg(tool_calls=[_TC(1, "list_dir", "{}")]),
+        _Msg(content=draft),
+        _Msg(content=fixed),
+    ]
+    a = agent_mod.Agent(verbose=False, client=_StubClient(script))
+    out = a.run("看看目录里有哪些文件")
+    assert out == fixed, out
+    assert a.messages[-1]["content"] == fixed, a.messages[-1]
+    assert len(a._client.chat.completions.calls) == 3, "应额外发起一次成稿调用"
+    rewrite_call = a._client.chat.completions.calls[-1]
+    assert rewrite_call["stream"] is False, rewrite_call
+    assert "草稿" in rewrite_call["messages"][-1]["content"], rewrite_call
+
+    # 2) 干净答案 → 不调用成稿
+    clean = ("目录里有 a.md、b.py、c.txt 三个文件；a.md 是说明，b.py 是可执行脚本，"
+             "c.txt 是运行日志。当前目录没有子目录，也没有隐藏文件。")
+    a = agent_mod.Agent(verbose=False, client=_StubClient([
+        _Msg(tool_calls=[_TC(1, "list_dir", "{}")]), _Msg(content=clean),
+    ]))
+    assert a.run("看看目录里有哪些文件") == clean
+    assert len(a._client.chat.completions.calls) == 2, "干净答案不该被重写"
+
+    # 3) 用户明确要核对细节 → 保留过程，不重写
+    a = agent_mod.Agent(verbose=False, client=_StubClient([
+        _Msg(tool_calls=[_TC(1, "list_dir", "{}")]), _Msg(content=draft),
+    ]))
+    out = a.run("列出目录，并给出验证依据和 MD5 核对细节")
+    assert out == draft, out
+    assert len(a._client.chat.completions.calls) == 2, "用户要细节时不该改写"
+
+    # 4) 成稿调用失败 → 回退草稿，任务不失败
+    a = agent_mod.Agent(verbose=False, client=_StubClient([
+        _Msg(tool_calls=[_TC(1, "list_dir", "{}")]), _Msg(content=draft),
+    ]))
+    assert a.run("看看目录里有哪些文件") == draft
+    assert len(a._client.chat.completions.calls) == 3, "失败也要尝试一次成稿"
+
+    # 5) 开关关闭 → 完全不触发
+    a = agent_mod.Agent(verbose=False, client=_StubClient([
+        _Msg(tool_calls=[_TC(1, "list_dir", "{}")]), _Msg(content=draft), _Msg(content=fixed),
+    ]), rewrite_final_answer=False)
+    assert a.run("看看目录里有哪些文件") == draft
+    assert len(a._client.chat.completions.calls) == 2, "关掉开关后不该有成稿调用"
+    print("✓ 成稿改写：泄漏触发 / 干净跳过 / 要细节跳过 / 失败回退 / 开关可关")
 
 
 def test_turn_budget_nudge_enters_request_tail():
@@ -636,6 +698,7 @@ if __name__ == "__main__":
     test_empty_answer_retried_once()
     test_verify_gate_nudges_once_after_side_effects()
     test_verify_gate_skips_readonly_and_disabled()
+    test_final_answer_rewrite_strips_process()
     test_turn_budget_nudge_enters_request_tail()
     test_context_overflow_trims_and_retries()
     print("---")

@@ -50,7 +50,8 @@ run(user_input)
 ## 收尾与上下文
 
 - **轮数用尽收尾**：达到最大轮数时发一次不带工具的调用，输出「任务目标 / 做到哪一步 / 为何没做完 / 建议下一步」，并入本轮最后一条回复；失败则本地合成事实说明。
-- **收尾验证门**：本轮执行过写文件 / 执行命令类操作时，注入一条系统提醒，要求交付前验证（读回文件、核对数字、看完整命令输出）。
+- **收尾验证门**：本轮产出或修改了交付物（写文件、改外部状态等）时，注入一条系统提醒做内部自查；只读命令（取色、统计、语法检查）与纯读任务不触发。自查过程不写进最终答复。
+- **成稿改写**：最终答复命中过程泄漏特征（验证依据、复核、修正记录、MD5 等）且用户没要求核对细节时，额外调一次非流式模型做删减重组；只删过程、保留结论与数字，失败/取消自动回退草稿。仅智能体模式且有工具调用时生效，快速对话不受影响；开关 `rewrite_final_answer`。
 - **上下文水位**：输入区上方显示占用百分比；超长时先裁旧工具结果，再把较早整轮摘要，最后滑动窗口硬截断（保留 system + 摘要 + 最近 8 轮）。
 - **任务执行归后端**：跑在服务端 worker 线程，关页面只停推送不中断执行；同一会话后台运行时发新消息返回 409。
 
@@ -58,7 +59,8 @@ run(user_input)
 
 - 循环与取消：`src/core/agent.py` 的 `Agent.run()` / `_run_loop()` / `_request()` / `_consume_stream()` / `_run_tools()` / `interrupt()` / `_patch_cancelled_replies()`
 - 上下文：`_trim_context()` / `_trim_old_tool_results()` / `_roll_summary()` / `_hard_window()` / `context_stats()`
-- 收尾：`_wrap_up_on_max_turns()` / `_max_turns_fallback()` / `_verify_gate_needed()`
+- 交付口径：`_verify_gate_needed()` / `_should_rewrite_final()` / `_rewrite_answer()`
+- 收尾：`_wrap_up_on_max_turns()` / `_max_turns_fallback()`
 - 系统提示：`DEFAULT_SYSTEM_PROMPT` / `CHAT_SYSTEM_PROMPT` / `_sync_system_prompt()`
 - SSE 入口：`src/core/webui.py` 的 `_handle_chat_stream()`；会话锁 `_lock_session_or_409()`
 - 前端：`web/src/components/Chat.tsx`、`web/src/App.tsx`、`web/src/components/ToolChain.tsx`
