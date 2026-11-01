@@ -14,6 +14,8 @@
  10. PDF —— kind=pdf，raw 接口返回 application/pdf
  11. 下载 —— attachment 头、中文文件名、越界拦截
  12. CSV/TSV —— 表格分页、引号内逗号、10000 行上限
+ 13. 图片产物 —— 工具结果里的图片路径识别（区外/不存在/过小/重复/报错都丢弃）
+ 14. 删除 —— 文件 / 目录可删，根目录、越界、.memory、缺失均拒绝
 """
 
 from __future__ import annotations
@@ -60,6 +62,19 @@ def _get(path: str) -> tuple[int, str, bytes]:
 def _json(path: str):
     code, _ctype, body = _get(path)
     return code, json.loads(body.decode("utf-8"))
+
+
+def _post_json(path: str, payload: dict):
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        BASE + path, data=data, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+    except HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8"))
 
 
 def _get_headers(path: str) -> tuple[int, dict, bytes]:
@@ -364,6 +379,88 @@ def test_csv_table():
     print("✓ CSV/TSV：表头、引号内逗号、行分页、10000 行上限")
 
 
+def test_artifact_detection():
+    """工具结果里的图片路径 → 气泡下方的图片产物（只认真实存在、区内的图）。"""
+    from core.webui import _image_artifacts
+
+    root = workspace_config.resolve_path("default")
+    with open(os.path.join(root, "chart.png"), "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + b"0" * 2000)
+    os.makedirs(os.path.join(root, "docs"), exist_ok=True)
+    with open(os.path.join(root, "docs", "trend.png"), "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + b"1" * 800)
+
+    known: set[str] = set()
+    items = _image_artifacts("已保存到 chart.png", "default", known)
+    assert [a["path"] for a in items] == ["chart.png"], items
+    assert items[0]["url"].startswith("/api/workspace/raw?"), items
+    # 同一路径不重复上报
+    assert _image_artifacts("chart.png", "default", known) == []
+    # 子目录路径也能识别，已上报的仍然跳过
+    more = _image_artifacts("图表：docs/trend.png 和 chart.png", "default", known)
+    assert [a["path"] for a in more] == ["docs/trend.png"], more
+    # 不存在 / 越界 / 太小 / 报错结果：一律丢弃
+    assert _image_artifacts("nope.png", "default", set()) == []
+    assert _image_artifacts("../x.png", "default", set()) == []
+    assert _image_artifacts("pic.png", "default", set()) == []      # 40 字节，太小
+    assert _image_artifacts("[error] chart.png", "default", set()) == []
+
+    # 绝对路径回执（write_file 的返回文案）也要认出来：
+    # 结果里是 C:\...\x.svg，而 _workspace_path 只收相对路径，必须单独处理。
+    abs_svg = os.path.join(root, "abs-chart.svg")
+    with open(abs_svg, "wb") as f:
+        f.write(b"<svg xmlns='http://www.w3.org/2000/svg'></svg>" + b" " * 600)
+    items2 = _image_artifacts(f"[ok] 已写入 {abs_svg}（9057 字节）", "default", set())
+    assert [a["path"] for a in items2] == ["abs-chart.svg"], items2
+    # 工作区外的绝对路径不能报
+    outside = os.path.join(os.path.dirname(root), "outside-chart.png")
+    with open(outside, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + b"2" * 2000)
+    try:
+        assert _image_artifacts(f"写入 {outside}", "default", set()) == []
+    finally:
+        os.remove(outside)
+
+    # 自查截图（_check_preview.png 这类）与同名不同格式不重复上报
+    with open(os.path.join(root, "_check_preview.png"), "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + b"3" * 2000)
+    assert _image_artifacts("渲染校验截图 _check_preview.png", "default", set()) == []
+    with open(os.path.join(root, "chart.svg"), "wb") as f:
+        f.write(b"<svg xmlns='http://www.w3.org/2000/svg'/>" + b" " * 600)
+    dedup = _image_artifacts("chart.svg 和 chart.png", "default", set())
+    assert [a["path"] for a in dedup] == ["chart.svg"], dedup
+    print("✓ 图片产物：只认工作区内真实存在、够大的图，已上报的不重复")
+
+
+def test_workspace_delete():
+    """删除接口：文件 / 目录可删；根目录、越界、.memory、不存在一律拒绝。"""
+    root = workspace_config.resolve_path("default")
+    os.makedirs(os.path.join(root, "del-dir"), exist_ok=True)
+    with open(os.path.join(root, "del-dir", "inner.txt"), "w", encoding="utf-8") as f:
+        f.write("x")
+    with open(os.path.join(root, "del-me.txt"), "w", encoding="utf-8") as f:
+        f.write("y")
+
+    code, body = _post_json("/api/workspace/delete",
+                            {"workspace_id": "default", "path": "del-me.txt"})
+    assert code == 200 and body.get("kind") == "file", body
+    assert not os.path.exists(os.path.join(root, "del-me.txt"))
+
+    code, body = _post_json("/api/workspace/delete",
+                            {"workspace_id": "default", "path": "del-dir"})
+    assert code == 200 and body.get("kind") == "dir", body
+    assert not os.path.exists(os.path.join(root, "del-dir"))
+
+    for bad in ("", "../x.txt", "nope.txt"):
+        code, _ = _post_json("/api/workspace/delete",
+                             {"workspace_id": "default", "path": bad})
+        assert code in (400, 403, 404), (bad, code)
+    code, _ = _post_json("/api/workspace/delete",
+                         {"workspace_id": "default", "path": ".memory/x.md"})
+    assert code == 403, code
+    print("✓ 删除：文件 / 目录可删，根目录、越界、.memory、缺失均被拒绝")
+
+
 def main() -> int:
     print("项目根:", HERE)
     print("---")
@@ -402,6 +499,8 @@ def main() -> int:
         test_pdf_preview()
         test_download()
         test_csv_table()
+        test_artifact_detection()
+        test_workspace_delete()
     finally:
         if srv._httpd is not None:
             srv._httpd.shutdown()

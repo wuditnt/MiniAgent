@@ -3,8 +3,8 @@
  * Chat / WelcomePane / ConfirmPanel / ToolChain 是纯展示组件。
  */
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import { DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, MoreOutlined, TeamOutlined, LockOutlined, LogoutOutlined, UserOutlined, GlobalOutlined } from "@ant-design/icons";
-import { Dropdown, Input, message, Modal, Switch, Tooltip } from "antd";
+import { DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, MoreOutlined, TeamOutlined, LockOutlined, LogoutOutlined, UserOutlined } from "@ant-design/icons";
+import { Dropdown, Input, message, Modal, Tooltip } from "antd";
 import {
   chatStream,
   createWorkspace,
@@ -30,6 +30,7 @@ import {
 import type {
   AgentState,
   ApprovalMode,
+  Artifact,
   ChatItem,
   ConfirmInfo,
   HistoryMessage,
@@ -107,6 +108,8 @@ function toItems(messages: HistoryMessage[], runs?: RunInfo[]): ChatItem[] {
       sec: m.sec,
       // 附件元数据：发送时写入，历史回放原样展示
       attachments: m.attachments,
+      // 本轮工具产出的图片：刷新 / 重启后照样能在气泡下方看到
+      artifacts: m.artifacts,
       ts: m.ts,
       run: m.role === "user" ? undefined : byTurn.get(turn),
     };
@@ -435,7 +438,7 @@ export default function App({
     if (cur && cur.message_count > 0 && cur.workspace_id) setWs(cur.workspace_id);
   }, [session, sessions]);
 
-  // 切换会话时同步联网开关：每个对话保存自己的智能搜索配置，
+  // 切换会话时同步联网开关：每个对话保存自己的联网搜索配置，
   // 草稿会话（还没落盘）不在列表里，沿用当前选择
   useEffect(() => {
     if (!sessions.some((s) => s.id === session)) return;
@@ -453,6 +456,13 @@ export default function App({
 
   const patchAssistant = (id: string, patch: (it: ChatItem) => ChatItem) =>
     setItems((prev) => prev.map((it) => (it.id === id ? patch(it) : it)));
+
+  /** 追加工具产出的图片：同一路径只保留一次（多个工具可能重复报告同一个文件） */
+  const addArtifacts = (it: ChatItem, items: Artifact[]): ChatItem => {
+    const known = new Set((it.artifacts || []).map((a) => a.path));
+    const fresh = items.filter((a) => !known.has(a.path));
+    return fresh.length ? { ...it, artifacts: [...(it.artifacts || []), ...fresh] } : it;
+  };
 
   /** 终态兜底：把还没等到 tool_end 的 pending 工具节点标记为失败 */
   const finalizeTools = (it: ChatItem): ChatItem => ({
@@ -569,6 +579,10 @@ export default function App({
                 { status: ev.ok ? "ok" : "fail", dur_ms: ev.sec * 1000 }
               )
             );
+            break;
+          case "artifact":
+            // 工具把图片写进了工作区：气泡下方直接给缩略图，不用等模型自己引用
+            patchAssistant(asstId, (it) => addArtifacts(it, ev.items));
             break;
           case "confirm_request":
             setConfirm({ id: ev.id, tool: ev.tool, args: ev.args });
@@ -813,6 +827,10 @@ export default function App({
               )
             );
             break;
+          case "artifact":
+            // 工具把图片写进了工作区：气泡下方直接给缩略图，不用等模型自己引用
+            patchAssistant(asstId, (it) => addArtifacts(it, ev.items));
+            break;
           case "confirm_request":
             setConfirm({ id: ev.id, tool: ev.tool, args: ev.args });
             break;
@@ -992,7 +1010,7 @@ export default function App({
         ? crypto.randomUUID()
         : `s-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setDraftWs(ws);
-    // 新对话的智能搜索默认关闭（每个对话各自独立配置）
+    // 新对话的联网搜索默认关闭（每个对话各自独立配置）
     setWeb(false);
     setSession(id);
   };
@@ -1229,7 +1247,7 @@ export default function App({
       );
   };
 
-  /** 切换当前会话的智能搜索：持久化到会话，别的对话不受影响 */
+  /** 切换当前会话的联网搜索：持久化到会话，别的对话不受影响 */
   const handleSetWeb = (w: boolean) => {
     setWeb(w);
     if (!currentSession) return; // 会话还没落盘（草稿）：随首条消息一起保存
@@ -1419,30 +1437,6 @@ export default function App({
                 menu={{
                   items: [
                     {
-                      key: "web",
-                      label: (
-                        <div
-                          className="menu-switch-row"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleSetWeb(!web);
-                          }}
-                        >
-                          <span className="menu-switch-label">
-                            <GlobalOutlined />
-                            <span>智能搜索</span>
-                          </span>
-                          <Switch
-                            size="small"
-                            checked={web}
-                            onClick={(_, e) => e.stopPropagation()}
-                            onChange={(v) => handleSetWeb(v)}
-                          />
-                        </div>
-                      ),
-                    },
-                    { type: "divider" as const },
-                    {
                       key: "stats",
                       icon: <BarChartOutlined />,
                       label: "用量统计",
@@ -1472,7 +1466,7 @@ export default function App({
                 </span>
               </Dropdown>
             </Tooltip>
-            {/* 联网搜索开关已迁到输入框工具栏（每个对话独立配置） */}
+            {/* 联网搜索开关已移到输入框上方，右对齐输入框 */}
             {/* 账号菜单：账号相关功能统一收在这个用户图标下（--no-login 时没有身份，不显示） */}
             {loginEnabled && (
               <Tooltip title={user.display_name || user.username}>
@@ -1569,6 +1563,8 @@ export default function App({
             if (draftWs !== null) setDraftWs(id);
           }}
           workspaceLocked={!!currentSession && currentSession.message_count > 0}
+          web={web}
+          onWeb={handleSetWeb}
           onRegenerate={busy ? undefined : handleRegenerate}
           onEditResend={busy ? undefined : handleEditResend}
           editingId={editingId}

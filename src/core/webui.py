@@ -25,6 +25,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import signal
 import socket
 import threading
@@ -386,6 +387,9 @@ class _Session:
                     # 每轮的用量/耗时一并灌回内存（_ 前缀字段不会发给模型接口）
                     if role == "assistant" and (m.get("usage") or m.get("sec") is not None):
                         msg["_stats"] = {"usage": m.get("usage"), "sec": m.get("sec")}
+                    # 该轮工具产出的图片：回放时气泡下方照样展示
+                    if role == "assistant" and m.get("artifacts"):
+                        msg["_artifacts"] = m["artifacts"]
                     # 附件元数据灌回内存，save() 时再原样落盘
                     if role == "user" and m.get("attachments"):
                         msg["_attachments"] = m["attachments"]
@@ -422,6 +426,8 @@ class _Session:
                     item["usage"] = stats["usage"]
                 if stats.get("sec") is not None:
                     item["sec"] = stats["sec"]
+                if m.get("_artifacts"):
+                    item["artifacts"] = m["_artifacts"]
                 if m.get("_ts"):
                     item["ts"] = m["_ts"]
                 messages.append(item)
@@ -624,6 +630,13 @@ class WebUI:
         # 同名工具在同批并行时完成顺序可能与开始顺序不同，这是 v1 接受的误差。
         self._pending_ids: dict[str, list[str]] = {}
         self._lock = threading.RLock()
+        # 本轮工具产出的图片：run 开始时清空，结束时挂到最后一条 assistant 消息落盘
+        self.artifacts: list[dict] = []
+
+    def reset_artifacts(self) -> None:
+        """新的一轮开始：清空上一轮的图片产物（WebUI 实例跨轮复用）。"""
+        with self._lock:
+            self.artifacts = []
 
     def _push(self, event: dict) -> None:
         # 广播：发起这次运行的连接和后来「接入查看」的连接都收到
@@ -700,6 +713,16 @@ class WebUI:
             "result": result[:HISTORY_RESULT_LIMIT],
             "ts": self.session.run_ts(),
         })
+        # 工具把图片写进了工作区：顺手推一条产物事件，前端在气泡下方直接给缩略图。
+        # 只认工作区内的图片文件，识别不到就静默跳过（不影响对话）。
+        if ok:
+            with self._lock:
+                known = {a["path"] for a in self.artifacts}
+            items = _image_artifacts(result, self.session.workspace_id, known)
+            if items:
+                with self._lock:
+                    self.artifacts.extend(items)
+                self._push({"type": "artifact", "items": items})
 
     def _bridge_ask(self, payload: dict, holder: dict, kind: str) -> bool:
         """确认 / 提问共用的一套「推事件 → 无限等待 → 收答案」。
@@ -1269,6 +1292,104 @@ def _posix_rel(path: str, root: str) -> str:
     return "" if path == root else os.path.relpath(path, root).replace(os.sep, "/")
 
 
+# 工具产出图片的识别：结果文本里出现这些扩展名的路径，再按工作区做存在性校验。
+# 只是兜底 —— 模型照约定在正文里用 ![说明](相对路径) 引用图片同样能在对话里展示。
+_ARTIFACT_PATH_RE = re.compile(
+    r"[^\s\"'`<>|，,、；;：（）\[\]【】*]+\.(?:png|jpg|jpeg|gif|webp|bmp|svg|ico)",
+    re.I,
+)
+_ARTIFACT_SCAN_CHARS = 4000              # 只扫结果开头，避免大量日志拖慢
+_ARTIFACT_LIMIT = 6                      # 一条回答最多展示 6 张
+_ARTIFACT_MIN_BYTES = 512                # 太小的多半是图标 / 占位图
+_ARTIFACT_MAX_BYTES = _RAW_MAX_BYTES     # 与原始字节预览同一个上限
+
+#: 自查/临时图：模型为了「渲染校验」常截图成 preview.png / _check_preview.png 之类，
+#: 和交付物是同一张图，不该在气泡下方再挂一个缩略图
+_ARTIFACT_SKIP_RE = re.compile(r"^_|preview|thumb|check", re.I)
+
+
+def _is_artifact(path: str) -> bool:
+    """该文件是否值得作为图片产物展示（排除自查截图等内部临时图）。"""
+    return bool(path) and not _ARTIFACT_SKIP_RE.search(os.path.basename(path))
+
+
+def _artifact_path(workspace_id: str, raw: str) -> tuple[str, str] | None:
+    """结果文本里的图片路径（相对 / 绝对）→ 工作区内的绝对路径。
+
+    为什么要单独处理绝对路径：write_file、run_python、pdf_to_images 的回执
+    常常带的是完整路径（`C:\\Users\\...\\a.svg`），而 _workspace_path 只收相对路径，
+    直接交给它会抛 ValueError 被丢弃 —— 结果就是用户生成好的图在对话里看不到。
+    """
+    from core import memory
+
+    root = os.path.realpath(
+        workspace_config.resolve_path(workspace_id or workspace_config.DEFAULT_ID)
+    )
+    candidate = os.path.realpath(os.path.expanduser(raw.strip().strip("\"'`")))
+    if os.path.isabs(candidate) and (
+        candidate == root or candidate.startswith(root + os.sep)
+    ):
+        if memory.is_memory_path(candidate, root):
+            return None
+        return root, candidate
+    try:
+        return _workspace_path(workspace_id, raw)
+    except (ValueError, PermissionError):
+        return None
+
+
+def _image_artifacts(text: str, workspace_id: str, known: set[str]) -> list[dict]:
+    """从工具结果里认出「刚生成的图片」，返回可直接给前端的元数据。
+
+    认的是结果文本里的路径字面量（write_file 的回执、run_python 打印的保存路径、
+    pdf_to_images 的清单都会带上），然后统一按工作区根做越界 / 存在 / 大小校验；
+    校验不过就丢弃 —— 宁可漏报，也不要把区外文件或半截文件塞给前端。
+    """
+    out: list[dict] = []
+    if not text or text.startswith(("[error]", "[denied]", "[cancelled]")):
+        return out
+    # 同名不同格式（chart.svg 与 chart.png）只保留先出现的那张，避免一张图报两次
+    stems = {os.path.splitext(os.path.basename(p))[0].lower() for p in known}
+    for m in _ARTIFACT_PATH_RE.finditer(text[:_ARTIFACT_SCAN_CHARS]):
+        raw = m.group(0).strip("()（）[]【】`\"'")
+        if not raw:
+            continue
+        target = _artifact_path(workspace_id, raw)
+        if not target:
+            continue
+        root, ap = target
+        if not os.path.isfile(ap):
+            continue
+        rel_path = _posix_rel(ap, root)
+        if not rel_path or rel_path in known:
+            continue
+        name = os.path.basename(ap)
+        if not _is_artifact(rel_path):
+            continue
+        stem = os.path.splitext(name)[0].lower()
+        if stem in stems:
+            continue
+        try:
+            size = os.path.getsize(ap)
+        except OSError:
+            continue
+        if size < _ARTIFACT_MIN_BYTES or size > _ARTIFACT_MAX_BYTES:
+            continue
+        known.add(rel_path)
+        stems.add(stem)
+        out.append({
+            "path": rel_path,
+            "name": os.path.basename(ap),
+            "ext": os.path.splitext(ap)[1].lower(),
+            "size": size,
+            "url": (f"/api/workspace/raw?workspace_id={quote(workspace_id)}"
+                    f"&path={quote(rel_path)}"),
+        })
+        if len(out) >= _ARTIFACT_LIMIT:
+            break
+    return out
+
+
 # ---------------------------------------------------------- 会话持久化
 
 def _session_file(sid: str) -> str:
@@ -1502,6 +1623,7 @@ def _display_items(raw: list[dict]) -> list[dict]:
             segs: list[str] = []
             stats_src: dict | None = None
             seg_ts: float | None = None
+            arts: list[dict] = []
             j = i
             while j < n:
                 seg = raw[j]
@@ -1514,6 +1636,16 @@ def _display_items(raw: list[dict]) -> list[dict]:
                             seg_ts = seg["_ts"]
                         if seg.get("_stats") or seg.get("usage") is not None:
                             stats_src = seg
+                        # 同一轮多段回答：图片产物取并集（同一路径只留一次；
+                        # 旧的落盘数据里可能还留着自查截图，展示时同样过滤掉）
+                        for a in seg.get("_artifacts") or seg.get("artifacts") or []:
+                            if (
+                                isinstance(a, dict)
+                                and a.get("path")
+                                and _is_artifact(a["path"])
+                                and a["path"] not in {x.get("path") for x in arts}
+                            ):
+                                arts.append(a)
                     j += 1
                 elif _is_injected(seg):
                     j += 1          # 内部注入：跨过去，继续合并同一次回复
@@ -1524,6 +1656,8 @@ def _display_items(raw: list[dict]) -> list[dict]:
                         "_start": i, "_end": j - 1}
                 if seg_ts:
                     item["ts"] = seg_ts
+                if arts:
+                    item["artifacts"] = arts
                 if stats_src is not None:
                     usage = stats_src.get("usage") or (stats_src.get("_stats") or {}).get("usage")
                     sec = stats_src.get("sec")
@@ -2138,6 +2272,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_shutdown()
         elif route == "/api/chat":
             self._handle_chat()
+        elif route == "/api/workspace/delete":
+            self._handle_workspace_delete()
         elif route == "/api/upload":
             self._handle_upload()
         elif route == "/api/confirm":
@@ -3559,6 +3695,44 @@ class _RequestHandler(BaseHTTPRequestHandler):
             "truncated": truncated,
         })
 
+    def _handle_workspace_delete(self) -> None:
+        """删除工作区内的文件 / 目录（目录连同内容一起删；危险操作由前端二次确认）。"""
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON（{workspace_id, path}）")
+            return
+        wid = str(body.get("workspace_id") or workspace_config.DEFAULT_ID)
+        rel = str(body.get("path") or "")
+        if not rel.strip():
+            self._fail(400, "path 不能为空")
+            return
+        try:
+            root, ap = _workspace_path(wid, rel)
+        except ValueError as e:
+            self._fail(400, str(e))
+            return
+        except PermissionError as e:
+            self._fail(403, str(e))
+            return
+        if ap == root:
+            self._fail(400, "不能删除工作区根目录")
+            return
+        if not os.path.exists(ap):
+            self._fail(404, "文件或目录不存在")
+            return
+        try:
+            if os.path.isdir(ap):
+                shutil.rmtree(ap)
+                kind = "dir"
+            else:
+                os.remove(ap)
+                kind = "file"
+        except OSError as e:
+            self._fail(500, f"删除失败：{e}")
+            return
+        _log.info("workspace.delete kind=%s path=%s", kind, rel)
+        self._json({"ok": True, "path": rel, "kind": kind})
+
     def _handle_workspace_raw(self, params: dict) -> None:
         wid = (params.get("workspace_id") or [workspace_config.DEFAULT_ID])[0]
         rel = (params.get("path") or [""])[0]
@@ -3915,6 +4089,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
             agent.approval_mode = approval   # 三档确认逐轮生效
             agent.session_id = session.id   # 工作区切换后仍按本会话沉淀摘要
             agent.registry = _session_registry(mode, approval, web)
+            # 新的一轮：清空上一轮的工具产物图片（WebUI 跨轮复用）
+            reset_arts = getattr(getattr(agent, "ui", None), "reset_artifacts", None)
+            if callable(reset_arts):
+                reset_arts()
             agent.chat_mode = mode == "chat"   # 快速对话：显式关闭思考（推理等级只在智能体模式生效）
             answer = agent.run(
                 message,
@@ -3925,9 +4103,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
             usage = _usage_delta(before, agent.usage)
             # 用量/耗时挂到刚完成的 assistant 消息上（_ 前缀不会发给模型），
             # save() 落盘后，刷新页面/重启服务从历史回放也能恢复这些脚注
+            arts = list(getattr(getattr(agent, "ui", None), "artifacts", None) or [])
             for m in reversed(agent.messages):
                 if m.get("role") == "assistant" and isinstance(m.get("content"), str) and m["content"]:
                     m["_stats"] = {"usage": usage, "sec": sec}
+                    # 本轮工具生成的图片：跟着这条回答落盘，回放时气泡下方照样能看
+                    if arts:
+                        m["_artifacts"] = arts
                     break
             # 先落盘再发终态：前端收到 done 就会刷新会话列表，
             # 反过来的话文件还没写完，新会话/新标题会漏掉一拍

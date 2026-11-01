@@ -14,6 +14,7 @@ import {
   DownOutlined,
   EditOutlined,
   FolderOpenOutlined,
+  GlobalOutlined,
   HistoryOutlined,
   MoreOutlined,
   PaperClipOutlined,
@@ -27,10 +28,11 @@ import {
   UpOutlined,
 } from "@ant-design/icons";
 import { Bubble, Sender } from "@ant-design/x";
-import { Button, Checkbox, Collapse, Dropdown, Image, Input, message, Radio, Tag, Tooltip } from "antd";
+import { Button, Checkbox, Collapse, Dropdown, Image, Input, message, Radio, Switch, Tag, Tooltip } from "antd";
 import type { MenuProps } from "antd";
 import type {
   ApprovalMode,
+  Artifact,
   AskRecord,
   Attachment,
   ChatItem,
@@ -42,7 +44,7 @@ import type {
   SkillItem,
   WorkspaceItem,
 } from "../types";
-import { fetchSkills, uploadFile } from "../api";
+import { fetchSkills, uploadFile, workspaceRawUrl } from "../api";
 import { fmtSec, fmtTime } from "../format";
 import Markdown from "./Markdown";
 import ToolChain from "./ToolChain";
@@ -406,6 +408,8 @@ function AssistantBodyInner({
   /** 多选删除的卡片视图：勾选框在卡片行首，气泡内不再显示工具栏 */
   hideToolbar?: boolean;
 }) {
+  // 固定引用：Markdown 按 props 浅比较记忆化，每次新建对象会让它白渲染一遍
+  const assetBase = useMemo(() => ({ workspaceId, dir: "" }), [workspaceId]);
   return (
     <div className="assistant-body">
       {item.reasoning ? (
@@ -453,7 +457,16 @@ function AssistantBodyInner({
           ]}
         />
       ) : null}
-      {item.content ? <Markdown text={item.content} workspaceId={workspaceId} /> : null}
+      {item.content ? (
+        <Markdown
+          text={item.content}
+          workspaceId={workspaceId}
+          // 对话里正文引用的相对路径图片，按工作区根解析（工具产出的图常常就在根下）
+          assetBase={assetBase}
+          pending={item.status === "streaming"}
+        />
+      ) : null}
+      <MsgArtifacts artifacts={item.artifacts} workspaceId={workspaceId} />
       {item.ask ? (
         <AskCard record={item.ask} />
       ) : item.status === "streaming" && pendingAsk ? (
@@ -502,6 +515,9 @@ interface Props {
   workspaceId: string;
   onWorkspaceChange: (id: string) => void;
   workspaceLocked: boolean;
+  /** 本会话的联网搜索开关：每个对话独立 */
+  web: boolean;
+  onWeb: (v: boolean) => void;
   /** 上下文水位：已用字符数 / 上限 */
   contextUsage?: number;
   contextLimit?: number;
@@ -720,6 +736,38 @@ function AttachmentPreview({
 }
 
 /**
+ * 助手消息里「工具产出、已落盘」的图片：气泡正文下方的缩略图条。
+ * 点击任意一张进入全屏预览（同一轮的多张图可左右翻页）。
+ */
+function MsgArtifacts({
+  artifacts,
+  workspaceId,
+}: {
+  artifacts?: Artifact[];
+  workspaceId: string;
+}) {
+  if (!artifacts || !artifacts.length) return null;
+  const srcOf = (a: Artifact) => a.url || workspaceRawUrl(workspaceId, a.path);
+  return (
+    <div className="msg-artifacts">
+      <Image.PreviewGroup items={artifacts.map(srcOf)}>
+        {artifacts.map((a) => (
+          <Image
+            key={a.path}
+            src={srcOf(a)}
+            alt={a.name}
+            width={72}
+            height={72}
+            style={{ objectFit: "cover" }}
+            preview={{ mask: false }}
+          />
+        ))}
+      </Image.PreviewGroup>
+    </div>
+  );
+}
+
+/**
  * 内联编辑框（编辑重发，参考图3）：原位替换最后一条 user 气泡。
  * 文本为空、或与原文完全相同时「发送」禁用；确认后由 App 先删掉这条再重发。
  */
@@ -837,6 +885,8 @@ export default function Chat({
   workspaceId,
   onWorkspaceChange,
   workspaceLocked,
+  web,
+  onWeb,
   onRegenerate,
   onEditResend,
   editingId,
@@ -1699,6 +1749,16 @@ export default function Chat({
               </span>
             ))}
             {uploading && <span className="pending-att uploading">上传中…</span>}
+            {/* 联网搜索：右对齐到输入框右边缘，按会话独立生效 */}
+            <Tooltip
+              title={web ? "联网搜索已开启：本轮允许联网检索" : "开启后本轮可联网检索（每个对话独立）"}
+            >
+              <span className={`web-toggle${web ? " on" : ""}`}>
+                <GlobalOutlined />
+                <span className="web-toggle-text">联网搜索</span>
+                <Switch size="small" checked={web} onChange={onWeb} />
+              </span>
+            </Tooltip>
           </div>
           {/* 输入框定位容器：审批面板绝对定位覆盖在 Sender 上，塌缩态恰好盖满，
               展开「查看详细」时锚定底部向上撑开 */}

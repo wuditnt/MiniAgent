@@ -5,6 +5,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import {
+  DeleteOutlined,
   DownloadOutlined,
   FileImageOutlined,
   FileMarkdownOutlined,
@@ -12,8 +13,8 @@ import {
   FolderOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
-import { Empty, Spin, Tooltip } from "antd";
-import { fetchWorkspaceDir, workspaceDownloadUrl } from "../api";
+import { Empty, message, Modal, Spin, Tooltip } from "antd";
+import { deleteWorkspaceEntry, fetchWorkspaceDir, workspaceDownloadUrl } from "../api";
 import type { WorkspaceDirData, WorkspaceEntry } from "../types";
 
 interface Props {
@@ -21,6 +22,8 @@ interface Props {
   path: string;
   onPathChange: (path: string) => void;
   onOpenFile: (entry: WorkspaceEntry) => void;
+  /** 删除成功后通知外层：关掉指向它的已打开标签 */
+  onDeleted?: (path: string) => void;
 }
 
 function formatSize(n: number): string {
@@ -38,7 +41,13 @@ function iconFor(entry: WorkspaceEntry) {
   return <FileTextOutlined />;
 }
 
-export default function WorkbenchFiles({ workspaceId, path, onPathChange, onOpenFile }: Props) {
+export default function WorkbenchFiles({
+  workspaceId,
+  path,
+  onPathChange,
+  onOpenFile,
+  onDeleted,
+}: Props) {
   const [data, setData] = useState<WorkspaceDirData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -56,6 +65,31 @@ export default function WorkbenchFiles({ workspaceId, path, onPathChange, onOpen
   useEffect(() => {
     load();
   }, [load, nonce]);
+
+  /** 删除前二次确认：目录会连同内容一起删，且不可恢复 */
+  const confirmDelete = (entry: WorkspaceEntry) => {
+    const isDir = entry.type === "dir";
+    Modal.confirm({
+      title: isDir ? "删除这个文件夹？" : "删除这个文件？",
+      content: (
+        <div>
+          <div style={{ wordBreak: "break-all" }}>{entry.path}</div>
+          <div style={{ color: "#999", fontSize: 12, marginTop: 6 }}>
+            {isDir ? "文件夹内的所有内容都会一起删除，" : ""}删除后无法恢复。
+          </div>
+        </div>
+      ),
+      okText: "删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        await deleteWorkspaceEntry(workspaceId, entry.path);
+        message.success(`已删除 ${entry.name}`);
+        onDeleted?.(entry.path);
+        setNonce((n) => n + 1);
+      },
+    });
+  };
 
   const segments = (data?.path || "").split("/").filter(Boolean);
   const rootName = (data?.root || "").split(/[\\/]/).filter(Boolean).pop() || data?.root || "";
@@ -106,24 +140,39 @@ export default function WorkbenchFiles({ workspaceId, path, onPathChange, onOpen
                 }}
               >
                 <span className="wb-row-icon">{iconFor(entry)}</span>
-                <span className="wb-row-name" title={entry.name}>
-                  {entry.name}
+                <span className="wb-row-main">
+                  <span className="wb-row-name" title={entry.name}>
+                    {entry.name}
+                  </span>
+                  {entry.type === "file" && (
+                    <span className="wb-row-meta">{formatSize(entry.size)}</span>
+                  )}
                 </span>
                 {entry.type === "file" && (
-                  <>
-                    <Tooltip title="下载">
-                      <a
-                        className="wb-row-dl"
-                        href={workspaceDownloadUrl(workspaceId, entry.path)}
-                        download={entry.name}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <DownloadOutlined />
-                      </a>
-                    </Tooltip>
-                    <span className="wb-row-meta">{formatSize(entry.size)}</span>
-                  </>
+                  <Tooltip title="下载">
+                    <a
+                      className="wb-row-dl"
+                      href={workspaceDownloadUrl(workspaceId, entry.path)}
+                      download={entry.name}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <DownloadOutlined />
+                    </a>
+                  </Tooltip>
                 )}
+                <Tooltip title="删除">
+                  <span
+                    className="wb-row-del"
+                    role="button"
+                    aria-label={`删除 ${entry.name}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      confirmDelete(entry);
+                    }}
+                  >
+                    <DeleteOutlined />
+                  </span>
+                </Tooltip>
               </div>
             ))}
           </div>

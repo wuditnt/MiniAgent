@@ -300,6 +300,16 @@ export function workspaceDownloadUrl(workspaceId: string, path: string): string 
   return `/api/workspace/download?${qs}`;
 }
 
+/** 删除工作区内的文件 / 目录（目录连同其中内容一起删，不可恢复） */
+export async function deleteWorkspaceEntry(workspaceId: string, path: string): Promise<void> {
+  const res = await req("/api/workspace/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace_id: workspaceId, path }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
 /** CSV/TSV 表格分页：后端按行窗口 × 列窗口返回 */
 export async function fetchWorkspaceTable(
   workspaceId: string,

@@ -164,6 +164,16 @@ export default function Workbench({
     if (active === id) setActive(next[Math.min(Math.max(idx, 0), next.length - 1)].id);
   };
 
+  /** 文件 / 目录被删除后：关掉指向它的标签（目录连同其下的文件） */
+  const handleDeleted = (path: string) => {
+    const gone = (t: Tab) => t.kind === "file" && (t.path === path || t.path.startsWith(`${path}/`));
+    if (tabs.some((t) => t.id === active && gone(t))) setActive("files");
+    setTabs((prev) => {
+      const next = prev.filter((t) => !gone(t));
+      return next.length ? next : [{ id: "files", kind: "files", title: "文件" }];
+    });
+  };
+
   const current = tabs.find((t) => t.id === active);
   const className = [
     "workbench",
@@ -280,6 +290,7 @@ export default function Workbench({
                 path={dir}
                 onPathChange={setDir}
                 onOpenFile={openFile}
+                onDeleted={handleDeleted}
               />
             )}
             {current?.kind === "file" && (

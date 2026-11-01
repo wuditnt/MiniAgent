@@ -29,6 +29,17 @@ export interface Attachment {
   size: number;
 }
 
+/** 工具产出的图片：本轮生成、已落在工作区里的文件（气泡下方缩略图条） */
+export interface Artifact {
+  /** 相对工作区根的路径（/ 分隔） */
+  path: string;
+  name: string;
+  ext: string;
+  size: number;
+  /** 后端拼好的只读访问地址（/api/workspace/raw?...）；老数据可能没有 */
+  url?: string;
+}
+
 /** 一次回答的用量统计（done / error / cancelled 事件带回，为「本轮增量」） */
 export interface Usage {
   llm_calls: number;
@@ -71,6 +82,8 @@ export type SSEEvent =
   | { type: "llm_done"; sec: number; streamed: boolean }
   | { type: "tool_start"; id: string; name: string; args: Record<string, unknown>; ts?: number }
   | { type: "tool_end"; id: string; ok: boolean; sec: number; result: string; ts?: number }
+  /** 工具产出的图片（已落盘到工作区）：前端在气泡下方追加缩略图 */
+  | { type: "artifact"; items: Artifact[] }
   | { type: "confirm_request"; id: string; tool: string; args: Record<string, unknown> }
   | { type: "ask_request"; id: string; question: string; options: string[]; allow_free_text: boolean; multi: boolean }
   | { type: "notice"; text: string; ts?: number }
@@ -167,6 +180,8 @@ export interface ChatItem {
   reason?: string;
   /** 用户消息的附件（图片 / 文件），供前端展示 */
   attachments?: Attachment[];
+  /** 本轮工具生成的图片（保留在气泡下方，历史回放同样可见） */
+  artifacts?: Artifact[];
   /** 消息时间（秒级时间戳）：工具栏里展示「今天 23:08」 */
   ts?: number;
   /** assistant 消息里折叠留存的提问卡片（answered / expired） */
@@ -197,6 +212,8 @@ export interface HistoryMessage {
   sec?: number;
   /** 用户消息的附件元数据 */
   attachments?: Attachment[];
+  /** 该轮工具产出的图片（老会话可能没有） */
+  artifacts?: Artifact[];
   /** 消息时间（秒级时间戳），老会话可能没有 */
   ts?: number;
 }

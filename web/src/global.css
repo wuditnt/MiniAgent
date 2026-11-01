@@ -478,6 +478,208 @@ body.sidebar-resizing .sidebar-resizer::after {
   pointer-events: none;
 }
 
+/* ```mermaid：沿用代码块外壳，右上角在图 / 源码之间切换（默认看视图） */
+.md-code-card {
+  margin: 0.6em 0;
+  background: #f6f8fa;
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 14px;
+}
+
+.md-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px 0 14px;
+}
+
+.md-code-lang {
+  font-size: 12px;
+  font-weight: 500;
+  color: #999;
+  text-transform: lowercase;
+  letter-spacing: 0.3px;
+}
+
+.md-code-toggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: #e9ebef;
+  border-radius: 6px;
+}
+
+.md-code-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.md-code-icon {
+  border: 0;
+  background: transparent;
+  color: #999;
+  font-size: 13px;
+  line-height: 1;
+  padding: 3px 2px;
+  cursor: pointer;
+}
+
+.md-code-icon:hover {
+  color: #1677ff;
+}
+
+.md-code-icon.on {
+  color: #52c41a;
+}
+
+.md-code-icon:disabled {
+  color: #d9d9d9;
+  cursor: default;
+}
+
+.md-code-toggle button {
+  border: 0;
+  background: transparent;
+  color: #666;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  padding: 0 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.md-code-toggle button.on {
+  background: #fff;
+  color: #1677ff;
+  font-weight: 500;
+}
+
+.md-code-body {
+  padding: 6px 14px 10px;
+  overflow: auto;
+}
+
+/* mermaid 视图：可拖动平移，右下角复位 / 放大 / 缩小 */
+.md-viewport {
+  position: relative;
+  overflow: hidden;
+  max-height: 520px;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.md-viewport.dragging {
+  cursor: grabbing;
+}
+
+.md-viewport-stage {
+  transform-origin: 0 0;
+}
+
+/* ```svg 图：默认缩放到视口内，放大/拖动由外层视口处理 */
+.md-viewport .md-svg {
+  max-height: 520px;
+}
+
+.md-viewport-tools {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.md-viewport-tools button {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #ececec;
+  border-radius: 50%;
+  background: #fff;
+  color: #333;
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+}
+
+.md-viewport-tools button:hover {
+  color: #1677ff;
+  border-color: #d6e4ff;
+}
+
+/* 全屏预览：只铺满对话区域（位置/尺寸由组件按 .chat-scroll 计算），不是整个浏览器 */
+.md-fs-overlay {
+  position: fixed;
+  z-index: 1100;
+  display: flex;
+  box-sizing: border-box;
+  padding: 10px;
+  background: rgba(15, 23, 42, 0.3);
+}
+
+.md-fs {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+}
+
+.md-fs-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 44px;
+  padding: 0 14px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.md-fs-body {
+  flex: 1;
+  min-height: 0;
+  padding: 8px;
+  background: #fafafa;
+}
+
+.md-fs-body .md-viewport {
+  height: 100%;
+  max-height: none;
+  background: #fff;
+  border-radius: 8px;
+}
+
+/* 流式生成中的占位：白色蒙版 + 「绘图生成中…」 */
+.md-pending {
+  position: relative;
+  height: 220px;
+  border-radius: 6px;
+  background: #fafbfc;
+}
+
+.md-pending-mask {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 6px;
+  background: #fff;
+  color: #8c8c8c;
+  font-size: 13px;
+}
+
 .md code {
   font-family: Consolas, Menlo, "Courier New", monospace;
   font-size: 14px;
@@ -543,6 +745,80 @@ body.sidebar-resizing .sidebar-resizer::after {
   margin: 0;
   max-height: 160px;
   overflow: auto;
+}
+
+/* ---- 图形块（mermaid / svg / echarts 共用外壳） ---- */
+.md-diagram {
+  margin: 8px 0;
+}
+
+.md-diagram-tip {
+  color: #999;
+  font-size: 12.5px;
+  padding: 8px 0;
+}
+
+.md-diagram-error {
+  border: 1px solid #ffccc7;
+  background: #fff2f0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 8px 0;
+  font-size: 12.5px;
+}
+
+.md-diagram-error-title {
+  color: #cf1322;
+  margin-bottom: 6px;
+}
+
+.md-diagram-error pre {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+}
+
+/* mermaid 输出的 SVG：宽度铺满气泡、高度自适应 */
+.mermaid-box {
+  overflow-x: auto;
+  text-align: center;
+}
+
+.mermaid-box svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* ```svg 块：不经 DOM，按图片渲染 */
+.md .md-svg {
+  display: block;
+  max-width: 100%;
+}
+
+/* ---- 助手消息里的图片产物（工具生成、已落盘的图） ---- */
+.msg-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.msg-artifacts .ant-image {
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fafafa;
+  cursor: zoom-in;
+}
+
+.msg-artifact-name {
+  display: block;
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: #8c8c8c;
 }
 
 /* ---- KaTeX 公式 ---- */
@@ -1806,6 +2082,28 @@ body.sidebar-resizing .sidebar-resizer::after {
   display: none;
 }
 
+/* 联网搜索开关：贴在输入框上方，靠右对齐输入框右边缘 */
+.web-toggle {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #8c8c8c;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.web-toggle.on {
+  color: #1677ff;
+}
+
+@media (max-width: 640px) {
+  .web-toggle-text {
+    display: none;
+  }
+}
+
 .ws-chip {
   display: inline-flex;
   align-items: center;
@@ -1958,7 +2256,7 @@ body.sidebar-resizing .sidebar-resizer::after {
   color: #1677ff;
 }
 
-/* ---- 「⋯」菜单里的开关行（智能搜索）：图标 + 文字在左、开关在右 ---- */
+/* ---- 「⋯」菜单里的开关行（联网搜索等）：图标 + 文字在左、开关在右 ---- */
 .menu-switch-row {
   display: flex;
   align-items: center;
@@ -3113,8 +3411,17 @@ body.sidebar-resizing .sidebar-resizer::after {
   color: #faad14;
 }
 
-.wb-row-name {
+/* 文件名 + 大小：大小紧跟在文件名后面，剩余空间由右侧的下载/删除图标使用 */
+.wb-row-main {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.wb-row-name {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3145,8 +3452,28 @@ body.sidebar-resizing .sidebar-resizer::after {
   color: #1677ff;
 }
 
+/* 行尾删除按钮：与下载同样 hover 才出现，悬停变红 */
+.wb-row-del {
+  flex: none;
+  color: #bbb;
+  font-size: 13px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  cursor: pointer;
+}
+
+.wb-row:hover .wb-row-del,
+.wb-row:focus-within .wb-row-del {
+  opacity: 1;
+}
+
+.wb-row-del:hover {
+  color: #ff4d4f;
+}
+
 @media (hover: none) {
-  .wb-row-dl {
+  .wb-row-dl,
+  .wb-row-del {
     opacity: 1;
   }
 }
