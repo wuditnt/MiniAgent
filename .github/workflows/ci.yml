@@ -33,10 +33,22 @@ jobs:
           pip install -e ".[docs,docs-fast]"
           pip install pytest
 
+      # 失败摘要写成注解（公开仓库的注解无需登录即可查看），便于没有日志权限时定位。
       - name: 运行测试
         env:
           PYTHONPATH: src
-        run: python -m pytest tests -q
+        run: |
+          python -m pytest tests -q 2>&1 | Tee-Object -FilePath pytest-out.txt
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            Get-Content pytest-out.txt |
+              Where-Object { $_ -match '^(FAILED|ERROR)' } |
+              Select-Object -First 10 |
+              ForEach-Object {
+                Write-Output ("::error::" + $_.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A'))
+              }
+          }
+          exit $code
 
   web:
     name: 前端构建
