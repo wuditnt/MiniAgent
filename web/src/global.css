@@ -646,39 +646,79 @@ body.sidebar-resizing .sidebar-resizer::after {
 .msg-atts {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
   gap: 8px;
-  margin-top: 6px;
+  margin-bottom: 8px;
 }
 
-.msg-att-img {
-  max-width: 260px;
-  max-height: 180px;
+/* 用户气泡上方：header 与气泡同侧右对齐 */
+.chat-inner .ant-bubble-end .ant-bubble-header {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* 图片缩略图：固定方形，点击进全屏预览 */
+.msg-atts .msg-att-img {
+  width: 56px;
+  height: 56px;
   border-radius: 8px;
-  object-fit: cover;
+  overflow: hidden;
   cursor: zoom-in;
-  display: block;
 }
 
-.msg-att-chip {
+.msg-atts .msg-att-img .ant-image-img {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 8px;
+}
+
+/* 文件卡片：左侧扩展名块 + 右侧文件名/大小 */
+.msg-att-file {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 4px 10px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.35);
-  font-size: 12px;
-  max-width: 280px;
+  gap: 8px;
+  padding: 6px 10px 6px 6px;
+  border-radius: 10px;
+  background: #f2f3f5;
+  max-width: 260px;
+}
+
+.msg-att-ext {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: #e9eef8;
+  color: #5b6f8f;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.msg-att-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
 }
 
 .msg-att-name {
+  font-size: 12.5px;
+  color: #333;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.msg-att-size {
+.msg-att-sub {
+  font-size: 11px;
   color: #999;
-  flex: none;
+  white-space: nowrap;
 }
 
 .pending-att {

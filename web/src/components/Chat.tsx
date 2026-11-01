@@ -27,7 +27,7 @@ import {
   UpOutlined,
 } from "@ant-design/icons";
 import { Bubble, Sender } from "@ant-design/x";
-import { Button, Checkbox, Collapse, Dropdown, Input, message, Radio, Tag, Tooltip } from "antd";
+import { Button, Checkbox, Collapse, Dropdown, Image, Input, message, Radio, Tag, Tooltip } from "antd";
 import type { MenuProps } from "antd";
 import type {
   ApprovalMode,
@@ -672,7 +672,7 @@ function fmtSize(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)}M`;
 }
 
-/** 用户消息里的附件展示：图片渲染缩略图，其它显示文件 chip */
+/** 用户消息里的附件：按上传顺序排成一行，图片可点开预览，其它显示文件卡片 */
 function AttachmentPreview({
   attachments,
   workspaceId,
@@ -681,30 +681,40 @@ function AttachmentPreview({
   workspaceId: string;
 }) {
   if (!attachments || !attachments.length) return null;
+  const rawUrl = (path: string) =>
+    `/api/attachment?path=${encodeURIComponent(path)}&workspace=${encodeURIComponent(workspaceId)}`;
+  const imageUrls = attachments
+    .filter((a) => a.mime.startsWith("image/"))
+    .map((a) => rawUrl(a.path));
+
   return (
     <div className="msg-atts">
-      {attachments.map((a, i) =>
-        a.mime.startsWith("image/") ? (
-          <a
-            key={i}
-            href={`/api/attachment?path=${encodeURIComponent(a.path)}&workspace=${encodeURIComponent(workspaceId)}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            <img
+      <Image.PreviewGroup items={imageUrls}>
+        {attachments.map((a, i) => {
+          const ext = (a.name.split(".").pop() || "").toUpperCase().slice(0, 3) || "FILE";
+          return a.mime.startsWith("image/") ? (
+            <Image
+              key={i}
               className="msg-att-img"
-              src={`/api/attachment?path=${encodeURIComponent(a.path)}&workspace=${encodeURIComponent(workspaceId)}`}
+              src={rawUrl(a.path)}
               alt={a.name}
+              width={56}
+              height={56}
+              preview={{ mask: false }}
             />
-          </a>
-        ) : (
-          <span key={i} className="msg-att-chip" title={a.path}>
-            <PaperClipOutlined />
-            <span className="msg-att-name">{a.name}</span>
-            <span className="msg-att-size">{fmtSize(a.size)}</span>
-          </span>
-        )
-      )}
+          ) : (
+            <span key={i} className="msg-att-file" title={a.path}>
+              <span className="msg-att-ext">{ext}</span>
+              <span className="msg-att-info">
+                <span className="msg-att-name">{a.name}</span>
+                <span className="msg-att-sub">
+                  {ext.toLowerCase()} · {fmtSize(a.size)}
+                </span>
+              </span>
+            </span>
+          );
+        })}
+      </Image.PreviewGroup>
     </div>
   );
 }
@@ -1489,6 +1499,11 @@ export default function Chat({
     return {
       key: it.id,
       role: "user",
+      // 附件放在气泡上方（Bubble 的 header），按上传顺序右对齐排列
+      header:
+        it.attachments && it.attachments.length ? (
+          <AttachmentPreview attachments={it.attachments} workspaceId={workspaceId} />
+        ) : undefined,
       content: (
         <div id={`msg-${it.id}`}>
           <UserText
@@ -1503,7 +1518,6 @@ export default function Chat({
               })
             }
           />
-          <AttachmentPreview attachments={it.attachments} workspaceId={workspaceId} />
         </div>
       ),
       // 小工具栏放气泡下方（Bubble 的 footer），而不是塞进蓝色气泡里：
