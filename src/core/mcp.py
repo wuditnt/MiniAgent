@@ -147,6 +147,12 @@ class MCPStdioClient:
             return
         full_env = os.environ.copy()
         full_env.update(self.env)
+        # MCP 的 stdio 协议是 UTF-8 JSON：必须显式把子进程的编码定成 UTF-8。
+        # 否则在非中文代码页（英文 Windows 的 cp1252）上，服务端输出中文时
+        # 会在 stdout.write 处抛 UnicodeEncodeError，表现为「tools/list 超时」。
+        # 用 setdefault：用户在 mcp_servers.json 里显式配置的 env 优先。
+        full_env.setdefault("PYTHONUTF8", "1")
+        full_env.setdefault("PYTHONIOENCODING", "utf-8")
         try:
             self._proc = subprocess.Popen(
                 [_resolve_command(self.command), *self.args],
