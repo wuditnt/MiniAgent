@@ -2273,7 +2273,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         elif route == "/api/chat":
             self._handle_chat()
         elif route == "/api/workspace/delete":
-            self._handle_workspace_delete()
+            self._handle_workspace_entry_delete()
         elif route == "/api/upload":
             self._handle_upload()
         elif route == "/api/confirm":
@@ -3695,7 +3695,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             "truncated": truncated,
         })
 
-    def _handle_workspace_delete(self) -> None:
+    def _handle_workspace_entry_delete(self) -> None:
         """删除工作区内的文件 / 目录（目录连同内容一起删；危险操作由前端二次确认）。"""
         body = self._read_body()
         if body is None:

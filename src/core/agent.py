@@ -1236,9 +1236,12 @@ class Agent:
     def _spawn_extract(self, user_input: str, answer: str) -> None:
         """后台线程跑记忆提炼：daemon 化，进程退出不等它。"""
         try:
+            # 必须带上当前运行上下文：工作区根存在 ContextVar 里，而新线程拿到的是
+            # 空上下文 → 兜底成默认工作区，非默认工作区的记忆会被写串到默认工作区。
+            ctx = contextvars.copy_context()
             threading.Thread(
-                target=self._maybe_extract_memory,
-                args=(user_input, answer),
+                target=ctx.run,
+                args=(self._maybe_extract_memory, user_input, answer),
                 daemon=True,
                 name="ma-memory-extract",
             ).start()
