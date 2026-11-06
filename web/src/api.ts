@@ -9,6 +9,7 @@ import type {
   ApprovalMode,
   Attachment,
   GeneralSettings,
+  HealthInfo,
   HistoryMessage,
   MemoryData,
   Mode,
@@ -59,6 +60,13 @@ async function req(input: string, init?: RequestInit): Promise<Response> {
 
 export async function fetchState(): Promise<AgentState> {
   const res = await req("/api/state");
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/** 探活 + 桌面/局域网状态（免登录接口） */
+export async function fetchHealth(): Promise<HealthInfo> {
+  const res = await fetch("/api/health");
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }

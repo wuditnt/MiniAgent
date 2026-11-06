@@ -145,3 +145,6 @@ web_data/
 
 # Web UI 前端（构建产物已由上面的 dist/ 覆盖）
 node_modules/
+
+# Electron 安装包产物
+desktop/release/

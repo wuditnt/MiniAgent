@@ -59,6 +59,32 @@ cd web; npm run dev             # 终端 2：Vite :5173，/api 自动代理
 
 常用开关：`--port` / `--host` / `--workspace` / `--data-dir` / `--no-login` / `--reset-password`。完整说明见 [快速入门](docs/01-quickstart.md)。
 
+## 桌面端（Windows）
+
+桌面版 = Electron 外壳 + 内置可移植 Python：界面仍是同一套 Web UI（`http://127.0.0.1:8317`），
+工具依然由真实 Python 解释器执行（`MINI_AGENT_PYTHON` 指向内置运行时）。
+
+```bat
+:: 开发运行（复用 .venv，热更新请配合 web 的 npm run dev）
+cd desktop
+npm install
+npm start
+```
+
+```bat
+:: 打包安装包（NSIS + portable，产物在 desktop\release\）
+python scripts\build_desktop.py
+cd desktop
+npm run dist
+```
+
+- 数据目录：`%APPDATA%\mini-agent`（配置 / 会话 / 账号库 / 日志），安装目录只读
+- 默认只监听 `127.0.0.1:8317`；「系统配置 → 网络」可开启局域网访问，**保存后需重启生效**
+- 端口固定 `8317`：被占用时启动失败并给出排查命令，不会静默换端口（换端口会丢失 localStorage 里的会话与偏好）
+- 启动日志：`%APPDATA%\mini-agent\logs\desktop.log`
+
+完整打包步骤（含常见报错处理）见 [桌面端打包](docs/04-operations/desktop-build.md)。
+
 ## 三条扩展路径
 
 | 路径 | 怎么做 | 适合什么 |
@@ -117,6 +143,8 @@ mini-agent/
 ├── skills_user/              你的技能
 ├── mcp/                      MCP 配置 + demo server
 ├── web/                      React 前端
+├── desktop/                  Electron 外壳（Windows 桌面版）
+├── scripts/                  setup / 测试 / 桌面打包脚本
 ├── tests/                    测试套件 + run_tests.py
 ├── demo_case/                有标准答案的沙箱数据
 └── docs/                     本文档

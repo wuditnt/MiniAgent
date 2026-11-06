@@ -29,6 +29,7 @@
 | 改模型接入 / 推理等级 | [模型与推理等级](03-features/models-and-reasoning.md) |
 | 改确认、提问、取消 | [确认与授权](03-features/approval.md)、[内联提问](03-features/ask-user.md)、[取消机制](03-features/chat-and-agent.md#取消) |
 | 改记忆 / 事件流 / 登录 | [记忆](03-features/memory.md)、[运行轨迹](03-features/trajectory.md)、[登录与账号](03-features/auth-and-access.md) |
+| 打包 Windows 桌面端 | [桌面端打包](04-operations/desktop-build.md) |
 
 ## 文档约定
 
@@ -67,6 +68,7 @@ docs/
 │   └── settings.md               通用配置与运行日志
 └── 04-operations/
     ├── testing.md                本地测试指南
+    ├── desktop-build.md          桌面端打包（Electron + 内置 Python）
     ├── troubleshooting.md        常见故障排查
     └── known-issues.md           已知问题与生产化缺口
 ```

@@ -14,6 +14,7 @@ import {
   GlobalOutlined,
   ReloadOutlined,
   SettingOutlined,
+  WifiOutlined,
 } from "@ant-design/icons";
 import { fetchSettings, fetchTools, updateSettings } from "../api";
 import type {
@@ -25,6 +26,7 @@ import type {
 } from "../types";
 import MemoryPanel from "./MemoryPanel";
 import ModelSettingsPanel from "./ModelSettings";
+import NetworkPanel from "./NetworkPanel";
 
 interface Props {
   open: boolean;
@@ -38,7 +40,10 @@ interface Props {
   workspaceId: string;
 }
 
-export type SettingsTab = "model" | "general" | "search" | "memory" | "tools";
+export type SettingsTab = "model" | "general" | "search" | "memory" | "tools" | "network";
+
+/** 桌面端才有的页签：浏览器下不渲染（监听地址由启动参数决定） */
+const DESKTOP_ONLY_TABS: SettingsTab[] = ["network"];
 
 /** 每个字段的界面元信息：标签、说明、区间、步进 */
 const FIELDS: {
@@ -132,6 +137,7 @@ const NAV: {
   { key: "model", label: "模型配置", icon: <ApiOutlined />, group: "设置" },
   { key: "general", label: "通用配置", icon: <SettingOutlined />, group: "设置" },
   { key: "search", label: "联网搜索", icon: <GlobalOutlined />, group: "设置" },
+  { key: "network", label: "网络", icon: <WifiOutlined />, group: "设置" },
   { key: "memory", label: "记忆", icon: <BulbOutlined />, group: "数据与扩展" },
   { key: "tools", label: "工具管理", icon: <AppstoreOutlined />, group: "数据与扩展" },
 ];
@@ -172,6 +178,8 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
   const [active, setActive] = useState<SettingsTab>(tab);
   // DeepSeek 联网 Key 只写不读：输入框单独维护，为空表示「不修改」
   const [searchKey, setSearchKey] = useState("");
+  const isDesktop = !!window.__DESKTOP__;
+  const visibleNav = NAV.filter((n) => isDesktop || !DESKTOP_ONLY_TABS.includes(n.key));
 
   const load = useCallback(() => {
     setLoading(true);
@@ -381,7 +389,7 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
           {NAV_GROUPS.map((group) => (
             <div className="settings-nav-group" key={group}>
               <div className="settings-nav-title">{group}</div>
-              {NAV.filter((n) => n.group === group).map((n) => (
+              {visibleNav.filter((n) => n.group === group).map((n) => (
                 <button
                   key={n.key}
                   type="button"
@@ -487,6 +495,7 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
               )}
             </Spin>
           )}
+          {active === "network" && isDesktop && <NetworkPanel />}
           {active === "memory" && <MemoryPanel workspaceId={workspaceId} />}
           {active === "tools" && (
             <Spin spinning={toolsLoading}>

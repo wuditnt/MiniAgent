@@ -20,6 +20,7 @@ Web UI 后端：把 Agent 的 9 个 UI 回调翻译成 SSE 事件流，浏览器
 from __future__ import annotations
 
 import csv
+import errno
 import io
 import json
 import os
@@ -99,6 +100,12 @@ def _run_mode() -> str:
 
 _DIST = os.path.join(ROOT, "web", "dist")
 _SESSIONS_DIR = os.path.join(data_dir(), "sessions")  # 会话持久化目录
+
+#: 桌面版固定端口（决策 D4：端口不能漂移，否则 localStorage 里的会话与偏好全丢）
+DESKTOP_PORT = 8317
+
+#: 桌面模式与 Electron 壳的 stdout 握手指令：一行一条，JSON 为载荷
+_STDOUT_PREFIX = "MINI_AGENT_"
 
 #: 静态资源目录可以用环境变量覆盖 —— 桌面版打包后 dist 不在 ROOT/web 下
 _WEB_DIST_ENV = "MINI_AGENT_WEB_DIST"
@@ -1809,6 +1816,27 @@ def _lan_addresses() -> list[str]:
     return out
 
 
+def _port_accepting(host: str, port: int) -> bool:
+    """端口上是否已经有服务在监听。
+
+    为什么不用「试着 bind 一下」判断：Windows 的 SO_REUSEADDR 允许两个进程
+    同时绑同一端口（Python 的 HTTPServer 默认开着），第二个 bind 会静默成功，
+    于是两个后端抢同一个端口 —— 必须先用 connect 探活。
+    """
+    target = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    try:
+        with socket.create_connection((target, port), timeout=0.5) as s:
+            # 发一次完整请求再走：只连不发的探测会让对端 keep-alive 读空连接，
+            # 在 Windows 上抛 ConnectionResetError 并在它的控制台打一堆堆栈。
+            s.sendall(
+                b"GET /api/health HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n"
+                % target.encode()
+            )
+            return True
+    except OSError:
+        return False
+
+
 def _core_version() -> str:
     try:
         import core
@@ -1816,6 +1844,14 @@ def _core_version() -> str:
         return str(getattr(core, "__version__", ""))
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _stdout_event(kind: str, payload: dict) -> None:
+    """向 stdout 打一行握手指令（READY / ERROR），供桌面壳逐行解析。
+
+    必须 flush：Electron 是流式读 stdout 的，缓冲住就等不到就绪信号。
+    """
+    print(f"{_STDOUT_PREFIX}{kind} {json.dumps(payload, ensure_ascii=False)}", flush=True)
 
 
 def _host_of(header: str) -> str:
@@ -1870,9 +1906,11 @@ class WebServer:
         max_turns: int | None = None,
         login_enabled: bool = True,
         skill_loader=None,
+        desktop: bool = False,
     ) -> None:
         self.host = host
         self.port = port
+        self.desktop = desktop
         self.model = model
         self.system_prompt = system_prompt
         self.max_turns = max_turns      # None = 交给通用配置决定
@@ -1927,11 +1965,38 @@ class WebServer:
         class _Handler(_RequestHandler):
             web = server
 
-        self._httpd = ThreadingHTTPServer((self.host, self.port), _Handler)
+        if self.desktop and self.port and _port_accepting(self.host, self.port):
+            self._desktop_bind_failed(
+                True, f"端口 {self.port} 已被其他程序占用，常见原因是上一次的后端没有退出")
+            raise OSError(errno.EADDRINUSE, f"端口 {self.port} 已被占用")
+        try:
+            self._httpd = ThreadingHTTPServer((self.host, self.port), _Handler)
+        except OSError as e:
+            if not self.desktop:
+                raise
+            # 桌面壳按这一行给出可操作的提示（不换端口重试：见决策 D4）
+            in_use = e.errno in (errno.EADDRINUSE, 10048, 48)
+            self._desktop_bind_failed(
+                in_use,
+                f"端口 {self.port} 已被其他程序占用（{e}）" if in_use
+                else f"无法监听 {self.host}:{self.port}（{e}）",
+            )
+            raise
         self._httpd.daemon_threads = True
+        # 以实际绑定结果为准（port=0 时系统会分配随机端口）
+        self.port = int(self._httpd.server_address[1])
         _log.info("web.listen host=%s port=%d", self.host, self.port)
-        # 绑通配地址时，0.0.0.0 不是能点的 URL —— 本机用回环，局域网地址单独列出来
-        if self.host in ("0.0.0.0", "::", ""):
+        if self.desktop:
+            # 桌面壳等这一行才开始加载页面；host 固定回环，局域网只是额外监听
+            _stdout_event("READY", {
+                "host": "127.0.0.1",
+                "port": self.port,
+                "pid": os.getpid(),
+                "version": _core_version(),
+                "lan_enabled": self.host in ("0.0.0.0", "::", ""),
+                "data_dir": data_dir(),
+            })
+        elif self.host in ("0.0.0.0", "::", ""):
             print(f"Web UI 已启动（本机）：http://127.0.0.1:{self.port}")
             lans = _lan_addresses()
             if lans:
@@ -1942,7 +2007,8 @@ class WebServer:
                 print("远程访问：未检测到局域网 IP（检查网络连接）")
         else:
             print(f"Web UI 已启动：http://{self.host}:{self.port}")
-        print("生产模式需先构建前端：cd web && npm run build（开发模式见 README）")
+        if not os.path.isfile(os.path.join(_DIST, "index.html")):
+            print("生产模式需先构建前端：cd web && npm run build（开发模式见 README）")
         try:
             self._httpd.serve_forever()
         except KeyboardInterrupt:
@@ -1951,6 +2017,15 @@ class WebServer:
             self._cancel_running()
             self._httpd.server_close()
             print("Web UI 已停止。")
+
+    def _desktop_bind_failed(self, in_use: bool, hint: str) -> None:
+        """打印给桌面壳解析的启动失败行（stderr 仍由 main 打完整错误）。"""
+        _stdout_event("ERROR", {
+            "code": "PORT_IN_USE" if in_use else "BIND_FAILED",
+            "host": self.host,
+            "port": self.port,
+            "hint": hint,
+        })
 
     def _cancel_running(self) -> None:
         """关停时通知仍在跑的任务收手，避免 daemon 线程被硬杀时留下半截子进程。"""
@@ -1995,7 +2070,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self._body_read = False
         self._user = None
         self._resp_headers = []
-        super().handle_one_request()
+        try:
+            super().handle_one_request()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            # 客户端直接断开（关窗口、关标签页）在 Windows 上很常见；
+            # 交给 socketserver 打印堆栈只会污染桌面壳的诊断输出。
+            self.close_connection = True
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002, A003
         # 默认 INFO 级别不落盘（逐请求日志会刷屏）；排查时把 log_level 调到 DEBUG
@@ -2376,12 +2456,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def _handle_health(self) -> None:
         """免登录探活接口：桌面壳用它判断「后端起来了没有」。"""
+        wildcard = self.web.host in ("0.0.0.0", "::", "")
         self._json({
             "ready": True,
             "version": _core_version(),
             "pid": os.getpid(),
+            "mode": "desktop" if self.web.desktop else "web",
             "host": self.web.host,
             "port": self.web.port,
+            "lan_enabled": wildcard,
+            "lan_urls": [
+                f"http://{ip}:{self.web.port}" for ip in _lan_addresses()
+            ] if wildcard else [],
             "login_enabled": self.web.login_enabled,
             "data_dir": data_dir(),
             "web_dist": _DIST,
@@ -4297,6 +4383,7 @@ def serve(
     max_turns: int | None = None,
     login_enabled: bool = True,
     skill_loader=None,
+    desktop: bool = False,
 ) -> None:
     """便捷入口：构建服务并阻塞运行（main.py 启动时走这里）。"""
     settings.apply_to_runtime()      # 通用配置里的运行时项（工具输出上限、日志）先落地
@@ -4320,6 +4407,7 @@ def serve(
         host=host, port=port, model=model,
         system_prompt=system_prompt, max_turns=max_turns,
         login_enabled=login_enabled, skill_loader=skill_loader,
+        desktop=desktop,
     )
     _install_signal_handlers(server)
     server.serve_forever()

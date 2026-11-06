@@ -19,6 +19,7 @@ mini-agent 入口：启动 Web UI。
     --no-tools          不加载工具（调试用）
     --no-skills         不加载技能
     --no-login          关闭登录校验（仅调试/自动化测试；任何能访问端口的人都能操作本机）
+    --desktop           桌面应用模式（固定端口 8317；向 stdout 输出 MINI_AGENT_READY 握手行）
 
 账号：
     首次启动会自动创建 admin / admin123，登录后强制改密；
@@ -131,14 +132,45 @@ def build_parser() -> argparse.ArgumentParser:
                     help="关闭登录校验（仅调试/自动化测试；任何能访问端口的人都能操作本机）")
     ap.add_argument("--reset-password", metavar="USERNAME", default=None,
                     help="重置某个本地账号的密码后退出（终端救援通道）")
-    ap.add_argument("--port", type=int, default=_env_port(),
-                    help="Web UI 监听端口（默认读 MINI_AGENT_PORT，否则 8000）")
+    ap.add_argument("--port", type=int, default=None,
+                    help="Web UI 监听端口（默认读 MINI_AGENT_PORT，否则 8000；--desktop 固定 8317）")
     ap.add_argument(
         "--host",
-        default=_env_host(),
-        help="Web UI 监听地址（默认读 MINI_AGENT_HOST，否则 0.0.0.0；传 127.0.0.1 收窄为仅本机）",
+        default=None,
+        help="Web UI 监听地址（默认读 MINI_AGENT_HOST，否则 0.0.0.0；"
+             "传 127.0.0.1 收窄为仅本机；--desktop 默认 127.0.0.1）",
+    )
+    ap.add_argument(
+        "--desktop", action="store_true",
+        help="桌面应用模式：固定端口 8317，启动成功后向 stdout 输出 "
+             "MINI_AGENT_READY 握手行（供 Electron 壳解析）",
     )
     return ap
+
+
+def _resolve_listen(args: argparse.Namespace) -> int | None:
+    """补齐「没显式指定」的监听参数，并校验桌面模式的取值。
+
+    桌面模式端口固定 8317（决策 D4）：不读 MINI_AGENT_PORT，也不做「占用就换端口」
+    的回退 —— origin 一变，localStorage 里的会话与偏好就全丢了。
+    host 由桌面壳按「局域网开关」传进来，只允许回环或通配两种。
+    """
+    from core.webui import DESKTOP_PORT
+
+    if args.port is None:
+        args.port = DESKTOP_PORT if args.desktop else _env_port()
+    if not 1 <= args.port <= 65535:
+        print(f"错误：端口必须在 1-65535 之间，当前值：{args.port}", file=sys.stderr)
+        return 2
+    if args.host is None:
+        args.host = "127.0.0.1" if args.desktop else _env_host()
+    if args.desktop and args.host not in ("127.0.0.1", "0.0.0.0"):
+        print(
+            f"错误：--desktop 只支持 --host 127.0.0.1 或 0.0.0.0，当前值：{args.host!r}",
+            file=sys.stderr,
+        )
+        return 2
+    return None
 
 
 # ---------------------------------------------------------------- 装配
@@ -256,6 +288,7 @@ def _run_web(
             max_turns=args.max_turns,
             login_enabled=not args.no_login,
             skill_loader=skill_loader,
+            desktop=args.desktop,
         )
     except OSError as e:
         logging.getLogger("mini-agent.app").exception("Web UI 启动失败：%s", e)
@@ -352,6 +385,11 @@ def main() -> int:
 
     # 数据目录必须最先确定：后续模块的路径常量都在导入时计算
     _apply_data_dir(args.data_dir)
+
+    # 监听参数要在 webui 被导入（读数据目录）之后再补默认值
+    code = _resolve_listen(args)
+    if code is not None:
+        return code
 
     # 账号救援不依赖模型与工具：先处理，避免被「没配 Key」挡在门外
     if args.reset_password:

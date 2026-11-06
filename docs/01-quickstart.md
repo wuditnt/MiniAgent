@@ -76,8 +76,12 @@ Windows 另有两个双击即用的脚本（会自动清理本项目残留进程
 --data-dir PATH           # 数据目录（默认 ~/.mini-agent）
 --model NAME              # 覆盖模型
 --no-login                # 关闭登录（仅本机调试）
+--desktop                 # 桌面应用模式（端口固定 8317，向 stdout 输出 READY 握手行）
 --reset-password admin     # 终端救援：重置密码后退出
 ```
+
+> 桌面版（Electron）的开发与打包见 README 的「桌面端（Windows）」一节；
+> 桌面模式下 `--host` 只接受 `127.0.0.1` 或 `0.0.0.0`（由局域网开关决定）。
 
 ## 首次配置模型
 

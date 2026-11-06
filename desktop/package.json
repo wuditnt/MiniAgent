@@ -1,0 +1,50 @@
+{
+  "name": "mini-agent-desktop",
+  "private": true,
+  "version": "1.0.0",
+  "description": "mini-agent 桌面端：Electron 壳 + 内置 Python 后端",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "npm run build && electron .",
+    "dist": "npm run build && electron-builder --win"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "electron": "^33.3.1",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.9.3"
+  },
+  "build": {
+    "appId": "com.miniagent.desktop",
+    "productName": "mini-agent",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../build/desktop-resources/app",
+        "to": "app"
+      },
+      {
+        "from": "../build/desktop-resources/python",
+        "to": "python"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  }
+}

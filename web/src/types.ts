@@ -490,3 +490,55 @@ export interface AuthMe {
   /** --no-login 时为 false（此时 user 是后端给的占位身份） */
   login_enabled: boolean;
 }
+
+// ---------------------------------------------------------------- 桌面壳
+
+/** 桌面后端连接信息（preload 的 desktop:backend） */
+export interface DesktopBackendInfo {
+  port: number;
+  version: string;
+  lanEnabled: boolean;
+  dataDir: string;
+  logFile: string;
+}
+
+/** desktop-config.json 的可见部分 */
+export interface DesktopConfig {
+  lan_enabled: boolean;
+  window: { width: number; height: number };
+}
+
+/**
+ * Electron preload 注入到 window.__DESKTOP__ 的白名单能力。
+ * 浏览器下该对象不存在，前端一律走原有 Web 逻辑。
+ */
+export interface DesktopBridge {
+  isDesktop: true;
+  platform: string;
+  backend(): Promise<DesktopBackendInfo>;
+  getConfig(): Promise<DesktopConfig>;
+  setLanEnabled(
+    enabled: boolean
+  ): Promise<DesktopConfig & { restart_required: boolean }>;
+  restart(): Promise<void>;
+  openLogs(): Promise<void>;
+}
+
+/** GET /api/health 的关键字段（桌面端状态 / 局域网地址展示用） */
+export interface HealthInfo {
+  ready: boolean;
+  mode: "desktop" | "web";
+  host: string;
+  port: number;
+  lan_enabled: boolean;
+  lan_urls: string[];
+  data_dir: string;
+  uptime: number;
+}
+
+declare global {
+  interface Window {
+    __DESKTOP__?: DesktopBridge;
+  }
+}
+
