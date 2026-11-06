@@ -64,13 +64,13 @@
 - 客户端：`src/core/mcp.py` 的 `MCPStdioClient`、`MCPServerState`、`fq_tool_name()`
 - 工具桥接：`tools_from_client()`
 - 配置装载：`load_config()`；管理器 `MCPManager`；报告 `MCPReport`
-- 命令解析：`_resolve_command()`（`python` / `python3` / `python.exe` 改写为 `sys.executable`）
+- 命令解析：`_resolve_command()` / `_resolve_argv()`（`python`、`python3`、`python3.12`、`py` 等裸解释器名统一改写为 `MINI_AGENT_PYTHON` 指定的解释器；`py -3` 的版本参数会被摘掉）
 - demo：`mcp/mcp_demo_server.py`
 - 测试：`tests/test_mcp_cancel.py`、`tests/test_real_mcp_cancel.py`、`tests/test_stream_parallel.py`
 
 ## 注意事项
 
-- 解释器必须一致：`"command": "python"` 只在恰好是 `python` / `python3` / `python.exe` 时改写成当前解释器；想固定解释器就写绝对路径。
+- 解释器必须一致：裸解释器名（`python` / `python3` / `python3.x` / `py`）会改写成本项目的工具解释器（`MINI_AGENT_PYTHON`，未配置时回退后端解释器）；子进程的 PATH 也前置了解释器目录，服务端脚本内部再调 `python` / `pip` 同样命中。含目录的绝对路径视为显式指定，不会改写。
 - 改配置后必须重启后端，MCP 不热重载。
 - 连接跨 run 复用，取消只停当前请求，不杀进程。
 - demo server 默认关闭：6 个工具只服务测试，常开会多占 schema。

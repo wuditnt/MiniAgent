@@ -23,7 +23,7 @@ scripts\run_tests.bat --real  :: 额外跑真实 API 用例（消耗 token）
 这个项目会拉起 Python 子进程（MCP server）。如果子进程落在另一个没装依赖的解释器里，握手会失败，报错是**超时**而不是 ImportError，很难查。三条具体理由：
 
 1. 项目固定 `openai>=1.30.0` 大版本，装全局会与其它项目冲突。
-2. MCP server 用 `"command": "python"` 启动，客户端只在这种情况下改写成 `sys.executable`。
+2. MCP server 用 `"command": "python"` 启动，客户端会把它改写成工具解释器（`MINI_AGENT_PYTHON`，未配置时回退后端解释器）；子进程 PATH 也前置了解释器目录。即便如此，两边依赖仍要各自装好。
 3. 测试有真实子进程、真实端口、真实计时，环境不一致时分不清是代码坏了还是环境脏了。
 
 ## 建环境
@@ -103,7 +103,7 @@ scripts\run_tests.bat --reinstall
 
 ### 1. 解释器不一致 → MCP 握手超时
 
-`mcp/mcp_servers.json` 写 `"command": "python"`。客户端只在 command 恰好等于 `python` / `python3` / `python.exe` 时改写为 `sys.executable`。解法：激活 venv，或永远显式用 `.venv\Scripts\python.exe`。想固定解释器就写绝对路径。
+`mcp/mcp_servers.json` 写 `"command": "python"`。客户端会把裸解释器名（`python` / `python3` / `python3.x` / `py`）改写成 `MINI_AGENT_PYTHON` 指定的解释器，并摘掉 `py -3` 的版本参数；子进程 PATH 也前置了解释器目录。解法：在 `.env` 里写绝对路径的 `MINI_AGENT_PYTHON`，不要依赖「终端里 activate 过」。仍报超时时，对比两边 `python -c "import mcp"` 是否都能成功。
 
 ### 2. `py -m venv` 与 `python -m venv` 可能不同
 
@@ -136,7 +136,7 @@ MINI_AGENT_PORT=8000
 - 编排入口：`run_tests.py`（筛选 / 超时 / 汇总 / 环境准备）
 - 共用引导：`tests/bootstrap.py`（铺 `sys.path`、临时数据目录）
 - 脚本：`scripts/setup_venv.bat` / `.sh`、`scripts/run_tests.bat` / `.sh`
-- CI：`.github/workflows/ci.yml`（Windows `pytest tests -q`；Ubuntu `npm run build` 含 `tsc --noEmit`）
+- CI：`.github/workflows/ci.yml`（Windows 装 `.[docs,docs-fast]` 后 `pytest tests -q`，办公/PDF 用例真实执行，缺依赖的用例自带跳过守卫；Ubuntu `npm run build` 含 `tsc --noEmit`）
 
 ## 注意事项
 

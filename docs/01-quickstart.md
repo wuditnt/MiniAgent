@@ -41,6 +41,8 @@ pip install -e ".[ocr]"         # + 扫描件 OCR（约 170MB）
 pip install -e ".[docs-all]"    # 以上一次装齐
 ```
 
+可选系统程序（不走 pip）：**LibreOffice** —— 只有 `office_to_pdf`（Word / Excel / PPT → PDF）需要。装在标准目录时自动识别，非标准位置用 `MINI_AGENT_SOFFICE` 指向 `soffice` 可执行文件。
+
 ## 启动
 
 ```bash
@@ -57,6 +59,13 @@ cd web; npm run dev                   # 终端 2：Vite :5173，/api 自动代�
 ```
 
 三种启动方式等价：`python -m core`（推荐）、`python src/core/main.py`、`mini-agent`（装了 console script 后）。项目只提供 Web UI，没有命令行对话。
+
+Windows 另有两个双击即用的脚本（会自动清理本项目残留进程、读 `.env` 里的解释器、等端口真正就绪后再打开浏览器）：
+
+| 脚本 | 用途 |
+|---|---|
+| `startup.bat` | 生产模式：后端 `:8000`，托管已构建的前端 |
+| `startup_dev.bat` | 开发模式：后端 `:8123` + Vite `:5173`（前端热更新） |
 
 常用开关：
 
@@ -78,7 +87,13 @@ cd web; npm run dev                   # 终端 2：Vite :5173，/api 自动代�
 4. 点「连接测试」确认可用。配置写入 `~/.mini-agent/models.json`。
 5. 回到对话输入框，在模型菜单里按会话选择模型与推理等级。
 
-> `.env` 只放系统配置（监听地址、端口、数据目录）。API Key 不放 `.env`。
+> `.env` 只放系统配置（监听地址、端口、数据目录、工具用的 Python 解释器等）。API Key 不放 `.env`。
+>
+> 希望工具固定使用某个虚拟环境时（建议写绝对路径）：
+>
+> ```ini
+> MINI_AGENT_PYTHON=C:\path\to\project\.venv\Scripts\python.exe
+> ```
 
 ## 第一次任务
 

@@ -67,7 +67,7 @@ cd web; npm install; npm run build
 
 | 现象 | 原因与处理 |
 |---|---|
-| 握手超时，而不是 ImportError | 解释器不一致：MCP server 子进程落在没装依赖的 Python 里；显式用 `.venv\Scripts\python.exe` 或写绝对路径 |
+| 握手超时，而不是 ImportError | 解释器不一致：MCP server 子进程落在没装依赖的 Python 里；在 `.env` 写绝对路径的 `MINI_AGENT_PYTHON`，别依赖「终端里 activate 过」 |
 | server 没挂上 | 检查 `mcp_servers.json` 的 `enabled`、命令是否存在、启动日志 |
 | demo 工具不可见 | `mcp_demo_server.py` 默认关闭，把 `enabled` 改成 `true` |
 | 取消后服务端还在跑 | 协议只负责送达；服务端要实现「收到通知就停手」 |
