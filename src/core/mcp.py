@@ -38,11 +38,11 @@ import os
 import queue
 import re
 import subprocess
-import sys
 import threading
 import time
 from dataclasses import dataclass, field
 
+from core import pyexe
 from core.cancel import Cancelled, current_token
 from core.logging_setup import get_logger
 from core.registry import Tool, ToolRegistry
@@ -67,11 +67,50 @@ class MCPError(RuntimeError):
     """MCP 协议层错误。"""
 
 
+#: `python` / `python3` / `python3.12` / `python.exe` 这类「裸解释器名」
+_PY_EXE_RE = re.compile(r"^python(?:\d+(?:\.\d+)?)?(?:\.exe)?$", re.IGNORECASE)
+#: Windows 的 py 启动器（`py` / `py.exe`）
+_PY_LAUNCHER_RE = re.compile(r"^py(?:\.exe)?$", re.IGNORECASE)
+
+
+def _bare_name(command: str) -> str:
+    """取出「裸命令名」；带目录的命令返回空串（视为用户显式指定，不改写）。"""
+    name = command.strip().strip('"')
+    if os.path.dirname(name):
+        return ""
+    return name
+
+
+def _is_python_command(command: str) -> bool:
+    """命令是否为裸解释器名（python / python3 / python3.12 / py）。"""
+    name = _bare_name(command)
+    return bool(name and (_PY_EXE_RE.match(name) or _PY_LAUNCHER_RE.match(name)))
+
+
 def _resolve_command(command: str) -> str:
-    """把常见的 `python` 写法映射到当前解释器，避免多环境错乱。"""
-    if command in ("python", "python3", "python.exe"):
-        return sys.executable
+    """把常见的 `python` 写法映射到当前解释器，避免多环境错乱。
+
+    「当前解释器」由 MINI_AGENT_PYTHON 决定（见 core/pyexe.py），与 run_python
+    使用同一个 Python —— 否则 MCP 服务端可能跑在另一个环境里。
+    含目录的绝对路径视为用户明确指定，原样保留。
+    """
+    if _is_python_command(command):
+        return pyexe.executable()
     return command
+
+
+def _resolve_argv(command: str, args: list[str]) -> list[str]:
+    """改写 MCP 服务端的启动命令。
+
+    除了换解释器，还要摘掉 py 启动器的版本参数：`py -3` / `py -3.12`
+    里的 `-3` 是 py.exe 的选项，直接传给 python.exe 会报错。
+    """
+    if not _PY_LAUNCHER_RE.match(_bare_name(command)):
+        return [_resolve_command(command), *args]
+    rest = list(args)
+    while rest and re.match(r"^-[23](?:\.\d+)?$", rest[0]):
+        rest.pop(0)
+    return [pyexe.executable(), *rest]
 
 
 def fq_tool_name(server: str, tool: str) -> str:
@@ -145,17 +184,17 @@ class MCPStdioClient:
     def start(self) -> None:
         if self._proc is not None:
             return
-        full_env = os.environ.copy()
-        full_env.update(self.env)
+        # PATH 前置解释器目录 + UTF-8 stdio（pyexe.subprocess_env 统一加工）：
+        # 服务端脚本内部再调 `python` / `pip` 也会命中同一个环境。
+        full_env = pyexe.subprocess_env({**os.environ, **self.env})
         # MCP 的 stdio 协议是 UTF-8 JSON：必须显式把子进程的编码定成 UTF-8。
         # 否则在非中文代码页（英文 Windows 的 cp1252）上，服务端输出中文时
         # 会在 stdout.write 处抛 UnicodeEncodeError，表现为「tools/list 超时」。
         # 用 setdefault：用户在 mcp_servers.json 里显式配置的 env 优先。
         full_env.setdefault("PYTHONUTF8", "1")
-        full_env.setdefault("PYTHONIOENCODING", "utf-8")
         try:
             self._proc = subprocess.Popen(
-                [_resolve_command(self.command), *self.args],
+                _resolve_argv(self.command, self.args),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

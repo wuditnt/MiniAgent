@@ -19,12 +19,16 @@ REM   - Vite --strictPort: never silently move to 5174
 REM   - open the browser only after BOTH ports are actually listening
 REM   - pause on error so a double-clicked window never just disappears
 REM
-REM Always uses the project virtualenv interpreter (needed so that
-REM MCP servers, spawned as Python child processes, share the same
-REM interpreter and can complete their handshake).
+REM Interpreter: MINI_AGENT_PYTHON in .env wins; otherwise the project
+REM virtualenv. Tools (run_python / MCP / run_shell) resolve the same
+REM variable, so keeping the backend on it avoids "package not found"
+REM drift between in-process tools and subprocess tools.
 REM ------------------------------------------------------------------
 
 set "PY=%~dp0.venv\Scripts\python.exe"
+if exist "%~dp0.env" (
+  for /f "usebackq tokens=1,* delims==" %%A in (`findstr /B /C:"MINI_AGENT_PYTHON=" "%~dp0.env" 2^>nul`) do if not "%%~B"=="" set "PY=%%~B"
+)
 set "WEB_PORT=5173"
 set "API_PORT=8123"
 
@@ -81,7 +85,7 @@ if not exist "web\node_modules\.bin\vite.cmd" (
 
 REM ---- 4) start backend + frontend ---------------------------
 echo ==^> starting backend on http://0.0.0.0:%API_PORT%
-start "mini-agent backend :%API_PORT%" cmd /k ".venv\Scripts\python.exe src\core\main.py --port %API_PORT% --host 0.0.0.0"
+start "mini-agent backend :%API_PORT%" cmd /k ""%PY%" src\core\main.py --port %API_PORT% --host 0.0.0.0"
 
 echo ==^> starting frontend on http://localhost:%WEB_PORT%
 REM Vite reads VITE_API_TARGET from the environment; the child cmd inherits it

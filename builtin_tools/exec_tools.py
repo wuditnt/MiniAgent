@@ -11,11 +11,10 @@
 
 from __future__ import annotations
 
-import sys
-
 from core import (
     check_command,
     check_command_write,
+    python_executable,
     run_process,
     tool,
     workspace,
@@ -71,8 +70,9 @@ def run_python(code: str, timeout: int = 120) -> str:
     # 注入写护栏：open/os/shutil/pathlib/sqlite3 的区外写/删/移动在子进程内被拒
     guarded = build_prelude(workspace()) + "\n" + code
     try:
+        # 解释器统一由 MINI_AGENT_PYTHON 决定（见 core/pyexe.py），不直接用 sys.executable
         code_, out, err, cancelled = run_process(
-            [sys.executable, "-c", guarded], cwd=workspace(), timeout=timeout,
+            [python_executable(), "-c", guarded], cwd=workspace(), timeout=timeout,
         )
     except TimeoutError:
         return f"[error] Python 执行超时（{timeout}s）"

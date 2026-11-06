@@ -161,6 +161,27 @@ def _apply_cli_env(args: argparse.Namespace) -> None:
         os.environ["MINI_AGENT_SKILL_DIRS"] = args.skill_dir
 
 
+def _warn_interpreter_mismatch() -> None:
+    """工具解释器与后端解释器不一致时提示一次。
+
+    进程内工具（python-docx / openpyxl / PIL 等直接 import 的）只能跑在后端
+    解释器里；只有 run_python、MCP 服务端、run_shell 里的 python/pip 才按
+    MINI_AGENT_PYTHON 走。两者不同 = 依赖集合不同，配错时会表现成「工具说缺包」。
+    """
+    from core import logging_setup, pyexe
+
+    tool_py = pyexe.executable()
+    if os.path.normcase(os.path.realpath(tool_py)) != os.path.normcase(
+        os.path.realpath(sys.executable)
+    ):
+        logging_setup.get_logger("app").warning(
+            "python.interpreter_mismatch tool=%s backend=%s"
+            "（进程内工具仍用后端解释器，两边依赖需各自装好）",
+            tool_py,
+            sys.executable,
+        )
+
+
 def _bootstrap(args: argparse.Namespace) -> tuple[SkillLoader, SkillLoadReport]:
     """Web UI 启动的前半场：环境变量 → 工具 → 技能。
 
@@ -353,6 +374,8 @@ def main() -> int:
         "启动 workspace=%s model=%s host=%s port=%s",
         _workspace(), args.model or "(默认)", args.host, args.port,
     )
+    # 放在日志初始化之后：否则告警会落进 NullHandler 丢掉
+    _warn_interpreter_mismatch()
 
     mcp_manager = _attach_mcp(args)
 

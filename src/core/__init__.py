@@ -50,6 +50,10 @@ from .images import (  # noqa: E402,F401
     attach_image,
     take_images,
 )
+from .pyexe import (  # noqa: E402,F401
+    executable as python_executable,
+    subprocess_env as python_subprocess_env,
+)
 from .registry import (  # noqa: E402,F401
     REGISTRY,
     Tool,
@@ -106,6 +110,8 @@ __all__ = [
     "kill_tree",
     # 图片附件
     "attach_image", "take_images",
+    # Python 解释器（MINI_AGENT_PYTHON）
+    "python_executable", "python_subprocess_env",
     # Schema
     "schema_from_callable", "param_docs", "json_type", "summary",
     # 记忆保护区

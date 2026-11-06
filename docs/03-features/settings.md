@@ -45,6 +45,7 @@
 | `MINI_AGENT_PORT` / `MINI_AGENT_HOST` | 监听端口 / 地址 | 8000 / 0.0.0.0 |
 | `MINI_AGENT_DATA_DIR` | 数据目录 | `~/.mini-agent` |
 | `MINI_AGENT_WORKSPACE` | 沙箱根 | 当前用户数据目录 |
+| `MINI_AGENT_PYTHON` | 工具调用 Python 的解释器路径（run_python / MCP / run_shell） | 后端自身的解释器 |
 | `MINI_AGENT_MAX_OUTPUT` | 单次工具输出上限 | 8000 |
 | `MINI_AGENT_STREAM` / `MINI_AGENT_PARALLEL` | 流式 / 并行 | 1 / 1 |
 | `MINI_AGENT_MAX_WORKERS` | 并行线程数 | 4 |

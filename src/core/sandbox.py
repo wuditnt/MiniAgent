@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 
-from . import envs
+from . import envs, pyexe
 from ._paths import DEFAULT_WORKSPACE
 from .cancel import current_token, kill_tree
 
@@ -441,11 +441,11 @@ def run_process(
     if token is not None:
         token.check()   # 还没开始就被取消 —— 不必启动
 
-    # 下面按 UTF-8 解码子进程输出，所以子进程也必须按 UTF-8 写：在非中文代码页
-    # （英文 Windows 的 cp1252）上，Python 打印中文会在 stdout.write 抛
-    # UnicodeEncodeError。只定 stdio 编码，不动子进程文件读写的默认编码。
-    env = os.environ.copy()
-    env.setdefault("PYTHONIOENCODING", "utf-8")
+    # 子进程环境统一由 pyexe 加工：
+    #   · PATH 前置 MINI_AGENT_PYTHON 所在目录 —— run_shell 里的 `python` / `pip`
+    #     与 run_python / MCP 使用同一个解释器（venv 未 activate 时也一致）；
+    #   · stdio 统一 UTF-8 —— 非中文代码页上打印中文不会抛 UnicodeEncodeError。
+    env = pyexe.subprocess_env()
 
     p = subprocess.Popen(
         cmd,
