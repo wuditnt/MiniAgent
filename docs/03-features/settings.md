@@ -45,7 +45,7 @@
 | `MINI_AGENT_PORT` / `MINI_AGENT_HOST` | 监听端口 / 地址 | 8000 / 0.0.0.0 |
 | `MINI_AGENT_DATA_DIR` | 数据目录 | `~/.mini-agent` |
 | `MINI_AGENT_WORKSPACE` | 沙箱根 | 当前用户数据目录 |
-| `MINI_AGENT_PYTHON` | 工具调用 Python 的解释器路径（run_python / MCP / run_shell） | 后端自身的解释器 |
+| `MINI_AGENT_PYTHON` | 工具调用 Python 的解释器路径（`run_python`、MCP 服务端、`run_shell` 里的 `python` / `pip`） | 后端自身的解释器 |
 | `MINI_AGENT_MAX_OUTPUT` | 单次工具输出上限 | 8000 |
 | `MINI_AGENT_STREAM` / `MINI_AGENT_PARALLEL` | 流式 / 并行 | 1 / 1 |
 | `MINI_AGENT_MAX_WORKERS` | 并行线程数 | 4 |
@@ -54,6 +54,13 @@
 | `MINI_AGENT_ALLOW_DANGEROUS` | 放开危险命令拦截 | 0 |
 
 旧名 `AGENT_*` 仍可读。
+
+`MINI_AGENT_PYTHON` 的边界：
+
+- 只影响**子进程**。`run_python`、MCP 服务端、`run_shell` 里的 `python` / `pip` 都按它解析（含 PATH 前置解释器目录）。
+- 进程内工具（`python-docx`、`openpyxl`、`PIL` 等直接 import 的）仍用**后端解释器**。两者不一致时启动日志会记一条 `python.interpreter_mismatch`，提示两边依赖要各自装好。
+- 建议写绝对路径。写相对路径时按后端进程的**当前工作目录**解析，用 `startup*.bat`（内部 `cd /d "%~dp0"`）启动时等于项目根；从其他目录启动会解析失败并回退后端解释器。
+- 指向的文件不存在时不报错退出，只记一次 `python.executable_not_found` 并回退。
 
 ## 运行日志
 

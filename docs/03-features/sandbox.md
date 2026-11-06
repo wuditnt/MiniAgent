@@ -32,6 +32,8 @@
 
 `run_shell` / `run_python` 底层用 `sandbox.run_process`：Popen + 0.15s 短轮询，取消时杀整棵进程树并返回 `[cancelled]`。不用 `subprocess.run()`，因为它会把线程死死阻塞在内部 wait 上。
 
+子进程环境由 `core/pyexe.subprocess_env()` 统一加工：PATH 前置工具解释器目录（所以 shell 里的 `python` / `pip` 命中同一个环境）、stdio 固定 UTF-8（英文 Windows 的 cp1252 上打印中文不会 `UnicodeEncodeError`）。解释器本身由 `MINI_AGENT_PYTHON` 决定，见 [系统配置](settings.md)。
+
 ## 使用方式
 
 - 「系统配置 → 通用配置 → 沙箱读取范围」切换 `strict` / `whitelist` / `open`。
