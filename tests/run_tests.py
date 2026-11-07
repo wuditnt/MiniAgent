@@ -69,7 +69,7 @@ SUITES: list[tuple[str, str, bool]] = [
     ("test_sys_monitor.py", "系统监控工具 8 项：CPU / 内存 / 磁盘 / 网络 / 开机时长 / 端口占用", False),
     ("test_memory.py", "记忆系统 15 项：存储 / 保护区 / 工具不可见 / prelude / shell / 注入 / 分级淘汰 / 提炼过滤 / 检索合并 / 显式指令", False),
     ("test_logging.py", "文件日志 6 项：按日目录 / 错误聚合 / 幂等重配 / 关闭 / 配置 / 清理", False),
-    ("test_workbench.py", "工作台文件接口 9 项：目录 / 安全 / 编码 / 图片 / HTML / MHTML", False),
+    ("test_workbench.py", "工作台文件接口 9 项：目录 / 安全 / 编码 / 图片 / HTML / MHTML / 资源管理器", False),
     ("test_events.py", "事件流 10 项：只追加 / 请求可重建 / 正文不截断 / 裁剪留痕 / 开关 / 兜底 / 非法 id", False),
     ("test_model_config.py", "模型配置 10 项：厂家 spec（low/high/max）/ 三种参数风格与 values 重映射 / 迁移 / 会话解析 / 地址协议校验 / 密钥文件权限", False),
     ("test_web_search.py", "联网搜索 3 项：后端选择 / DeepSeek Key 复用 / 请求与解析", False),

@@ -318,6 +318,16 @@ export async function deleteWorkspaceEntry(workspaceId: string, path: string): P
   if (!res.ok) throw new Error(await readError(res));
 }
 
+/** 在资源管理器中定位文件 / 打开目录（仅桌面端、仅本机可用） */
+export async function revealWorkspaceEntry(workspaceId: string, path: string): Promise<void> {
+  const res = await req("/api/workspace/reveal", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace_id: workspaceId, path }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
 /** CSV/TSV 表格分页：后端按行窗口 × 列窗口返回 */
 export async function fetchWorkspaceTable(
   workspaceId: string,

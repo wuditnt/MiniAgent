@@ -16,6 +16,7 @@
  12. CSV/TSV —— 表格分页、引号内逗号、10000 行上限
  13. 图片产物 —— 工具结果里的图片路径识别（区外/不存在/过小/重复/报错都丢弃）
  14. 删除 —— 文件 / 目录可删，根目录、越界、.memory、缺失均拒绝
+ 15. 打开资源管理器 —— 仅桌面端 + 本机；越界 / 保护区 / 缺失拒绝
 """
 
 from __future__ import annotations
@@ -461,6 +462,61 @@ def test_workspace_delete():
     print("✓ 删除：文件 / 目录可删，根目录、越界、.memory、缺失均被拒绝")
 
 
+def test_workspace_reveal(srv: "WebServer"):
+    """打开资源管理器：桌面端 + 本机才可用；路径校验复用 _workspace_path。"""
+    import core.webui as webui
+
+    payload = {"workspace_id": "default", "path": "a.py"}
+    # 非桌面模式（浏览器版）直接拒绝
+    code, _ = _post_json("/api/workspace/reveal", payload)
+    assert code == 403, code
+
+    calls: list[str] = []
+
+    def fake_reveal(abs_path: str) -> str:
+        calls.append(abs_path)
+        return "dir" if os.path.isdir(abs_path) else "file"
+
+    original = webui._reveal_in_explorer
+    webui._reveal_in_explorer = fake_reveal  # type: ignore[assignment]
+    srv.desktop = True
+    try:
+        code, body = _post_json("/api/workspace/reveal", payload)
+        assert code == 200 and body["kind"] == "file", body
+        assert calls and calls[-1].endswith("a.py"), calls
+
+        code, body = _post_json("/api/workspace/reveal",
+                                {"workspace_id": "default", "path": "sub"})
+        assert code == 200 and body["kind"] == "dir", body
+
+        # 根目录（空白区「打开当前文件夹」）
+        code, body = _post_json("/api/workspace/reveal",
+                                {"workspace_id": "default", "path": ""})
+        assert code == 200 and body["kind"] == "dir", body
+
+        for bad, expected in (
+            ("../ma-wb-secret.txt", 403),
+            (".memory/project.md", 403),
+            ("nope.txt", 404),
+        ):
+            code, _ = _post_json("/api/workspace/reveal",
+                                 {"workspace_id": "default", "path": bad})
+            assert code == expected, (bad, code)
+
+        # 局域网设备：即使登录了也不许遥控宿主机弹窗
+        old_local = webui._LOCAL_CLIENTS
+        webui._LOCAL_CLIENTS = frozenset()  # type: ignore[assignment]
+        try:
+            code, _ = _post_json("/api/workspace/reveal", payload)
+            assert code == 403, code
+        finally:
+            webui._LOCAL_CLIENTS = old_local  # type: ignore[assignment]
+    finally:
+        webui._reveal_in_explorer = original  # type: ignore[assignment]
+        srv.desktop = False
+    print("✓ 打开资源管理器：仅桌面 + 本机；越界 / 保护区 / 缺失均拒绝")
+
+
 def main() -> int:
     print("项目根:", HERE)
     print("---")
@@ -501,6 +557,7 @@ def main() -> int:
         test_csv_table()
         test_artifact_detection()
         test_workspace_delete()
+        test_workspace_reveal(srv)
     finally:
         if srv._httpd is not None:
             srv._httpd.shutdown()

@@ -29,6 +29,7 @@ import re
 import shutil
 import signal
 import socket
+import subprocess
 import threading
 import time
 import uuid
@@ -1092,6 +1093,28 @@ def _workspace_path(workspace_id: str, rel: str) -> tuple[str, str]:
     if memory.is_memory_path(ap, root):
         raise PermissionError(".memory 是系统记忆目录，禁止访问")
     return root, ap
+
+
+def _reveal_in_explorer(path: str) -> str:
+    """在资源管理器中定位文件（选中）或打开目录；返回 file / dir。
+
+    为什么放在后端而不是 Electron：工作区 id → 绝对路径的解析、越界与
+    .memory 保护区校验都在这里，经由 _workspace_path 复用，不必在 Node 侧
+    再实现一遍。用参数列表启动 explorer，不经过 shell，路径里的空格与 &
+    不会被当成命令解释；explorer 的退出码不可靠，所以不等它。
+    """
+    if os.name != "nt":
+        raise OSError("仅支持 Windows")
+    target = os.path.normpath(path)
+    cmd = ["explorer", target] if os.path.isdir(target) else ["explorer", f"/select,{target}"]
+    subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+    return "dir" if os.path.isdir(target) else "file"
 
 
 def _content_disposition(name: str) -> str:
@@ -2354,6 +2377,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_chat()
         elif route == "/api/workspace/delete":
             self._handle_workspace_entry_delete()
+        elif route == "/api/workspace/reveal":
+            self._handle_workspace_reveal()
         elif route == "/api/upload":
             self._handle_upload()
         elif route == "/api/confirm":
@@ -3780,6 +3805,43 @@ class _RequestHandler(BaseHTTPRequestHandler):
             "lines": content.count("\n") + 1 if content else 0,
             "truncated": truncated,
         })
+
+    def _handle_workspace_reveal(self) -> None:
+        """在资源管理器中打开文件所在目录（目录则直接打开它）。
+
+        只允许桌面端 + 本机访问：这个接口会启动本机程序，局域网里的手机
+        即使登录了也不该能遥控宿主机弹窗。
+        """
+        if not self.web.desktop:
+            self._fail(403, "仅桌面端支持打开文件资源管理器")
+            return
+        if self._is_remote():
+            self._fail(403, "仅本机访问支持打开文件资源管理器")
+            return
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON（{workspace_id, path}）")
+            return
+        wid = str(body.get("workspace_id") or workspace_config.DEFAULT_ID)
+        rel = str(body.get("path") or "")
+        try:
+            _root, ap = _workspace_path(wid, rel)
+        except ValueError as e:
+            self._fail(400, str(e))
+            return
+        except PermissionError as e:
+            self._fail(403, str(e))
+            return
+        if not os.path.exists(ap):
+            self._fail(404, "文件或目录不存在")
+            return
+        try:
+            kind = _reveal_in_explorer(ap)
+        except OSError as e:
+            self._fail(500, f"打开资源管理器失败：{e}")
+            return
+        _log.info("workspace.reveal kind=%s path=%s", kind, rel)
+        self._json({"ok": True, "kind": kind})
 
     def _handle_workspace_entry_delete(self) -> None:
         """删除工作区内的文件 / 目录（目录连同内容一起删；危险操作由前端二次确认）。"""
