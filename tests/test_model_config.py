@@ -194,6 +194,23 @@ def test_test_values_rejects_non_http() -> None:
     assert r["ok"] is False and "必须是" not in r["error"], r
 
 
+def test_empty_display_name() -> None:
+    """显示名称允许留空：存储层不回填，展示层（前端）用模型 ID 兜底。"""
+    _isolate()
+    e = mc.create_entry("ollama", "", "http://127.0.0.1:11434/v1", "", "qwen2.5:7b")
+    assert e["name"] == ""
+    # 重新读取（经过 _normalize）仍保持为空
+    assert mc.get_entry(e["id"])["name"] == ""
+    # 单独改模型 ID 不联动显示名称
+    mc.update_entry(e["id"], model="qwen2.5:14b")
+    assert mc.get_entry(e["id"])["name"] == ""
+    # 可以先改再清空
+    mc.update_entry(e["id"], name="本地")
+    assert mc.get_entry(e["id"])["name"] == "本地"
+    mc.update_entry(e["id"], name="")
+    assert mc.get_entry(e["id"])["name"] == ""
+
+
 def test_saved_models_file_is_private() -> None:
     """models.json 里是明文 Key：目录 0700、文件 0600（Windows 上 chmod 无实际语义）。"""
     path = _isolate()
@@ -217,6 +234,7 @@ if __name__ == "__main__":
     test_default_and_migration()
     test_resolve_model()
     test_test_values_rejects_non_http()
+    test_empty_display_name()
     test_saved_models_file_is_private()
     print("---")
     print("全部通过 ✅")

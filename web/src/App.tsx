@@ -1214,9 +1214,11 @@ export default function App({
   const effModelId = currentSession?.model_id || draftModel?.modelId || activeModelId || "";
   const effReasoning: ReasoningLevel =
     currentSession?.reasoning || draftModel?.reasoning || reasoning;
-  const effModelName = models.find((m) => m.id === effModelId)?.name || "";
+  // 显示名称为空时回退到模型 ID（与模型选择菜单保持一致）
+  const effModel = models.find((m) => m.id === effModelId);
+  const effModelName = effModel?.name || effModel?.model || "";
   // 当前模型的厂家支持的推理档位（未知厂家按通用三档）
-  const effProvider = models.find((m) => m.id === effModelId)?.provider || "";
+  const effProvider = effModel?.provider || "";
   const reasoningLevels: ReasoningLevel[] =
     tplLevels[effProvider] || ["low", "high", "max"];
 

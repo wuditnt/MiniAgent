@@ -220,9 +220,9 @@ def _normalize(data: dict) -> dict:
         w.setdefault("api_key", "")
         w.setdefault("model", "")
         w.setdefault("created_at", 0)
-        # 显示名称空 → 回填模型 ID（与新建时的默认行为一致）
-        if not w.get("name"):
-            w["name"] = w["model"] or PROVIDER_TEMPLATES.get(w["provider"], {}).get("name", "模型")
+        # 显示名称允许为空：展示层统一回退到模型 ID，不在存储层回填，
+        # 否则改模型 ID 后旧名称会一直留着，看起来像「没跟着变」。
+        w.setdefault("name", "")
     data["providers"] = items
     ids = {w["id"] for w in items}
     if data.get("active") not in ids:
@@ -394,8 +394,8 @@ def create_entry(provider: str, name: str, base_url: str, api_key: str, model: s
     item = {
         "id": uuid.uuid4().hex[:12],
         "provider": provider,
-        # 显示名称留空时等于模型 ID（前端也会在输入模型名时自动带出）
-        "name": (name or model).strip() or model,
+        # 显示名称可以留空：前端展示时回退到模型 ID
+        "name": (name or "").strip(),
         "base_url": base_url,
         "api_key": api_key or "",
         "model": model,
@@ -424,8 +424,8 @@ def update_entry(
             raise ValueError("模型名不能为空")
         target["model"] = model.strip()
     if name is not None:
-        # 显示名称留空时回到模型 ID（与新建时的默认规则一致）
-        target["name"] = name.strip() or target["model"]
+        # 允许清空显示名称（展示层回退到模型 ID）
+        target["name"] = name.strip()
     if base_url is not None:
         if not base_url.strip():
             raise ValueError("接口地址不能为空")

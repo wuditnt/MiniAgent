@@ -2631,7 +2631,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         cfg = model_config.resolve_active()
         self._json({
             "model": cfg.get("model") or self.web.model or "",
-            "model_name": cfg.get("name") or "",
+            "model_name": cfg.get("name") or cfg.get("model") or "",
             "workspace": self._workspace(),
             "tools": self._tool_count(),
             "search_backend": _search_backend(),

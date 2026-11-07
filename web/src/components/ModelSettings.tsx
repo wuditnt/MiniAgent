@@ -117,8 +117,8 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
     const t = templates[first];
     setEditing(null);
     setProvider(first);
-    // 显示名称默认等于模型 ID（首次输入模型名后自动同步）
-    setName(t?.models?.[0] || "");
+    // 显示名称留空：展示时回退到模型 ID，不再自动带出
+    setName("");
     setBaseUrl(t?.base_url || "");
     setApiKey("");
     setModel(t?.models?.[0] || "");
@@ -139,21 +139,19 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
     setFormOpen(true);
   };
 
-  /** 切换模板：自动填地址与首个模型名（仅新建时）；显示名称跟随模型名 */
+  /** 切换模板：自动填地址与首个模型名（仅新建时）；显示名称保持用户输入 */
   const onProviderChange = (key: string) => {
     setProvider(key);
     if (!editing) {
       const t = templates[key];
       setBaseUrl(t?.base_url || "");
-      setName(t?.models?.[0] || "");
       setModel(t?.models?.[0] || "");
     }
   };
 
-  /** 模型名变化时，显示名称同步为新的模型名（仍可手动改） */
+  /** 模型名变化只影响模型 ID，不再联动显示名称 */
   const onModelChange = (v: string) => {
     setModel(v);
-    setName(v);
   };
 
   const doKwTest = async () => {
@@ -247,9 +245,11 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
               {providers.map((p) => (
                 <div key={p.id} className="ms-card">
                   <div className="ms-card-main">
-                    <div className="ms-card-title">{p.name}</div>
+                    <div className="ms-card-title">{p.name || p.model}</div>
                     <div className="ms-card-sub">
-                      {p.name === p.model ? p.base_url : `${p.model} · ${p.base_url}`}
+                      {p.name && p.name !== p.model
+                        ? `${p.model} · ${p.base_url}`
+                        : p.base_url}
                     </div>
                     <div className="ms-card-key">
                       {p.has_key ? p.api_key_masked : "无需 API Key"}
@@ -344,9 +344,14 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
           <Form.Item
             label="显示名称"
             style={{ marginBottom: 12 }}
-            extra="默认与模型名 ID 一致，可改成更好读的名字；修改模型名 ID 时会重新同步"
+            extra="留空时模型选择与输入框显示模型名 ID；修改模型名 ID 不会自动同步"
           >
-            <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={40} />
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="留空则使用模型名 ID"
+              maxLength={40}
+            />
           </Form.Item>
         </Form>
         <div className="ms-form-foot">
