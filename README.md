@@ -72,7 +72,7 @@ npm start
 ```
 
 ```bat
-:: 打包安装包（NSIS + portable，产物在 desktop\release\）
+:: 打包安装包（NSIS，产物在 desktop\release\）
 python scripts\build_desktop.py
 cd desktop
 npm run dist

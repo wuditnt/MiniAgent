@@ -8,7 +8,7 @@
 - 能力：安装包内置**真实的 Python 解释器**和全部依赖（含 OCR / 文档处理）
 - 工具：`run_python` / MCP server / `run_shell` 里的 `python` 全部指向内置解释器，不是冻结后的假解释器
 
-产物是两个文件：NSIS 安装版（约 210MB）和 portable 免安装版（约 210MB）。
+产物是一个 NSIS 安装包（约 210MB），以及一份解压即用的 `win-unpacked` 目录。
 
 ## 2. 概念
 
@@ -22,7 +22,7 @@ web/dist                   ├─ build_desktop.py ─▶ build/desktop-resource
                                                         │
                                               electron-builder
                                                         ▼
-                                       desktop/release/*.exe（NSIS / portable）
+                                       desktop/release/*.exe（NSIS 安装包）
 ```
 
 `desktop/release/win-unpacked/` 是免安装的完整目录，可直接运行验证。
@@ -99,7 +99,6 @@ npm run dist
 | 文件 | 说明 |
 |---|---|
 | `desktop/release/mini-agent Setup 1.0.0.exe` | NSIS 安装版，可选安装目录、创建桌面快捷方式 |
-| `desktop/release/mini-agent 1.0.0.exe` | portable 免安装版 |
 | `desktop/release/win-unpacked/` | 未压缩目录，调试首选 |
 
 只要未压缩目录：
