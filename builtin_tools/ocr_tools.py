@@ -9,6 +9,8 @@ OCR 工具组：对图片或扫描件 PDF 做文字识别。
 设计取舍：
   · OCR 引擎第一次调用要初始化（几秒），用模块级缓存 + 锁，避免重复加载。
   · 两个库都懒加载：缺库只让对应工具返回提示，不影响工具整体加载。
+  · 桌面版把这些库放在按需组件包（ocr-pack.zip）里，首次调用先解压再 import，
+    见 core/extra_libs.py；源码运行时该模块什么都不做。
   · 读走 read_path，与其他工具一样受路径沙箱约束；本组只读不写。
   · 扫描件识别慢且结果噪声大，页数/字符数都带上限。
 """
@@ -18,7 +20,7 @@ from __future__ import annotations
 import os
 import threading
 
-from core import clip, read_path, tool
+from core import clip, extra_libs, read_path, tool
 
 TOOL_INFO = {
     "name": "OCR 文字识别",
@@ -49,6 +51,9 @@ def _get_engine():
         return _engine, ""
     with _lock:
         if _engine is None:
+            err = extra_libs.ensure()
+            if err:
+                return None, err
             try:
                 from rapidocr_onnxruntime import RapidOCR
             except ImportError:

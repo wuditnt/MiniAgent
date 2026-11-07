@@ -142,6 +142,11 @@ export class Backend {
       PYTHONDONTWRITEBYTECODE: '1',
     }
     if (fs.existsSync(dist)) env.MINI_AGENT_WEB_DIST = dist
+    // OCR 依赖不在安装目录铺开，首次用到时由后端解压到数据目录（见 core/extra_libs.py）
+    if (!this.opts.isDev) {
+      const pack = path.join(process.resourcesPath, 'ocr-pack.zip')
+      if (fs.existsSync(pack)) env.MINI_AGENT_EXTRA_PACK = pack
+    }
 
     const args = [
       '-u', script,

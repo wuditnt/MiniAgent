@@ -33,6 +33,10 @@
       {
         "from": "../build/desktop-resources/python",
         "to": "python"
+      },
+      {
+        "from": "../build/desktop-resources/ocr-pack.zip",
+        "to": "ocr-pack.zip"
       }
     ],
     "win": {
