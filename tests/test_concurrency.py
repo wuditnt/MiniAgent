@@ -1,9 +1,11 @@
 """
 并发与全局状态测试 —— 免费用例：纯内存 + 临时配置文件，不碰网络、不烧 token。
 
-覆盖三处「多会话并发时会被串味」的全局状态：
+覆盖四处「多会话并发时会被串味」的全局状态：
   · ask / approval 的询问通道：必须是 ContextVar，不能是模块级变量 ——
     否则 A 会话的提问会弹到 B 会话上，A 结束时还会把仍在跑的 B 的通道清空；
+  · 取消令牌：同样必须是 ContextVar —— 否则停止 B 会打断 A 的工具检查点、
+    或把 A 的子进程挂到 B 的令牌上一起杀掉；
   · 工具注册表切换：工具导入期间的 use_registry 不能影响并发的另一个导入；
   · models.json 写入：并发「读-改-写」必须串行，否则后写的覆盖先写的。
 
@@ -22,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import bootstrap  # noqa: F401  —— 必须最先导入：铺 sys.path + 定工作区
 
-from core import approval, ask, registry  # noqa: E402
+from core import approval, ask, cancel, registry  # noqa: E402
 from core.registry import ToolRegistry  # noqa: E402
 
 import core.model_config as mc  # noqa: E402
@@ -78,6 +80,37 @@ def test_copy_context_propagates_into_worker() -> None:
 
     assert absent == (False, False), f"未复制上下文时工作线程不该看到通道：{absent}"
     assert present == (True, True), f"复制上下文后工作线程应看到通道：{present}"
+
+
+# ---------------------------------------------------------------- 取消令牌隔离
+
+def test_cancel_token_isolated_between_threads() -> None:
+    """两个会话并发执行：各自 set_current_token，互不覆盖；停止一个不影响另一个。"""
+    results: dict[str, tuple[bool, bool]] = {}
+    barrier = threading.Barrier(2)
+
+    def worker(tag: str, cancel_self: bool) -> None:
+        own = cancel.CancellationToken()
+        prev = cancel.set_current_token(own)
+        try:
+            barrier.wait()   # 两边都设好令牌再读，确保「串味」会被暴露
+            seen = cancel.current_token()
+            if cancel_self:
+                own.cancel("test only")
+            # 自己读到别人的令牌 = 串味；自己的令牌被别人的取消波及 = 误伤
+            results[tag] = (seen is not own, own.cancelled())
+        finally:
+            cancel.set_current_token(prev)
+
+    t1 = threading.Thread(target=worker, args=("A", True))
+    t2 = threading.Thread(target=worker, args=("B", False))
+    t1.start(); t2.start()
+    t1.join(); t2.join()
+
+    assert results["A"] == (False, True), results
+    assert results["B"] == (False, False), results
+    # 线程结束后主上下文仍然是「无令牌」，没有被工作线程污染
+    assert cancel.current_token() is None
 
 
 # ---------------------------------------------------------------- 注册表切换
@@ -142,6 +175,7 @@ def test_model_config_concurrent_writes() -> None:
 if __name__ == "__main__":
     test_asker_isolated_between_threads()
     test_copy_context_propagates_into_worker()
+    test_cancel_token_isolated_between_threads()
     test_use_registry_isolated_between_threads()
     test_model_config_concurrent_writes()
-    print("✓ 并发与全局状态 4 项通过")
+    print("✓ 并发与全局状态 5 项通过")

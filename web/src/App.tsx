@@ -176,7 +176,11 @@ export default function App({
   });
   const [state, setState] = useState<AgentState | null>(null);
   const [items, setItems] = useState<ChatItem[]>([]);
-  const [busy, setBusy] = useState(false);
+  // 本页正在「看」的会话（发送或接入）。同一面板一次只消费一条流：
+  // 切走会断开这条流（后端任务照常跑），回来时再接入快照。
+  // 用它按会话推导 busy —— A 会话在跑不会把 B 的发送按钮也锁成停止态。
+  const [activeSid, setActiveSid] = useState<string | null>(null);
+  const busy = activeSid === session;
   // 「编辑重发」的目标消息 id：点击编辑只进入编辑态、不删任何内容，
   // 真正替换旧轮次发生在用户再次发送时（见 send）。
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -503,7 +507,7 @@ export default function App({
     const ac = new AbortController();
     attachedRef.current = ac;
     const asstId = `r-${Date.now()}`;
-    setBusy(true);
+    setActiveSid(sid);
     setRunningIds((prev) => new Set(prev).add(sid));
     reconnectStream(
       sid,
@@ -665,11 +669,30 @@ export default function App({
       })
       .finally(() => {
         if (attachedRef.current === ac) attachedRef.current = null;
-        setBusy(false);
+        setActiveSid((cur) => (cur === sid ? null : cur));
         refreshAll();
         setTjReload((n) => n + 1);
       });
   };
+
+  // 切换会话：断开上一条「看」的流，后端任务不受影响（仍由 /api/running 指示）。
+  // 必须放在自动接入之前：先清掉 attachedRef，切过去的会话才能立即接入。
+  const prevSidRef = useRef(session);
+  useEffect(() => {
+    if (prevSidRef.current === session) return;
+    prevSidRef.current = session;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    attachedRef.current?.abort();
+    attachedRef.current = null;
+    setActiveSid(null);
+    // 上一条流遗留的确认/提问卡片属于旧会话，不能带到新会话的界面里
+    setConfirm(null);
+    askRef.current = null;
+    setAsk(null);
+    curAsstRef.current = null;
+    setTraces([]);
+  }, [session]);
 
   // 打开一个正在后台跑的会话（刷新 / 换标签页 / 断线回来）→ 自动接入实时输出
   useEffect(() => {
@@ -761,7 +784,7 @@ export default function App({
     } else {
       setItems((prev) => [...prev, userItem, asstItem]);
     }
-    setBusy(true);
+    setActiveSid(session);
     // 乐观点亮侧栏指示器：不必等下一轮轮询，发出去这一刻就显示「运行中」
     setRunningIds((prev) => new Set(prev).add(session));
     setTraces([]); // 新一轮 run：清掉上一轮的实时镜像
@@ -947,7 +970,7 @@ export default function App({
       })
       .finally(() => {
         if (handedToAttach) return;
-        setBusy(false);
+        setActiveSid((cur) => (cur === session ? null : cur));
         refreshAll(); // 对话结束后刷新列表（标题/时间/计数可能变了）
         setTjReload((n) => n + 1); // 运行结束：让轨迹抽屉拉一次磁盘全量兜底
       });

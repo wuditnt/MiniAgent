@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import os
 import signal
 import subprocess
@@ -211,21 +212,21 @@ class CancellationToken:
 # ---------------------------------------------------------------- 当前令牌
 
 # 「当前正在运行的任务」的令牌。
-# 一次只有一个 Agent.run() 在跑（REPL 是串行对话模型），模块级变量足够；
-# 用线程局部反而会让「工具运行在工作线程」这件事读不到令牌。
-_current: CancellationToken | None = None
-_current_lock = threading.Lock()
+# 用 ContextVar 而不是模块全局：Web UI 允许多个会话并发执行，每个会话一个
+# worker 线程；全局槽位会让 A 的工具读到 B 的令牌（停止 B 就连带打断 A 的
+# 工具检查点 / 子进程）。并行工具线程由 agent 用 copy_context() 传播上下文。
+_current: contextvars.ContextVar[CancellationToken | None] = contextvars.ContextVar(
+    "current_cancel_token", default=None
+)
 
 
 def current_token() -> CancellationToken | None:
     """工具内部用它拿到当前任务的取消令牌（没有则为 None —— 不取消也不报错）。"""
-    return _current
+    return _current.get()
 
 
 def set_current_token(token: CancellationToken | None) -> CancellationToken | None:
     """设置当前令牌，返回旧值（供恢复）。Agent.run() 的进入/退出配对使用。"""
-    global _current
-    with _current_lock:
-        previous = _current
-        _current = token
+    previous = _current.get()
+    _current.set(token)
     return previous
