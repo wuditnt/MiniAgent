@@ -35,6 +35,8 @@ function createWindow(port: number): void {
     show: false,
     backgroundColor: '#ffffff',
     title: 'mini-agent',
+    // 开发态任务栏图标；安装版的图标由 electron-builder 写进 exe
+    icon: path.join(app.getAppPath(), 'build', 'icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

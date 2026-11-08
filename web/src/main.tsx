@@ -1,15 +1,32 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { ConfigProvider } from "antd";
+import { ConfigProvider, theme as antdTheme } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import AuthGate from "./AuthGate";
+import { ThemeProvider, useTheme } from "./theme";
 import "./global.css";
+import "./theme-dark.css";
+
+/** 把当前主题喂给 antd：组件库自带深色算法，无需逐个组件改样式 */
+function ThemedApp() {
+  const { theme } = useTheme();
+  return (
+    <ConfigProvider
+      locale={zhCN}
+      theme={{
+        algorithm: theme === "dark" ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
+      }}
+    >
+      <AuthGate />
+    </ConfigProvider>
+  );
+}
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <ConfigProvider locale={zhCN}>
-      <AuthGate />
-    </ConfigProvider>
+    <ThemeProvider>
+      <ThemedApp />
+    </ThemeProvider>
   </React.StrictMode>
 );
 

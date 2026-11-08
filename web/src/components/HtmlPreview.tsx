@@ -78,6 +78,16 @@ function buildSrcDoc(
     head.insertBefore(base, head.firstChild);
   }
   base.setAttribute("href", assetBase(workspaceId, filePath));
+  // 预览页里的链接不应把 iframe 本身导航走：无 target 的一律新窗口打开
+  base.setAttribute("target", "_blank");
+
+  // 外链统一 target=_blank + rel=noreferrer（页内锚点 #xxx 保持原地跳转）
+  doc.querySelectorAll("a[href]").forEach((a) => {
+    const href = (a.getAttribute("href") || "").trim();
+    if (!href || href.startsWith("#")) return;
+    a.setAttribute("target", "_blank");
+    a.setAttribute("rel", "noreferrer");
+  });
 
   // MHTML：cid / Content-Location → data URL
   if (resources && Object.keys(resources).length > 0) {

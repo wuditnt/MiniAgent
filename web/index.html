@@ -8,6 +8,23 @@
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
     <meta name="theme-color" content="#ffffff" />
+    <!-- 首帧前定好主题，避免刷新时「先白后黑」闪一下 -->
+    <script>
+      (function () {
+        try {
+          var m = localStorage.getItem("ma-theme") || "system";
+          var dark =
+            m === "dark" ||
+            (m !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.dataset.theme = dark ? "dark" : "light";
+          document.documentElement.style.colorScheme = dark ? "dark" : "light";
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute("content", dark ? "#141414" : "#ffffff");
+        } catch (e) {
+          /* localStorage 不可用时按浅色启动 */
+        }
+      })();
+    </script>
     <meta name="description" content="mini-agent —— 本地智能体 Web UI" />
 
     <!-- 添加到主屏后以独立窗口运行（iOS / Android 各一套 meta） -->

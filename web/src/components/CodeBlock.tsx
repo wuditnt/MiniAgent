@@ -6,7 +6,7 @@
  * 推断不出时不传 language，Prism 原样输出纯文本（等同普通 pre）。
  */
 import { PrismLight } from "react-syntax-highlighter";
-import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { oneDark, oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 import python from "react-syntax-highlighter/dist/esm/languages/prism/python";
 import powershell from "react-syntax-highlighter/dist/esm/languages/prism/powershell";
 import bash from "react-syntax-highlighter/dist/esm/languages/prism/bash";
@@ -18,6 +18,7 @@ import markup from "react-syntax-highlighter/dist/esm/languages/prism/markup";
 import css from "react-syntax-highlighter/dist/esm/languages/prism/css";
 import yaml from "react-syntax-highlighter/dist/esm/languages/prism/yaml";
 import markdown from "react-syntax-highlighter/dist/esm/languages/prism/markdown";
+import { useTheme } from "../theme";
 
 PrismLight.registerLanguage("python", python);
 PrismLight.registerLanguage("powershell", powershell);
@@ -70,6 +71,8 @@ interface Props {
 }
 
 export default function CodeBlock({ code, lang, maxHeight, showLineNumbers }: Props) {
+  const { theme } = useTheme();
+  const dark = theme === "dark";
   const style: React.CSSProperties = {
     background: "transparent",
     margin: 0,
@@ -86,13 +89,13 @@ export default function CodeBlock({ code, lang, maxHeight, showLineNumbers }: Pr
   return (
     <PrismLight
       language={lang}
-      style={oneLight}
+      style={dark ? oneDark : oneLight}
       customStyle={style}
       showLineNumbers={showLineNumbers}
       lineNumberStyle={{
         minWidth: "2.6em",
         paddingRight: "1em",
-        color: "#bbb",
+        color: dark ? "rgba(255, 255, 255, 0.3)" : "#bbb",
         userSelect: "none",
       }}
       codeTagProps={{ style: { fontFamily: "ui-monospace, Consolas, monospace" } }}

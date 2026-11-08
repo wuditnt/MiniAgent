@@ -3,7 +3,7 @@
  * Chat / WelcomePane / ConfirmPanel / ToolChain 是纯展示组件。
  */
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import { DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, MoreOutlined, TeamOutlined, LockOutlined, LogoutOutlined, UserOutlined } from "@ant-design/icons";
+import { DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, MoreOutlined, TeamOutlined, LockOutlined, LogoutOutlined, UserOutlined, BgColorsOutlined, CheckOutlined } from "@ant-design/icons";
 import { Dropdown, Input, message, Modal, Tooltip } from "antd";
 import {
   chatStream,
@@ -58,6 +58,7 @@ import type { SettingsTab } from "./components/SettingsModal";
 import AccountSettingsModal from "./components/AccountSettingsModal";
 import ChangePasswordModal from "./components/ChangePasswordModal";
 import Workbench from "./components/Workbench";
+import { useTheme, type ThemeMode } from "./theme";
 import Trajectory from "./components/Trajectory";
 import SkillManager from "./components/SkillManager";
 
@@ -241,6 +242,8 @@ export default function App({
   // 厂家 → 支持的推理档位（来自内置模板声明）
   const [tplLevels, setTplLevels] = useState<Record<string, ReasoningLevel[]>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // 主题：用户菜单的快捷入口与系统配置里的选项共用同一份状态
+  const { mode: themeMode, setMode: setThemeMode } = useTheme();
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [wbFullscreen, setWbFullscreen] = useState(false);
@@ -1506,6 +1509,24 @@ export default function App({
                         icon: <LockOutlined />,
                         label: "修改密码",
                       },
+                      {
+                        key: "theme",
+                        icon: <BgColorsOutlined />,
+                        label: "主题",
+                        children: [
+                          { key: "theme-system", label: "跟随系统" },
+                          { key: "theme-light", label: "浅色" },
+                          { key: "theme-dark", label: "深色" },
+                        ].map((it) => ({
+                          ...it,
+                          icon:
+                            themeMode === it.key.replace("theme-", "") ? (
+                              <CheckOutlined />
+                            ) : (
+                              <span style={{ display: "inline-block", width: 14 }} />
+                            ),
+                        })),
+                      },
                       { type: "divider" as const },
                       {
                         key: "logout",
@@ -1517,6 +1538,9 @@ export default function App({
                       if (key === "accounts") setAccountsOpen(true);
                       else if (key === "password") setPwdOpen(true);
                       else if (key === "logout") onLogout();
+                      else if (key.startsWith("theme-")) {
+                        setThemeMode(key.slice("theme-".length) as ThemeMode);
+                      }
                     },
                   }}
                 >

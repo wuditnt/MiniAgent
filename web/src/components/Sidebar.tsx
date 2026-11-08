@@ -221,7 +221,7 @@ export default function Sidebar({
     <div className="sidebar">
       {/* ① 品牌区：logo + 标题 + 折叠图标 */}
       <div className="sidebar-brand">
-        <RobotOutlined className="brand-logo" />
+        <img src="/icon-192.png" className="brand-logo" alt="mini-agent" />
         <span className="brand-name">mini-agent</span>
         <Tooltip title={collapsed ? "展开侧栏" : "收起侧栏"}>
           <MenuOutlined className="sidebar-toggle" onClick={onToggleCollapse} />

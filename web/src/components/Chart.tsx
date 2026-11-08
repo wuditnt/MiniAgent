@@ -14,6 +14,7 @@ import {
   TooltipComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
+import { useTheme } from "../theme";
 
 echarts.use([
   BarChart,
@@ -31,11 +32,13 @@ echarts.use([
 
 export default function Chart({ option }: { option: Record<string, unknown> }) {
   const ref = useRef<HTMLDivElement>(null);
+  const { theme } = useTheme();
 
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const chart = echarts.init(el);
+    // 深色下用 echarts 内置 dark 主题，坐标轴/图例文字自动变浅
+    const chart = echarts.init(el, theme === "dark" ? "dark" : undefined, { renderer: "canvas" });
     chart.setOption(option);
     // 容器尺寸变化（窗口缩放、气泡宽度变化）时自适应
     const ro = new ResizeObserver(() => chart.resize());
@@ -44,7 +47,7 @@ export default function Chart({ option }: { option: Record<string, unknown> }) {
       ro.disconnect();
       chart.dispose();
     };
-  }, [option]);
+  }, [option, theme]);
 
   return <div ref={ref} className="echarts-box" />;
 }

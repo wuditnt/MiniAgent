@@ -6,7 +6,7 @@
  *   顶栏点模型名也能进来，只是直接落在「模型配置」页。
  */
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Alert, Button, Input, InputNumber, Modal, Radio, Select, Spin, Switch, Tag } from "antd";
+import { Alert, Button, Input, InputNumber, Modal, Radio, Segmented, Select, Spin, Switch, Tag } from "antd";
 import {
   ApiOutlined,
   AppstoreOutlined,
@@ -27,6 +27,7 @@ import type {
 import MemoryPanel from "./MemoryPanel";
 import ModelSettingsPanel from "./ModelSettings";
 import NetworkPanel from "./NetworkPanel";
+import { useTheme, type ThemeMode } from "../theme";
 
 interface Props {
   open: boolean;
@@ -179,6 +180,8 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
   // DeepSeek 联网 Key 只写不读：输入框单独维护，为空表示「不修改」
   const [searchKey, setSearchKey] = useState("");
   const isDesktop = !!window.__DESKTOP__;
+  // 主题是设备本地偏好，不进 settings.json，切换即时生效
+  const { mode, setMode } = useTheme();
   const visibleNav = NAV.filter((n) => isDesktop || !DESKTOP_ONLY_TABS.includes(n.key));
 
   const load = useCallback(() => {
@@ -525,6 +528,34 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
               {error && (
                   <Alert type="error" showIcon message={error} style={{ marginBottom: 12 }} />
                 )}
+                <div className="gs-group-title">外观</div>
+                <div className="gs-section">
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 12,
+                      padding: "8px 0",
+                    }}
+                  >
+                    <div>
+                      <div className="sandbox-opt-name">主题</div>
+                      <div className="sandbox-opt-desc">
+                        跟随系统时随设备深浅色自动切换；该偏好只保存在当前设备
+                      </div>
+                    </div>
+                    <Segmented
+                      value={mode}
+                      onChange={(v) => setMode(v as ThemeMode)}
+                      options={[
+                        { label: "跟随系统", value: "system" },
+                        { label: "浅色", value: "light" },
+                        { label: "深色", value: "dark" },
+                      ]}
+                    />
+                  </div>
+                </div>
                 <div className="gs-group-title">对话与上下文</div>
                 {section("context")}
                 <div className="gs-group-title">生成与性能</div>

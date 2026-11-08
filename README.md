@@ -1,4 +1,14 @@
-# mini-agent
+<h1 align="left">
+  <img src="web/public/icon-192.png" width="56" alt="mini-agent" />
+  mini-agent
+</h1>
+
+<p align="left">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" />
+  <img alt="React" src="https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black" />
+  <img alt="Electron" src="https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white" />
+  <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows%20%7C%20Web-0078D4" />
+</p>
 
 一个**可扩展的本地智能体 Web 应用**：核心循环 + 工具注册表 + 工具目录 + 连接（MCP）双通道。
 
@@ -18,7 +28,7 @@
 - **内联提问**：模型缺信息时直接在回复气泡里问你，答案在同一轮继续执行。
 - **技能系统**：一个目录 + `SKILL.md` 就是一段工作流；启动只注入一行清单，命中后按需加载正文。
 - **三层记忆**：用户画像、项目记忆、主题摘要；带分级、相关性筛选与保护区。
-- **工作台**：只读浏览工作区，支持代码、Markdown、HTML/MHTML、图片、PDF、CSV 预览。
+- **工作台**：浏览、预览与管理工作区文件，支持代码、Markdown、HTML/MHTML、图片、PDF、CSV 预览，以及下载、删除和右键菜单（桌面端可「打开所在文件夹」）。
 - **本地办公文档**：Word / Excel / PPT / PDF 读写；Excel 合并、拆分、CSV 互转、格式化、批量公式；PDF 合并、拆分、旋转、提取图片、图片合成、转图片、水印、压缩、加密解密；Office 文档转 PDF；按扩展名直达。
 - **运行轨迹**：每次运行落盘为 append-only 事件流，可按 `run_id → turn` 回放并完整重建请求。
 - **联网搜索**：DeepSeek / Tavily / 博查 / Bing 可切换，与聊天模型解耦，按会话开关。

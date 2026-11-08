@@ -702,10 +702,11 @@ function Markdown({
             );
           },
           a({ href, children, ...props }) {
-            // 正文里的超链接一律新标签页打开：当前页面是正在进行的对话，
-            // 直接跳走会把会话界面顶掉（noopener 同时断掉新页面对本页的 window.opener）
+            // 正文里的超链接一律新窗口打开：当前页面是正在进行的对话，
+            // 直接跳走会把会话界面顶掉。target/rel 放在展开之后，防止原始 HTML
+            // 里自带的 target 覆盖（raw HTML 已过 sanitize，但仍以这里为准）。
             return (
-              <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+              <a {...props} href={href} target="_blank" rel="noreferrer noopener">
                 {children}
               </a>
             );

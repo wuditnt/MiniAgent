@@ -7,22 +7,25 @@
  */
 import { useEffect, useState } from "react";
 import CodeBlock from "./CodeBlock";
+import { useTheme } from "../theme";
 
 let loader: Promise<typeof import("mermaid")> | null = null;
 
 function loadMermaid() {
   if (!loader) {
-    loader = import("mermaid").then((mod) => {
-      mod.default.initialize({
-        startOnLoad: false,
-        securityLevel: "strict",
-        theme: "default",
-        fontFamily: "inherit",
-      });
-      return mod;
-    });
+    loader = import("mermaid");
   }
   return loader;
+}
+
+/** 每次渲染前按当前主题初始化：深色主题下节点文字/连线才不会糊在深底上 */
+function initMermaid(mod: typeof import("mermaid"), dark: boolean) {
+  mod.default.initialize({
+    startOnLoad: false,
+    securityLevel: "strict",
+    theme: dark ? "dark" : "default",
+    fontFamily: "inherit",
+  });
 }
 
 let seq = 0;
@@ -36,6 +39,7 @@ const EXPORT_INIT = '%%{init: {"htmlLabels": false}}%%\n';
 /** 导出 PNG 用：按「纯 SVG 文本标签」重新渲染一次源码，得到可安全位图化的 SVG。 */
 export async function renderForExport(source: string): Promise<string> {
   const mod = await loadMermaid();
+  initMermaid(mod, false); // 导出 PNG 固定用浅色主题，深底下也看得清
   const res = await mod.default.render(`mmd-export-${++seq}`, EXPORT_INIT + source);
   return res.svg;
 }
@@ -54,6 +58,7 @@ export default function Mermaid({
   /** 渲染成功时把 SVG 字符串回传给外层（下载按钮要用） */
   onSvg?: (svg: string) => void;
 }) {
+  const { theme } = useTheme();
   const [svg, setSvg] = useState("");
   const [error, setError] = useState("");
 
@@ -65,7 +70,10 @@ export default function Mermaid({
     // 每次渲染用独立 id：StrictMode 会双跑 effect，共用 id 会撞车
     const id = `mmd-${++seq}`;
     loadMermaid()
-      .then((mod) => mod.default.render(id, source))
+      .then((mod) => {
+        initMermaid(mod, theme === "dark");
+        return mod.default.render(id, source);
+      })
       .then((res) => {
         if (alive) {
           setSvg(res.svg);
@@ -78,7 +86,7 @@ export default function Mermaid({
     return () => {
       alive = false;
     };
-  }, [source, onSvg]);
+  }, [source, onSvg, theme]);
 
   if (error) {
     return (

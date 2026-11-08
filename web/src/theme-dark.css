@@ -1,0 +1,106 @@
+﻿/**
+ * 深色主题：只覆盖调色板变量 + 少量无法变量化的渐变/阴影。
+ *
+ * 机制：<html data-theme="dark"> 由 src/theme.tsx 写入；antd 组件由
+ * ConfigProvider 的 darkAlgorithm 负责，这里只管自定义样式的颜色。
+ */
+
+[data-theme="dark"] {
+  /* 表面 */
+  --bg-ffffff: #16171a;
+  --bg-fafafa: #191a1d;
+  --bg-fafbfc: #191a1d;
+  --bg-f7f8fa: #1b1c20;
+  --bg-f5f5f5: #232428;
+  --bg-f0f0f0: #2a2b30;
+  --bg-f2f2f2: #26272b;
+  --bg-f5f6f8: #1b1c20;
+  --bg-f2f3f5: #222327;
+  --bg-f0f2f5: #222327;
+  --bg-f6f8fa: #1e1f23;
+  /* 蓝色强调 / 用户气泡 / 选中态 */
+  --bg-e6f4ff: #17324d;
+  --bg-f0f5ff: #182b44;
+  --bg-f5f8ff: #182b44;
+  /* 提示色 */
+  --bg-fff7e6: #3a2c14;
+  --bg-fff2f0: #3a1f1e;
+  --bg-fff1f0: #3a1f1e;
+  --bg-f9f0ff: #2e2140;
+
+  /* 文字 */
+  --tx-ink-088: rgba(255, 255, 255, 0.88);
+  --tx-ink-085: rgba(255, 255, 255, 0.86);
+  --tx-ink-075: rgba(255, 255, 255, 0.76);
+  --tx-ink-065: rgba(255, 255, 255, 0.65);
+  --tx-ink-045: rgba(255, 255, 255, 0.45);
+  --tx-000000: rgba(255, 255, 255, 0.92);
+  --tx-1f1f1f: rgba(255, 255, 255, 0.92);
+  --tx-333333: rgba(255, 255, 255, 0.88);
+  --tx-595959: rgba(255, 255, 255, 0.72);
+  --tx-666666: rgba(255, 255, 255, 0.68);
+  --tx-888888: rgba(255, 255, 255, 0.52);
+  --tx-8c8c8c: rgba(255, 255, 255, 0.55);
+  --tx-999999: rgba(255, 255, 255, 0.48);
+  --tx-a0a6b1: rgba(255, 255, 255, 0.5);
+  --tx-8a919f: rgba(255, 255, 255, 0.5);
+  --tx-aaaaaa: rgba(255, 255, 255, 0.42);
+  --tx-bbbbbb: rgba(255, 255, 255, 0.38);
+  --tx-bfbfbf: rgba(255, 255, 255, 0.34);
+
+  /* 描边 */
+  --bd-f0f0f0: #2b2c31;
+  --bd-f5f5f5: #26272b;
+  --bd-f2f2f2: #26272b;
+  --bd-eeeeee: #2a2b30;
+  --bd-e0e0e0: #33343a;
+  --bd-e4e6eb: #2b2c31;
+  --bd-e5e7eb: #2b2c31;
+  --bd-e6e8eb: #2b2c31;
+  --bd-e8e8e8: #2b2c31;
+  --bd-eceef2: #2b2c31;
+  --bd-d9d9d9: #3a3b42;
+
+  color-scheme: dark;
+}
+
+[data-theme="dark"] html,
+[data-theme="dark"] body {
+  background: #101114;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+/* 侧栏：浅色是上浅下深的灰渐变，深色反向压暗 */
+[data-theme="dark"] .sidebar-fixed {
+  background: linear-gradient(180deg, #1a1b1f 0%, #141518 100%);
+  border-right-color: #26272b;
+}
+
+/* 登录页背景渐变 */
+[data-theme="dark"] .login-page {
+  background: linear-gradient(180deg, #16171a 0%, #101114 100%);
+}
+
+/* 用户气泡底部的整行渐隐，与气泡同色 */
+[data-theme="dark"] .bubble-fade {
+  background: linear-gradient(180deg, rgba(23, 50, 77, 0) 0%, #17324d 100%);
+}
+
+/* 审批面板：浅色是暖黄底，深色换成同色系的暗调 */
+[data-theme="dark"] .confirm-panel {
+  background: #2a2114;
+  border-color: #5a4020;
+}
+
+/* 滚动条：深色下用中灰，避免过亮 */
+[data-theme="dark"] ::-webkit-scrollbar-thumb {
+  background: #3a3b42;
+}
+
+[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+  background: #4a4b53;
+}
+
+[data-theme="dark"] ::-webkit-scrollbar-track {
+  background: transparent;
+}
