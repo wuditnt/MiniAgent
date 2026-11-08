@@ -104,6 +104,54 @@ def test_normalize():
             continue
         raise AssertionError(f"应当拒绝：{name} {raw}")
 
+    # 工具级开关：去重、去空白，非法类型拒绝
+    spec = connector_store.normalize(
+        "tools-off", {"command": "python", "disabled_tools": [" echo ", "echo"]}
+    )
+    assert spec["disabled_tools"] == ["echo"], spec
+    for bad_tools in (5, ["ok", 1]):
+        try:
+            connector_store.normalize("bad", {"command": "python", "disabled_tools": bad_tools})
+        except connector_store.ConnectorError:
+            continue
+        raise AssertionError(f"disabled_tools 非法时应当拒绝：{bad_tools}")
+
+    # HTTP 传输：url 必填且必须是 http(s)，headers 只接受键值对象
+    http_spec = connector_store.normalize(
+        "remote",
+        {
+            "transport": "http",
+            "url": " https://example.com/mcp ",
+            "headers": {"Authorization": "Bearer x"},
+            "timeout": 10,
+        },
+    )
+    assert http_spec["transport"] == "http"
+    assert http_spec["url"] == "https://example.com/mcp"
+    assert http_spec["headers"] == {"Authorization": "Bearer x"}
+    assert http_spec["command"] == ""
+
+    for raw in (
+        {"transport": "http", "url": ""},
+        {"transport": "http", "url": "ftp://example.com/mcp"},
+        {"transport": "http", "url": "https://example.com/mcp", "headers": ["a"]},
+    ):
+        try:
+            connector_store.normalize("remote", raw)
+        except connector_store.ConnectorError:
+            continue
+        raise AssertionError(f"应当拒绝：{raw}")
+
+    # 密钥掩码：GET 只回 ***末4位，保存时命中掩码即保留原值
+    assert connector_store.mask_value("abcdefgh") == "***efgh"
+    assert connector_store.mask_value("abc") == "***"
+    assert connector_store.mask_value("") == ""
+    env, lost = connector_store.merge_masked_env(
+        {"TOKEN": "real-secret-1234"}, {"TOKEN": "***1234", "NEW": "***"}
+    )
+    assert env == {"TOKEN": "real-secret-1234"}, env
+    assert lost == ["NEW"], lost
+
     # python/py 会被 MCP 改写成应用解释器，所以界面永远显示「命令已找到」
     assert connector_store.command_available("python") is True
     assert connector_store.command_available("definitely-not-a-real-command-xyz") is False
@@ -250,6 +298,27 @@ def test_manager():
         snap = mgr.snapshot()
         item = next(s for s in snap["servers"] if s["name"] == "demo")
         assert item["tool_count"] == 6 and item["status"] == "ready", item
+        assert item["tool_total"] == 6 and item["started_ms"] >= 0, item
+
+        # 工具级开关：被禁用的工具不注册，但快照里仍能看到（enabled=False）
+        connector_store.upsert("demo", {**DEMO_SPEC, "disabled_tools": ["sha256"]})
+        mgr.reload("demo")
+        mcp_tools = {t.name for t in reg.all(source="mcp")}
+        assert len(mcp_tools) == 5 and "demo__sha256" not in mcp_tools, mcp_tools
+        item = next(s for s in mgr.snapshot()["servers"] if s["name"] == "demo")
+        assert item["tool_count"] == 5 and item["tool_total"] == 6, item
+        assert next(t for t in item["tools"] if t["raw_name"] == "sha256")["enabled"] is False
+        connector_store.upsert("demo", DEMO_SPEC)
+        mgr.reload("demo")
+
+        # 启动失败：自动重试一次，错误与尝试次数可见
+        connector_store.upsert("bad", {"command": "definitely-not-a-real-command-xyz"})
+        mgr.reload("bad")
+        bad = next(s for s in mgr.snapshot()["servers"] if s["name"] == "bad")
+        assert bad["status"] == "failed" and bad["attempts"] == 2, bad
+        assert "已自动重试" in bad["error"], bad
+        connector_store.remove("bad")
+        mgr.reload("bad")
 
         # 试连：临时进程，不写注册表
         before = len(reg.all(source="mcp"))
@@ -305,6 +374,45 @@ def test_http(mgr: MCPManager):
     code, data = _req("POST", "/api/connectors/test", {**DEMO_SPEC, "name": "dry"})
     assert code == 200 and data["ok"] is True, data
     assert len(data["tools"]) == 6, data
+
+    # 工具级开关 + 密钥掩码：保存后工具变 5 个，GET 只回 ***末 4 位
+    code, data = _req("POST", "/api/connectors", {
+        **DEMO_SPEC,
+        "name": "demo3",
+        "disabled_tools": ["now"],
+        "env": {"TOKEN": "secret-value-9876"},
+    })
+    assert code == 200, data
+    assert data["connector"]["tool_count"] == 5 and data["connector"]["tool_total"] == 6, data
+    assert data["connector"]["env"]["TOKEN"] == "***9876", data
+
+    # 用掩码回传保存：磁盘上的真实值必须保留
+    code, data = _req("POST", "/api/connectors", {
+        **DEMO_SPEC,
+        "name": "demo3",
+        "disabled_tools": ["now"],
+        "env": {"TOKEN": "***9876"},
+    })
+    assert code == 200, data
+    real_env = connector_store.load()["servers"]["demo3"]["env"]
+    assert real_env["TOKEN"] == "secret-value-9876", real_env
+
+    # 重试接口：只重连，不改配置
+    code, data = _req("POST", "/api/connectors/retry", {"name": "demo3"})
+    assert code == 200 and data["connector"]["status"] == "ready", (code, data)
+
+    # 导出：env 脱敏，可安全分享
+    code, data = _req("GET", "/api/connectors/export")
+    assert code == 200 and data["servers"]["demo3"]["env"]["TOKEN"] == "***9876", data
+
+    # 导入：新连接器的掩码 env 无从还原 → 跳过并给警告
+    code, data = _req("POST", "/api/connectors/import", {
+        "servers": {"imported": {**DEMO_SPEC, "env": {"TOKEN": "***9876"}}},
+    })
+    assert code == 200 and any(r["name"] == "imported" and r["ok"] for r in data["results"]), data
+    assert data["warnings"] and "TOKEN" in data["warnings"][0], data
+    _req("DELETE", "/api/connectors?name=demo3")
+    _req("DELETE", "/api/connectors?name=imported")
 
     # 停用
     code, data = _req("POST", "/api/connectors/toggle", {"name": "demo2", "enabled": False})
@@ -365,6 +473,27 @@ def test_http(mgr: MCPManager):
     print("✓ 接口：列表 / 保存 / 试连 / 启停 / 删除 / --no-mcp 503 全部正确")
 
 
+# ============================================================ 5.5 内置模板
+
+def test_presets():
+    from core import connector_presets
+
+    connector_presets._cache = None  # 保证读到的是当前包内文件
+    presets = connector_presets.all()
+    assert len(presets) == 8, presets
+    keys = {p["key"] for p in presets}
+    assert keys == {
+        "filesystem", "fetch", "memory", "git", "sqlite", "time",
+        "puppeteer", "sequential-thinking",
+    }, keys
+    assert all(p["command"] and p["args"] for p in presets), presets
+    assert connector_presets.get("git")["args"], "模板参数不能为空"
+
+    code, data = _req("GET", "/api/connectors/presets")
+    assert code == 200 and len(data["presets"]) == 8, (code, data)
+    print("✓ 模板：8 个内置模板可加载，接口返回完整清单")
+
+
 _SERVER: list[WebServer] = []
 
 
@@ -397,6 +526,7 @@ def main() -> int:
         test_registry_scope()
         test_migration(tmp)
         test_manager()
+        test_presets()
         test_http(mgr)
     finally:
         if srv._httpd is not None:

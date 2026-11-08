@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "presets": [
+    {
+      "key": "filesystem",
+      "display_name": "文件系统",
+      "description": "读写指定目录下的文件",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:\\path\\to\\folder"],
+      "dangerous": true,
+      "hint": "把最后一个参数替换成要开放的绝对目录（建议只指向一个项目目录）",
+      "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem"
+    },
+    {
+      "key": "fetch",
+      "display_name": "网页抓取",
+      "description": "抓取网页并转成 Markdown，适合资料检索",
+      "command": "uvx",
+      "args": ["mcp-server-fetch"],
+      "dangerous": false,
+      "hint": "需要先安装 uv（uvx 随 uv 提供）",
+      "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch"
+    },
+    {
+      "key": "memory",
+      "display_name": "知识图谱记忆",
+      "description": "基于知识图谱的长期记忆存储",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "dangerous": false,
+      "hint": "记忆文件默认保存在用户目录，可在参数里指定路径",
+      "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/memory"
+    },
+    {
+      "key": "git",
+      "display_name": "Git",
+      "description": "查看仓库状态、差异、提交历史",
+      "command": "uvx",
+      "args": ["mcp-server-git", "--repository", "D:\\path\\to\\repo"],
+      "dangerous": true,
+      "hint": "把 --repository 后面的路径替换成要操作的仓库目录",
+      "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/git"
+    },
+    {
+      "key": "sqlite",
+      "display_name": "SQLite",
+      "description": "对本地 SQLite 数据库执行查询与写入",
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "D:\\path\\to\\data.db"],
+      "dangerous": true,
+      "hint": "把 --db-path 后面的路径替换成数据库文件（不存在会自动创建）",
+      "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/sqlite"
+    },
+    {
+      "key": "time",
+      "display_name": "时间与时区",
+      "description": "时区换算与当前时间查询",
+      "command": "uvx",
+      "args": ["mcp-server-time"],
+      "dangerous": false,
+      "hint": "需要先安装 uv（uvx 随 uv 提供）",
+      "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/time"
+    },
+    {
+      "key": "puppeteer",
+      "display_name": "浏览器自动化",
+      "description": "用无头浏览器打开页面、点击与截图",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+      "dangerous": true,
+      "hint": "首次启动会下载 Chromium，耗时较长；请把超时调大到 120 秒以上",
+      "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/puppeteer"
+    },
+    {
+      "key": "sequential-thinking",
+      "display_name": "序列化思考",
+      "description": "把复杂问题拆成可回溯的思考步骤",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+      "dangerous": false,
+      "hint": "纯本地推理辅助，无外部依赖",
+      "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking"
+    }
+  ]
+}

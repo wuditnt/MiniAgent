@@ -5,8 +5,8 @@
  * 第一版只支持 stdio（本机命令），数据来自 /api/connectors。
  * 写操作仅本机 + 超级管理员可用，远程访问时只读。
  */
-import { useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, ReactNode } from "react";
 import {
   ApiOutlined,
   ArrowLeftOutlined,
@@ -14,6 +14,8 @@ import {
   CloseCircleFilled,
   DeleteOutlined,
   EditOutlined,
+  ExportOutlined,
+  ImportOutlined,
   MinusCircleFilled,
   MoreOutlined,
   PlusOutlined,
@@ -31,6 +33,7 @@ import {
   Input,
   InputNumber,
   Modal,
+  Segmented,
   Spin,
   Switch,
   Tag,
@@ -40,13 +43,18 @@ import {
 import type { MenuProps } from "antd";
 import {
   deleteConnector,
+  exportConnectors,
+  fetchConnectorPresets,
   fetchConnectors,
+  importConnectors,
+  retryConnector,
   saveConnector,
   testConnector,
   toggleConnector,
 } from "../api";
 import type {
   ConnectorInfo,
+  ConnectorPreset,
   ConnectorRuntime,
   ConnectorSpec,
   ConnectorTestResult,
@@ -69,13 +77,18 @@ interface Draft {
   name: string;
   display_name: string;
   description: string;
+  transport: "stdio" | "http";
   command: string;
   argsText: string;
+  url: string;
+  headers: EnvRow[];
   cwd: string;
   timeout: number;
   enabled: boolean;
   dangerous: boolean;
   env: EnvRow[];
+  /** 被关闭的工具（服务端原始名） */
+  disabledTools: string[];
 }
 
 const NAME_RE = /^[A-Za-z0-9_-]{1,40}$/;
@@ -85,13 +98,17 @@ function draftFrom(c?: ConnectorInfo): Draft {
     name: c?.name || "",
     display_name: c?.display_name || "",
     description: c?.description || "",
-    command: c?.command || "",
+    transport: c?.transport || "stdio",
+    command: c?.transport === "http" ? "" : c?.command || "",
     argsText: (c?.args || []).join("\n"),
+    url: c?.url || "",
+    headers: Object.entries(c?.headers || {}).map(([k, v]) => ({ k, v })),
     cwd: c?.cwd || "",
     timeout: c?.timeout || 30,
     enabled: c?.enabled ?? true,
     dangerous: c?.dangerous ?? true,
     env: Object.entries(c?.env || {}).map(([k, v]) => ({ k, v })),
+    disabledTools: [...(c?.disabled_tools || [])],
   };
 }
 
@@ -101,21 +118,29 @@ function specFrom(draft: Draft): ConnectorSpec {
     const key = row.k.trim();
     if (key) env[key] = row.v;
   }
+  const headers: Record<string, string> = {};
+  for (const row of draft.headers) {
+    const key = row.k.trim();
+    if (key) headers[key] = row.v;
+  }
   return {
     name: draft.name.trim(),
     display_name: draft.display_name.trim() || draft.name.trim(),
     description: draft.description.trim(),
-    transport: "stdio",
-    command: draft.command.trim(),
+    transport: draft.transport,
+    command: draft.transport === "stdio" ? draft.command.trim() : "",
     args: draft.argsText
       .split("\n")
       .map((s) => s.trim())
       .filter(Boolean),
+    url: draft.transport === "http" ? draft.url.trim() : "",
+    headers: draft.transport === "http" ? headers : {},
     cwd: draft.cwd.trim(),
     env,
     timeout: draft.timeout,
     enabled: draft.enabled,
     dangerous: draft.dangerous,
+    disabled_tools: [...draft.disabledTools],
   };
 }
 
@@ -147,6 +172,11 @@ export default function ConnectorsPage({ onClose, remote }: Props) {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<ConnectorTestResult | null>(null);
   const [deleting, setDeleting] = useState<ConnectorInfo | null>(null);
+  const [presets, setPresets] = useState<ConnectorPreset[]>([]);
+  const [presetHint, setPresetHint] = useState("");
+  const [retrying, setRetrying] = useState("");
+  const [importing, setImporting] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const locked = remote || !mcpEnabled || running > 0;
 
@@ -171,6 +201,13 @@ export default function ConnectorsPage({ onClose, remote }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 模板清单随包发布，只读；远程访问也展示（禁用写操作即可）
+  useEffect(() => {
+    fetchConnectorPresets()
+      .then(setPresets)
+      .catch(() => setPresets([]));
+  }, []);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return items;
@@ -186,6 +223,7 @@ export default function ConnectorsPage({ onClose, remote }: Props) {
     setEditing(null);
     setDraft(draftFrom());
     setTestResult(null);
+    setPresetHint("");
     setEditorOpen(true);
   }
 
@@ -193,7 +231,95 @@ export default function ConnectorsPage({ onClose, remote }: Props) {
     setEditing(c);
     setDraft(draftFrom(c));
     setTestResult(null);
+    setPresetHint("");
     setEditorOpen(true);
+  }
+
+  /** 模板只预填表单：名称冲突时自动加序号，参数里的路径需要用户自己改 */
+  function openPreset(p: ConnectorPreset) {
+    let name = p.key;
+    let n = 2;
+    while (items.some((c) => c.name === name)) name = `${p.key}-${n++}`;
+    setEditing(null);
+    setDraft({
+      ...draftFrom(),
+      name,
+      display_name: p.display_name,
+      description: p.description,
+      command: p.command,
+      argsText: p.args.join("\n"),
+      timeout: p.key === "puppeteer" ? 120 : 30,
+      dangerous: p.dangerous,
+    });
+    setTestResult(null);
+    setPresetHint(p.hint || "");
+    setEditorOpen(true);
+  }
+
+  async function onRetry(c: ConnectorInfo) {
+    setRetrying(c.name);
+    try {
+      await retryConnector(c.name);
+      await reload();
+    } catch (e) {
+      message.error((e as Error).message);
+    } finally {
+      setRetrying("");
+    }
+  }
+
+  async function onExport() {
+    try {
+      const data = await exportConnectors();
+      const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `miniagent-connectors-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      message.success("已导出（环境变量已脱敏）");
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  }
+
+  async function onImportFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    let servers: Record<string, unknown>;
+    try {
+      const data = JSON.parse(await file.text());
+      servers = data?.servers;
+      if (!servers || typeof servers !== "object") {
+        message.error("文件格式不正确：缺少 servers 对象");
+        return;
+      }
+    } catch (err) {
+      message.error(`读取文件失败：${(err as Error).message}`);
+      return;
+    }
+    setImporting(true);
+    try {
+      const res = await importConnectors(servers);
+      const ok = res.results.filter((r) => r.ok).length;
+      if (ok) message.success(`已导入 ${ok} 个连接器`);
+      const failed = res.results.filter((r) => !r.ok);
+      if (failed.length) {
+        message.warning(
+          `${failed.length} 个失败：${failed.map((r) => `${r.name}（${r.error}）`).join("；")}`
+        );
+      }
+      for (const w of res.warnings || []) message.warning(w);
+      await reload();
+    } catch (err) {
+      message.error((err as Error).message);
+    } finally {
+      setImporting(false);
+    }
   }
 
   async function onTest() {
@@ -202,8 +328,12 @@ export default function ConnectorsPage({ onClose, remote }: Props) {
       message.warning("请先填写合法的连接器标识");
       return;
     }
-    if (!spec.command) {
+    if (spec.transport === "stdio" && !spec.command) {
       message.warning("请先填写启动命令");
+      return;
+    }
+    if (spec.transport === "http" && !spec.url) {
+      message.warning("请先填写服务地址");
       return;
     }
     setTesting(true);
@@ -223,8 +353,12 @@ export default function ConnectorsPage({ onClose, remote }: Props) {
       message.warning("标识只能包含字母、数字、下划线或短横线，长度 1-40");
       return;
     }
-    if (!spec.command) {
+    if (spec.transport === "stdio" && !spec.command) {
       message.warning("启动命令不能为空");
+      return;
+    }
+    if (spec.transport === "http" && !spec.url) {
+      message.warning("服务地址不能为空");
       return;
     }
     setSaving(true);
@@ -314,9 +448,59 @@ export default function ConnectorsPage({ onClose, remote }: Props) {
           <Button icon={<ReloadOutlined />} onClick={() => void reload()} loading={loading}>
             刷新
           </Button>
+          <Dropdown
+            trigger={["click"]}
+            disabled={!presets.length}
+            menu={{
+              items: presets.map((p) => ({
+                key: p.key,
+                label: (
+                  <div className="connector-preset-item">
+                    <span>{p.display_name}</span>
+                    <span className="connector-preset-desc">{p.description}</span>
+                  </div>
+                ),
+              })),
+              onClick: ({ key }) => {
+                const p = presets.find((x) => x.key === key);
+                if (p) openPreset(p);
+              },
+            }}
+          >
+            <Button icon={<PlusOutlined />} disabled={locked}>
+              从模板添加
+            </Button>
+          </Dropdown>
           <Button type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={locked}>
             自定义连接器
           </Button>
+          <Dropdown
+            trigger={["click"]}
+            menu={{
+              items: [
+                { key: "export", icon: <ExportOutlined />, label: "导出配置" },
+                {
+                  key: "import",
+                  icon: <ImportOutlined />,
+                  label: "导入配置",
+                  disabled: locked || importing,
+                },
+              ],
+              onClick: ({ key }) => {
+                if (key === "export") void onExport();
+                else fileRef.current?.click();
+              },
+            }}
+          >
+            <Button icon={<MoreOutlined />} />
+          </Dropdown>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="application/json,.json"
+            style={{ display: "none" }}
+            onChange={(e) => void onImportFile(e)}
+          />
         </div>
       </header>
 
@@ -412,7 +596,11 @@ export default function ConnectorsPage({ onClose, remote }: Props) {
                         {st.icon}
                         {st.label}
                       </span>
-                      <span className="connector-tools">{c.tool_count} 个工具</span>
+                      <Tooltip title={`已启用 ${c.tool_count} / 共 ${c.tool_total} 个工具`}>
+                        <span className="connector-tools">
+                          {c.tool_count}/{c.tool_total} 个工具
+                        </span>
+                      </Tooltip>
                     </div>
                     {c.enabled && !c.command_found && (
                       <div className="connector-warn">
@@ -420,9 +608,34 @@ export default function ConnectorsPage({ onClose, remote }: Props) {
                       </div>
                     )}
                     {c.enabled && c.status === "failed" && c.error && (
-                      <Tooltip title={c.error}>
-                        <div className="connector-error">{c.error}</div>
-                      </Tooltip>
+                      <div className="connector-fail">
+                        <Tooltip title={c.error}>
+                          <div className="connector-error">{c.error}</div>
+                        </Tooltip>
+                        <div className="connector-fail-foot">
+                          <span className="connector-hint">
+                            {c.started_ms ? `启动 ${c.started_ms}ms` : ""}
+                            {c.attempts > 1 ? ` · 尝试 ${c.attempts} 次` : ""}
+                          </span>
+                          <Button
+                            size="small"
+                            icon={<ReloadOutlined />}
+                            loading={retrying === c.name}
+                            disabled={locked}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void onRetry(c);
+                            }}
+                          >
+                            重试
+                          </Button>
+                        </div>
+                        {!!c.stderr_tail?.length && (
+                          <pre className="connector-stderr" title={c.stderr_tail.join("\n")}>
+                            {c.stderr_tail.join("\n")}
+                          </pre>
+                        )}
+                      </div>
                     )}
                   </div>
                 );
@@ -458,6 +671,16 @@ export default function ConnectorsPage({ onClose, remote }: Props) {
           />
         )}
 
+        {presetHint && (
+          <Alert
+            type="info"
+            showIcon
+            className="connectors-alert"
+            message="模板提示"
+            description={presetHint}
+          />
+        )}
+
         <div className="connector-field">
           <label>标识</label>
           <Input
@@ -488,73 +711,209 @@ export default function ConnectorsPage({ onClose, remote }: Props) {
         </div>
 
         <div className="connector-field">
-          <label>启动命令</label>
-          <Input
-            value={draft.command}
-            placeholder="例如 npx、python、uvx"
-            onChange={(e) => setDraft({ ...draft, command: e.target.value })}
+          <label>传输方式</label>
+          <Segmented
+            value={draft.transport}
+            options={[
+              { label: "stdio（本地进程）", value: "stdio" },
+              { label: "HTTP（远程服务）", value: "http" },
+            ]}
+            onChange={(v) =>
+              setDraft({ ...draft, transport: v as "stdio" | "http" })
+            }
           />
         </div>
 
-        <div className="connector-field">
-          <label>参数</label>
-          <Input.TextArea
-            value={draft.argsText}
-            rows={4}
-            placeholder={"每行一个参数，例如：\n-y\n@modelcontextprotocol/server-filesystem\nD:\\data"}
-            onChange={(e) => setDraft({ ...draft, argsText: e.target.value })}
-          />
-        </div>
-
-        <div className="connector-field">
-          <label>工作目录</label>
-          <Input
-            value={draft.cwd}
-            placeholder="可选，留空使用应用目录"
-            onChange={(e) => setDraft({ ...draft, cwd: e.target.value })}
-          />
-        </div>
-
-        <div className="connector-field">
-          <label>环境变量</label>
-          {draft.env.map((row, i) => (
-            <div className="connector-env-row" key={i}>
+        {draft.transport === "stdio" && (
+          <>
+            <div className="connector-field">
+              <label>启动命令</label>
               <Input
-                value={row.k}
-                placeholder="KEY"
-                onChange={(e) => {
-                  const env = [...draft.env];
-                  env[i] = { ...row, k: e.target.value };
-                  setDraft({ ...draft, env });
-                }}
-              />
-              <Input
-                value={row.v}
-                placeholder="VALUE"
-                onChange={(e) => {
-                  const env = [...draft.env];
-                  env[i] = { ...row, v: e.target.value };
-                  setDraft({ ...draft, env });
-                }}
-              />
-              <Button
-                type="text"
-                danger
-                icon={<DeleteOutlined />}
-                onClick={() =>
-                  setDraft({ ...draft, env: draft.env.filter((_, j) => j !== i) })
-                }
+                value={draft.command}
+                placeholder="例如 npx、python、uvx"
+                onChange={(e) => setDraft({ ...draft, command: e.target.value })}
               />
             </div>
-          ))}
-          <Button
-            type="dashed"
-            icon={<PlusOutlined />}
-            onClick={() => setDraft({ ...draft, env: [...draft.env, { k: "", v: "" }] })}
-          >
-            添加变量
-          </Button>
-        </div>
+
+            <div className="connector-field">
+              <label>参数</label>
+              <Input.TextArea
+                value={draft.argsText}
+                rows={4}
+                placeholder={"每行一个参数，例如：\n-y\n@modelcontextprotocol/server-filesystem\nD:\\data"}
+                onChange={(e) => setDraft({ ...draft, argsText: e.target.value })}
+              />
+            </div>
+
+            <div className="connector-field">
+              <label>工作目录</label>
+              <Input
+                value={draft.cwd}
+                placeholder="可选，留空使用应用目录"
+                onChange={(e) => setDraft({ ...draft, cwd: e.target.value })}
+              />
+            </div>
+
+            <div className="connector-field">
+              <label>环境变量</label>
+              {draft.env.map((row, i) => (
+                <div className="connector-env-row" key={i}>
+                  <Input
+                    value={row.k}
+                    placeholder="KEY"
+                    onChange={(e) => {
+                      const env = [...draft.env];
+                      env[i] = { ...row, k: e.target.value };
+                      setDraft({ ...draft, env });
+                    }}
+                  />
+                  <Input
+                    value={row.v}
+                    placeholder="VALUE"
+                    onChange={(e) => {
+                      const env = [...draft.env];
+                      env[i] = { ...row, v: e.target.value };
+                      setDraft({ ...draft, env });
+                    }}
+                  />
+                  <Button
+                    type="text"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={() =>
+                      setDraft({ ...draft, env: draft.env.filter((_, j) => j !== i) })
+                    }
+                  />
+                </div>
+              ))}
+              <Button
+                type="dashed"
+                icon={<PlusOutlined />}
+                onClick={() => setDraft({ ...draft, env: [...draft.env, { k: "", v: "" }] })}
+              >
+                添加变量
+              </Button>
+              <span className="connector-hint">
+                已有变量的值以 *** 开头显示，表示已保存的密钥；不改动就会原样保留。
+              </span>
+            </div>
+          </>
+        )}
+
+        {draft.transport === "http" && (
+          <>
+            <div className="connector-field">
+              <label>服务地址</label>
+              <Input
+                value={draft.url}
+                placeholder="https://example.com/mcp"
+                onChange={(e) => setDraft({ ...draft, url: e.target.value })}
+              />
+              <span className="connector-hint">
+                Streamable HTTP 端点；请填写 http(s):// 开头的完整地址。
+              </span>
+            </div>
+
+            <div className="connector-field">
+              <label>请求头</label>
+              {draft.headers.map((row, i) => (
+                <div className="connector-env-row" key={i}>
+                  <Input
+                    value={row.k}
+                    placeholder="Authorization"
+                    onChange={(e) => {
+                      const headers = [...draft.headers];
+                      headers[i] = { ...row, k: e.target.value };
+                      setDraft({ ...draft, headers });
+                    }}
+                  />
+                  <Input.Password
+                    value={row.v}
+                    placeholder="Bearer ***"
+                    onChange={(e) => {
+                      const headers = [...draft.headers];
+                      headers[i] = { ...row, v: e.target.value };
+                      setDraft({ ...draft, headers });
+                    }}
+                  />
+                  <Button
+                    type="text"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={() =>
+                      setDraft({
+                        ...draft,
+                        headers: draft.headers.filter((_, j) => j !== i),
+                      })
+                    }
+                  />
+                </div>
+              ))}
+              <Button
+                type="dashed"
+                icon={<PlusOutlined />}
+                onClick={() =>
+                  setDraft({ ...draft, headers: [...draft.headers, { k: "", v: "" }] })
+                }
+              >
+                添加请求头
+              </Button>
+              <span className="connector-hint">
+                已保存的值以 *** 开头显示；不改动就会原样保留。
+              </span>
+            </div>
+          </>
+        )}
+
+        {editing && (
+          <div className="connector-field">
+            <label>
+              工具
+              <span className="connector-hint">
+                {" "}
+                已启用{" "}
+                {(editing.tools || []).filter(
+                  (t) => !draft.disabledTools.includes(t.raw_name || t.name)
+                ).length}
+                /{(editing.tools || []).length}
+              </span>
+            </label>
+            {(editing.tools || []).length ? (
+              <div className="connector-tool-list">
+                {(editing.tools || []).map((t) => {
+                  const raw = t.raw_name || t.name;
+                  return (
+                    <div className="connector-tool-row" key={raw}>
+                      <div className="connector-tool-info">
+                        <code>{raw}</code>
+                        {t.description && <span>{t.description}</span>}
+                      </div>
+                      <Switch
+                        size="small"
+                        checked={!draft.disabledTools.includes(raw)}
+                        onChange={(v) =>
+                          setDraft({
+                            ...draft,
+                            disabledTools: v
+                              ? draft.disabledTools.filter((x) => x !== raw)
+                              : [...draft.disabledTools, raw],
+                          })
+                        }
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <span className="connector-hint">
+                连接成功后这里会列出服务端工具，可逐个关闭。
+              </span>
+            )}
+            <span className="connector-hint">
+              关闭的工具不会注册给模型（对所有会话生效），仍受各会话的连接器勾选约束。
+            </span>
+          </div>
+        )}
 
         <div className="connector-field connector-field-inline">
           <label>超时（秒）</label>

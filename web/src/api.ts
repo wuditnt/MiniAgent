@@ -8,6 +8,8 @@ import type {
   AgentState,
   ApprovalMode,
   Attachment,
+  ConnectorImportResult,
+  ConnectorPreset,
   ConnectorSpec,
   ConnectorTestResult,
   ConnectorsData,
@@ -568,6 +570,44 @@ export async function deleteConnector(name: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(await readError(res));
+}
+
+/** 重试一个连接失败的连接器（只重连，不改配置） */
+export async function retryConnector(name: string): Promise<void> {
+  const res = await req("/api/connectors/retry", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+/** 内置模板清单 */
+export async function fetchConnectorPresets(): Promise<ConnectorPreset[]> {
+  const res = await req("/api/connectors/presets");
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.presets || [];
+}
+
+/** 导出配置（env 已脱敏） */
+export async function exportConnectors(): Promise<Record<string, unknown>> {
+  const res = await req("/api/connectors/export");
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/** 导入配置：逐条保存并热加载 */
+export async function importConnectors(
+  servers: Record<string, unknown>
+): Promise<ConnectorImportResult> {
+  const res = await req("/api/connectors/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ servers }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
 }
 
 // ---------------------------------------------------------------- 通用配置

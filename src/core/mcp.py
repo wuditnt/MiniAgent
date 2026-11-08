@@ -40,6 +40,8 @@ import re
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 
 from core import pyexe
@@ -133,8 +135,15 @@ class MCPServerState:
     args: list[str] = field(default_factory=list)
     status: str = "pending"      # pending / ready / failed / stopped
     error: str = ""
-    tools: list[str] = field(default_factory=list)
+    tools: list[str] = field(default_factory=list)        # 已注册的模型侧工具名
+    all_tools: list[dict] = field(default_factory=list)   # 服务端发现的全部工具（含被禁用项）
     server_info: dict = field(default_factory=dict)
+    transport: str = "stdio"
+    url: str = ""
+    # 失败可见性：启动耗时、尝试次数、stderr 尾部
+    started_ms: int = 0
+    attempts: int = 1
+    stderr_tail: list[str] = field(default_factory=list)
 
 
 class MCPStdioClient:
@@ -174,6 +183,8 @@ class MCPStdioClient:
         self._next_id = 1
         self._send_lock = threading.Lock()
         self.server_info: dict = {}
+        # 服务端主动推送的通知（tools/list_changed 等）交给 manager 处理
+        self.on_notification = None
         # 取消相关的可观测数字：界面与测试都靠它断言「通知真的发了」
         self.stats: dict[str, int] = {
             "requests": 0, "cancellations": 0, "late_responses": 0, "timeouts": 0,
@@ -300,6 +311,13 @@ class MCPStdioClient:
                 )
                 return
         self._rx.put(msg)
+        # 无 id + 有 method = 服务端通知。读线程不能在这里做重活，
+        # 回调由 manager 负责调度（它只登记定时器/写日志）。
+        if "method" in msg and msg.get("id") is None and self.on_notification is not None:
+            try:
+                self.on_notification(msg)
+            except Exception:  # noqa: BLE001 —— 通知处理出错不能让读线程退出
+                _log.exception("mcp.notification_failed name=%s", self.name)
 
     def _read_stderr(self) -> None:
         assert self._proc is not None and self._proc.stderr is not None
@@ -464,19 +482,308 @@ class MCPStdioClient:
         return list(self._stderr)[-n:]
 
 
+# ---------------------------------------------------------------- HTTP 传输
+
+class MCPHttpClient:
+    """Streamable HTTP 传输的 MCP 客户端（零依赖：urllib）。
+
+    协议要点：
+      · 每个 JSON-RPC 消息一次 POST；响应可能是 application/json，
+        也可能是 text/event-stream（SSE 帧里挑出对应 id 的那条）；
+      · initialize 响应头里的 Mcp-Session-Id 必须带到后续所有请求；
+      · 服务端通知（tools/list_changed / message）通过 GET 同一个地址
+        的长连接 SSE 推送，不支持时安静降级（不会反复重连）。
+    """
+
+    def __init__(
+        self,
+        name: str,
+        url: str,
+        headers: dict[str, str] | None = None,
+        timeout: float = 30.0,
+    ) -> None:
+        self.name = name
+        self.url = url
+        self.headers = {str(k): str(v) for k, v in (headers or {}).items() if k}
+        self.timeout = timeout
+        self.server_info: dict = {}
+        self.on_notification = None
+        self.stats: dict[str, int] = {
+            "requests": 0, "cancellations": 0, "late_responses": 0, "timeouts": 0,
+        }
+        self._session_id = ""
+        self._next_id = 1
+        self._closed = False
+        self._stop = threading.Event()
+        self._send_lock = threading.Lock()
+        self._errors: collections.deque[str] = collections.deque(maxlen=50)
+        self._cancelled_ids: collections.deque[int] = collections.deque(
+            maxlen=_CANCELLED_ID_MEMORY
+        )
+
+    # ---------------------------------------------------------- 生命周期
+
+    def start(self) -> None:
+        result = self.request(
+            "initialize",
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION},
+            },
+        )
+        self.server_info = result.get("serverInfo", {}) if isinstance(result, dict) else {}
+        self.notify("notifications/initialized", {})
+        # 通知流单独一个线程：拿不到（405/404）就静默放弃，不影响工具调用
+        threading.Thread(
+            target=self._read_notifications, name=f"mcp-{self.name}-sse", daemon=True
+        ).start()
+
+    def alive(self) -> bool:
+        return not self._closed
+
+    def stop(self, timeout: float = 5.0) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._stop.set()
+        # 规范允许客户端 DELETE 结束会话；失败无所谓（服务端可能不支持）
+        try:
+            req = urllib.request.Request(
+                self.url, method="DELETE", headers=self._http_headers()
+            )
+            urllib.request.urlopen(req, timeout=min(timeout, 3.0)).close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ---------------------------------------------------------- 协议收发
+
+    def _http_headers(self, accept: str = "application/json, text/event-stream") -> dict:
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": accept,
+            "MCP-Protocol-Version": PROTOCOL_VERSION,
+        }
+        headers.update(self.headers)
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+        return headers
+
+    def _post(self, payload: dict) -> list[dict]:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            self.url, data=data, method="POST", headers=self._http_headers()
+        )
+        method = payload.get("method", "?")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                sid = resp.headers.get("Mcp-Session-Id")
+                if sid:
+                    self._session_id = sid
+                ctype = (resp.headers.get("Content-Type") or "").lower()
+                if "text/event-stream" in ctype:
+                    return self._read_sse(resp)
+                raw = resp.read()
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", "replace")[:400]
+            except Exception:  # noqa: BLE001
+                pass
+            self._errors.append(f"HTTP {e.code} {e.reason} {detail}".strip())
+            raise MCPError(
+                f"{method} HTTP {e.code} {e.reason}" + (f"：{detail}" if detail else "")
+            ) from e
+        except urllib.error.URLError as e:
+            reason = str(e.reason)
+            if "timed out" in reason or isinstance(e.reason, TimeoutError):
+                self.stats["timeouts"] += 1
+                raise MCPError(f"{method} 超时（{self.timeout}s）") from e
+            self._errors.append(f"连接失败：{reason}")
+            raise MCPError(f"无法连接 {self.url}：{reason}") from e
+        except TimeoutError as e:
+            self.stats["timeouts"] += 1
+            raise MCPError(f"{method} 超时（{self.timeout}s）") from e
+        except OSError as e:
+            self._errors.append(f"网络错误：{e}")
+            raise MCPError(f"{method} 网络错误：{e}") from e
+
+        if not raw.strip():
+            return []
+        try:
+            return [json.loads(raw)]
+        except json.JSONDecodeError as e:
+            raise MCPError(f"{method} 返回了非法 JSON") from e
+
+    @staticmethod
+    def _read_sse(stream) -> list[dict]:
+        """读一个 SSE 流，返回其中所有 JSON 消息（响应 + 通知）。"""
+        events: list[dict] = []
+        buffer: list[str] = []
+        for raw in stream:
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            if not line:
+                if buffer:
+                    try:
+                        events.append(json.loads("\n".join(buffer)))
+                    except json.JSONDecodeError:
+                        pass
+                    buffer = []
+                continue
+            if line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                buffer.append(line[5:].lstrip())
+        if buffer:
+            try:
+                events.append(json.loads("\n".join(buffer)))
+            except json.JSONDecodeError:
+                pass
+        return [e for e in events if isinstance(e, dict)]
+
+    def notify(self, method: str, params: dict | None = None) -> None:
+        self._post({"jsonrpc": "2.0", "method": method, "params": params or {}})
+
+    def notify_cancelled(self, rid: int, reason: str = "") -> bool:
+        with self._send_lock:
+            if rid in self._cancelled_ids:
+                return False
+            self._cancelled_ids.append(rid)
+        try:
+            self.notify("notifications/cancelled", {"requestId": rid, "reason": reason})
+        except Exception:  # noqa: BLE001
+            return False
+        self.stats["cancellations"] += 1
+        return True
+
+    def request(self, method: str, params: dict | None = None) -> dict:
+        tok = current_token()
+        if tok is not None:
+            tok.check()
+        with self._send_lock:
+            rid = self._next_id
+            self._next_id += 1
+        self.stats["requests"] += 1
+        try:
+            messages = self._post(
+                {"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}}
+            )
+        except MCPError:
+            raise
+        except Cancelled:
+            self.notify_cancelled(rid, "客户端取消了该请求")
+            raise
+
+        response: dict | None = None
+        for msg in messages:
+            if msg.get("id") == rid:
+                response = msg
+            elif msg.get("method"):
+                self._emit(msg)
+        if response is None:
+            raise MCPError(f"{method} 未返回响应（收到 {len(messages)} 条消息）")
+        if "error" in response:
+            err = response["error"]
+            raise MCPError(
+                f"{method} 返回错误：{err.get('code')} {err.get('message')}"
+            )
+        result = response.get("result", {})
+        return result if isinstance(result, dict) else {"_raw": result}
+
+    def _emit(self, msg: dict) -> None:
+        if self.on_notification is None:
+            return
+        try:
+            self.on_notification(msg)
+        except Exception:  # noqa: BLE001
+            _log.exception("mcp.notification_failed name=%s", self.name)
+
+    # ---------------------------------------------------------- 通知长连接
+
+    def _read_notifications(self) -> None:
+        while not self._stop.is_set():
+            req = urllib.request.Request(
+                self.url,
+                method="GET",
+                headers=self._http_headers(accept="text/event-stream"),
+            )
+            try:
+                with urllib.request.urlopen(
+                    req, timeout=max(self.timeout, 30.0)
+                ) as resp:
+                    ctype = (resp.headers.get("Content-Type") or "").lower()
+                    if "text/event-stream" not in ctype:
+                        return  # 服务端不支持通知流：安静退出
+                    buffer: list[str] = []
+                    for raw in resp:
+                        if self._stop.is_set():
+                            return
+                        line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                        if not line:
+                            if buffer:
+                                try:
+                                    msg = json.loads("\n".join(buffer))
+                                except json.JSONDecodeError:
+                                    msg = None
+                                if isinstance(msg, dict):
+                                    self._emit(msg)
+                                buffer = []
+                            continue
+                        if line.startswith(":"):
+                            continue
+                        if line.startswith("data:"):
+                            buffer.append(line[5:].lstrip())
+            except urllib.error.HTTPError as e:
+                if e.code in (404, 405, 501):
+                    return  # 不支持独立通知流
+                self._stop.wait(1.0)
+            except Exception:  # noqa: BLE001 —— 空闲超时/断线都按重连处理
+                if self._stop.is_set():
+                    return
+                self._stop.wait(1.0)
+
+    # ---------------------------------------------------------- 诊断与高层方法
+
+    def inflight(self) -> dict[int, str]:
+        return {}
+
+    def late_responses(self) -> list[str]:
+        return []
+
+    def stderr_tail(self, n: int = 5) -> list[str]:
+        return list(self._errors)[-n:]
+
+    def list_tools(self) -> list[dict]:
+        result = self.request("tools/list", {})
+        tools = result.get("tools", [])
+        return tools if isinstance(tools, list) else []
+
+    def call_tool(self, name: str, arguments: dict) -> str:
+        result = self.request("tools/call", {"name": name, "arguments": arguments or {}})
+        return MCPStdioClient._render_result(result)
+
+
 # ---------------------------------------------------------------- 桥接成 Tool
 
 def tools_from_client(
-    client: MCPStdioClient,
+    client,
     registry: ToolRegistry,
     group: str | None = None,
     dangerous: bool = True,
+    disabled: set[str] | None = None,
+    discovered: list[dict] | None = None,
 ) -> list[str]:
-    """把一个 MCP server 的工具全部注册进注册表，返回注册成功的工具名。"""
+    """把一个 MCP server 的工具注册进注册表，返回注册成功的工具名。
+
+    disabled 是服务端原始工具名集合（配置里的 disabled_tools）；
+    discovered 可复用已经 list_tools() 拿到的结果，避免重复请求服务端。
+    """
+    disabled = disabled or set()
+    specs = discovered if discovered is not None else client.list_tools()
     registered: list[str] = []
-    for spec in client.list_tools():
+    for spec in specs:
         raw_name = spec.get("name")
-        if not raw_name:
+        if not raw_name or raw_name in disabled:
             continue
         fq = fq_tool_name(client.name, raw_name)
         schema = spec.get("inputSchema") or {"type": "object", "properties": {}}
@@ -561,6 +868,10 @@ class MCPManager:
         self.report = MCPReport()
         # 界面上保存/启停会触发重载；重载要串行，避免两个请求同时改 clients / 注册表
         self._load_lock = threading.RLock()
+        # 服务端日志环与工具变更通知的防抖定时器
+        self._logs: dict[str, collections.deque[str]] = {}
+        self._reload_timers: dict[str, threading.Timer] = {}
+        self._notify_lock = threading.Lock()
 
     def load(self, only: list[str] | None = None) -> MCPReport:
         with self._load_lock:
@@ -592,47 +903,70 @@ class MCPManager:
                 name=name,
                 command=spec.get("command", ""),
                 args=list(spec.get("args", [])),
+                transport=spec.get("transport", "stdio"),
+                url=spec.get("url", ""),
             )
+
             cwd = spec.get("cwd")
             cwd = os.path.join(self.root, cwd) if cwd and not os.path.isabs(cwd) else cwd or self.root
-
-            client = MCPStdioClient(
-                name=name,
-                command=state.command,
-                args=state.args,
-                cwd=cwd,
-                env=spec.get("env") or {},
-                timeout=float(spec.get("timeout", 30)),
-            )
-            try:
-                client.start()
-                self.registry.remove_module(f"mcp:{name}")
-                state.tools = tools_from_client(
-                    client,
-                    self.registry,
-                    group=spec.get("group"),
-                    dangerous=bool(spec.get("dangerous", True)),
+            disabled = set(spec.get("disabled_tools") or [])
+            started_at = time.time()
+            attempts = 0
+            client = None
+            while True:
+                # 失败后自动重试一次：多数失败是服务端首次启动慢或瞬时握手失败，
+                # 给用户看到的错误里会注明重试过，连接成功时则无感。
+                attempts += 1
+                client = self._make_client(name, spec, cwd)
+                # 服务端主动通知（tools/list_changed 等）统一交给 manager 调度
+                client.on_notification = (
+                    lambda msg, _name=name: self._handle_notification(_name, msg)
                 )
-                state.server_info = client.server_info
-                state.status = "ready"
-                old = self.clients.get(name)
-                self.clients[name] = client
-                if old is not None and old is not client:
-                    # 重载/重启同名 server：旧连接已没人持有，必须关掉 ——
-                    # 否则子进程与读线程会一直挂着（每次 reload 泄漏一个）。
-                    old.stop()
-            except MCPError as e:
-                state.status = "failed"
-                state.error = str(e)
-                _log.error("mcp.start_failed name=%s error=%s stderr=%s",
-                           name, state.error, " / ".join(client.stderr_tail())[:400])
-                client.stop()
-            except Exception as e:  # noqa: BLE001
-                state.status = "failed"
-                state.error = f"{type(e).__name__}: {e}"
-                _log.exception("mcp.start_crashed name=%s", name)
-                client.stop()
+                try:
+                    client.start()
+                    self.registry.remove_module(f"mcp:{name}")
+                    specs = client.list_tools()
+                    state.all_tools = [
+                        {
+                            "raw_name": item.get("name", ""),
+                            "description": item.get("description", ""),
+                            "dangerous": bool(spec.get("dangerous", True)),
+                        }
+                        for item in specs if item.get("name")
+                    ]
+                    state.tools = tools_from_client(
+                        client,
+                        self.registry,
+                        group=spec.get("group"),
+                        dangerous=bool(spec.get("dangerous", True)),
+                        disabled=disabled,
+                        discovered=specs,
+                    )
+                    state.server_info = client.server_info
+                    state.status = "ready"
+                    old = self.clients.get(name)
+                    self.clients[name] = client
+                    if old is not None and old is not client:
+                        # 重载/重启同名 server：旧连接已没人持有，必须关掉 ——
+                        # 否则子进程与读线程会一直挂着（每次 reload 泄漏一个）。
+                        old.stop()
+                    break
+                except Exception as e:  # noqa: BLE001
+                    err = str(e) if isinstance(e, MCPError) else f"{type(e).__name__}: {e}"
+                    state.error = err
+                    state.stderr_tail = client.stderr_tail()
+                    client.stop()
+                    if attempts < 2:
+                        time.sleep(0.3)
+                        continue
+                    state.status = "failed"
+                    state.error = f"{err}（已自动重试 {attempts - 1} 次）"
+                    _log.error("mcp.start_failed name=%s error=%s stderr=%s",
+                               name, err, " / ".join(state.stderr_tail)[:400])
+                    break
 
+            state.attempts = attempts
+            state.started_ms = int((time.time() - started_at) * 1000)
             report.servers[name] = state
 
         # 关掉不再需要的连接，并摘掉它们的工具：
@@ -647,7 +981,72 @@ class MCPManager:
         self.report = report
         return report
 
+    def _make_client(self, name: str, spec: dict, cwd: str):
+        """按传输方式创建客户端；两种传输对外接口完全一致。"""
+        if spec.get("transport") == "http":
+            return MCPHttpClient(
+                name=name,
+                url=spec.get("url", ""),
+                headers=spec.get("headers") or {},
+                timeout=float(spec.get("timeout", 30)),
+            )
+        return MCPStdioClient(
+            name=name,
+            command=spec.get("command", ""),
+            args=list(spec.get("args") or []),
+            cwd=cwd,
+            env=spec.get("env") or {},
+            timeout=float(spec.get("timeout", 30)),
+        )
+
+    # ------------------------------------------------------ 服务端通知
+
+    def _append_log(self, name: str, text: str) -> None:
+        with self._notify_lock:
+            ring = self._logs.get(name)
+            if ring is None:
+                ring = collections.deque(maxlen=100)
+                self._logs[name] = ring
+            ring.append(f"{time.strftime('%H:%M:%S')} {text}")
+
+    def _handle_notification(self, name: str, msg: dict) -> None:
+        """客户端读线程调进来：这里只能做登记类工作，不能阻塞。"""
+        method = str(msg.get("method") or "")
+        if method == "notifications/tools/list_changed":
+            self._schedule_reload(name)
+        elif method == "notifications/message":
+            params = msg.get("params") or {}
+            level = str(params.get("level") or "info")
+            data = params.get("data")
+            text = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
+            self._append_log(name, f"[{level}] {text}")
+        # resources/prompts 的变更通知暂不消费
+
+    def _schedule_reload(self, name: str) -> None:
+        """tools/list_changed 防抖重载：同一连接短时间多次通知只重载一次。"""
+        with self._notify_lock:
+            old = self._reload_timers.pop(name, None)
+            if old is not None:
+                old.cancel()
+            timer = threading.Timer(0.5, self._reload_after_notification, args=(name,))
+            timer.daemon = True
+            self._reload_timers[name] = timer
+            timer.start()
+
+    def _reload_after_notification(self, name: str) -> None:
+        with self._notify_lock:
+            self._reload_timers.pop(name, None)
+        try:
+            self.reload(name)
+            _log.info("mcp.tools_changed_reloaded name=%s", name)
+        except Exception:  # noqa: BLE001
+            _log.exception("mcp.tools_changed_reload_failed name=%s", name)
+
     def shutdown(self) -> None:
+        with self._notify_lock:
+            for timer in self._reload_timers.values():
+                timer.cancel()
+            self._reload_timers.clear()
         for client in self.clients.values():
             client.stop()
         self.clients.clear()
@@ -670,23 +1069,47 @@ class MCPManager:
             by_module.setdefault(t.module, []).append(t)
         servers = []
         for st in states:
-            tools = [
-                {
-                    "name": t.name,
-                    "description": t.description,
-                    "dangerous": bool(t.dangerous),
-                }
-                for t in by_module.get(f"mcp:{st.name}", [])
-            ]
+            registry_tools = by_module.get(f"mcp:{st.name}", [])
+            registered_fq = {t.name for t in registry_tools}
+            if st.all_tools:
+                tools = [
+                    {
+                        "name": fq_tool_name(st.name, item["raw_name"]),
+                        "raw_name": item["raw_name"],
+                        "description": item.get("description", ""),
+                        "dangerous": bool(item.get("dangerous", True)),
+                        "enabled": fq_tool_name(st.name, item["raw_name"]) in registered_fq,
+                    }
+                    for item in st.all_tools
+                ]
+            else:
+                # 没有发现记录（连接失败/未启动）时退回注册表里实际可见的工具
+                tools = [
+                    {
+                        "name": t.name,
+                        "raw_name": t.name,
+                        "description": t.description,
+                        "dangerous": bool(t.dangerous),
+                        "enabled": True,
+                    }
+                    for t in registry_tools
+                ]
             servers.append({
                 "name": st.name,
                 "command": st.command,
                 "args": list(st.args),
+                "transport": st.transport,
+                "url": st.url,
                 "status": st.status,
                 "error": st.error,
                 "server_info": dict(st.server_info),
                 "tools": tools,
-                "tool_count": len(tools),
+                "tool_count": sum(1 for t in tools if t["enabled"]),
+                "tool_total": len(tools),
+                "started_ms": st.started_ms,
+                "attempts": st.attempts,
+                "stderr_tail": list(st.stderr_tail),
+                "logs": list(self._logs.get(st.name) or []),
             })
         return {"servers": servers, "cancel_stats": cancel}
 
@@ -696,14 +1119,7 @@ class MCPManager:
         cwd = spec.get("cwd") or self.root
         if not os.path.isabs(cwd):
             cwd = os.path.join(self.root, cwd)
-        client = MCPStdioClient(
-            name=name,
-            command=spec.get("command", ""),
-            args=list(spec.get("args") or []),
-            cwd=cwd,
-            env=spec.get("env") or {},
-            timeout=float(spec.get("timeout", 30)),
-        )
+        client = self._make_client(name, spec, cwd)
         try:
             client.start()
             tools = [

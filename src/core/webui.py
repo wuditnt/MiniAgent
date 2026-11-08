@@ -39,6 +39,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from core._paths import ROOT, data_dir
 from core import auth
+from core import connector_presets
 from core import connector_store
 from core import events
 from core import logging_setup
@@ -2356,6 +2357,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_tools_list()
         elif route == "/api/connectors":
             self._handle_connectors_get()
+        elif route == "/api/connectors/presets":
+            self._handle_connector_presets()
+        elif route == "/api/connectors/export":
+            self._handle_connector_export()
         elif route == "/api/skills":
             self._handle_skills_list()
         elif route == "/api/skills/detail":
@@ -2440,6 +2445,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_connector_test()
         elif route == "/api/connectors/toggle":
             self._handle_connector_toggle()
+        elif route == "/api/connectors/retry":
+            self._handle_connector_retry()
+        elif route == "/api/connectors/import":
+            self._handle_connector_import()
         else:
             m = re.match(r"^/api/models/([^/]+)/(test|activate)$", route)
             if m:
@@ -3363,23 +3372,41 @@ class _RequestHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _connector_item(name: str, spec: dict, state: dict | None) -> dict:
         state = state or {}
+        tools = state.get("tools", [])
+        transport = spec.get("transport", "stdio")
         return {
             "name": name,
             "display_name": spec.get("display_name") or name,
             "description": spec.get("description", ""),
-            "command": spec.get("command", ""),
+            "transport": transport,
+            "command": spec.get("command", "") or spec.get("url", ""),
             "args": list(spec.get("args") or []),
+            "url": spec.get("url", ""),
             "cwd": spec.get("cwd", ""),
-            "env": dict(spec.get("env") or {}),
+            # 密钥类字段只回传掩码；保存时命中掩码即保留磁盘原值
+            "env": {
+                k: connector_store.mask_value(v)
+                for k, v in (spec.get("env") or {}).items()
+            },
+            "headers": {
+                k: connector_store.mask_value(v)
+                for k, v in (spec.get("headers") or {}).items()
+            },
             "timeout": spec.get("timeout", 30),
             "enabled": bool(spec.get("enabled", True)),
             "dangerous": bool(spec.get("dangerous", True)),
-            "command_found": connector_store.command_available(spec.get("command", "")),
+            "disabled_tools": list(spec.get("disabled_tools") or []),
+            "command_found": transport == "http" or connector_store.command_available(spec.get("command", "")),
             "status": state.get("status", "stopped"),
             "error": state.get("error", ""),
             "server_info": state.get("server_info", {}),
-            "tools": state.get("tools", []),
-            "tool_count": state.get("tool_count", 0),
+            "tools": tools,
+            "tool_count": state.get("tool_count", sum(1 for t in tools if t.get("enabled", True))),
+            "tool_total": state.get("tool_total", len(tools)),
+            "started_ms": state.get("started_ms", 0),
+            "attempts": state.get("attempts", 0),
+            "stderr_tail": list(state.get("stderr_tail") or []),
+            "logs": list(state.get("logs") or []),
         }
 
     def _handle_connectors_get(self) -> None:
@@ -3415,6 +3442,71 @@ class _RequestHandler(BaseHTTPRequestHandler):
             "defaults": connector_store.get_defaults(),
         })
 
+    def _handle_connector_presets(self) -> None:
+        """内置模板清单（只读，不含任何密钥）。"""
+        self._json({"presets": connector_presets.all()})
+
+    def _handle_connector_export(self) -> None:
+        """导出连接器配置：env 全部脱敏，可安全分享。"""
+        self._json(connector_store.export_payload())
+
+    def _handle_connector_import(self) -> None:
+        """导入连接器配置：逐条复用保存链路，部分失败不影响其它条目。"""
+        if not self._connector_target() or self._connector_running_guard():
+            return
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON")
+            return
+        servers = body.get("servers")
+        if not isinstance(servers, dict) or not servers:
+            self._fail(400, "导入内容需包含 servers 对象")
+            return
+        if len(servers) > 50:
+            self._fail(400, "一次最多导入 50 个连接器")
+            return
+        current = connector_store.load()["servers"]
+        results: list[dict] = []
+        warnings: list[str] = []
+        for raw_name, raw in servers.items():
+            name = str(raw_name).strip()
+            try:
+                if not isinstance(raw, dict):
+                    raise connector_store.ConnectorError("配置必须是对象")
+                payload = dict(raw)
+                payload.pop("name", None)
+                if isinstance(payload.get("env"), dict):
+                    merged, lost = connector_store.merge_masked_env(
+                        (current.get(name) or {}).get("env") or {}, payload["env"]
+                    )
+                    payload["env"] = merged
+                    if lost:
+                        warnings.append(
+                            f"{name}: 密钥 {', '.join(lost)} 未随导出文件携带，已跳过，请手动补填"
+                        )
+                if isinstance(payload.get("headers"), dict):
+                    merged, lost = connector_store.merge_masked_env(
+                        (current.get(name) or {}).get("headers") or {}, payload["headers"]
+                    )
+                    payload["headers"] = merged
+                    if lost:
+                        warnings.append(
+                            f"{name}: 请求头 {', '.join(lost)} 未随导出文件携带，已跳过，请手动补填"
+                        )
+                spec = connector_store.normalize(name, payload)
+                connector_store.upsert(name, payload)
+                self.web.mcp.reload(name)
+                results.append({"name": name, "ok": True})
+            except connector_store.ConnectorError as e:
+                results.append({"name": name, "ok": False, "error": str(e)})
+            except OSError as e:
+                results.append({"name": name, "ok": False, "error": f"写入失败：{e}"})
+        self._json({
+            "ok": any(r["ok"] for r in results),
+            "results": results,
+            "warnings": warnings,
+        })
+
     def _handle_connector_save(self) -> None:
         if not self._connector_target() or self._connector_running_guard():
             return
@@ -3426,6 +3518,19 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if not name:
             self._fail(400, "缺少连接器标识")
             return
+        # 编辑已有连接器时，env 里回传的是掩码：命中掩码就保留磁盘上的原值，
+        # 这样用户改其它字段时无需重新输入密钥。
+        existing = connector_store.load()["servers"].get(name) or {}
+        if isinstance(body.get("env"), dict):
+            merged, _lost = connector_store.merge_masked_env(
+                existing.get("env") or {}, body["env"]
+            )
+            body = {**body, "env": merged}
+        if isinstance(body.get("headers"), dict):
+            merged, _lost = connector_store.merge_masked_env(
+                existing.get("headers") or {}, body["headers"]
+            )
+            body = {**body, "headers": merged}
         try:
             spec = connector_store.normalize(name, body)
             connector_store.upsert(name, body)
@@ -3450,12 +3555,24 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._fail(400, "请求体必须是 JSON")
             return
         name = str(body.get("name") or "test").strip() or "test"
+        # 试连同样要还原掩码：编辑已有连接器时用户不必重新输入密钥
+        existing = connector_store.load()["servers"].get(name) or {}
+        if isinstance(body.get("env"), dict):
+            merged, _lost = connector_store.merge_masked_env(
+                existing.get("env") or {}, body["env"]
+            )
+            body = {**body, "env": merged}
+        if isinstance(body.get("headers"), dict):
+            merged, _lost = connector_store.merge_masked_env(
+                existing.get("headers") or {}, body["headers"]
+            )
+            body = {**body, "headers": merged}
         try:
             spec = connector_store.normalize(name, body)
         except connector_store.ConnectorError as e:
             self._fail(400, str(e))
             return
-        if not connector_store.command_available(spec["command"]):
+        if spec["transport"] == "stdio" and not connector_store.command_available(spec["command"]):
             self._json({
                 "ok": False,
                 "error": f"找不到命令 {spec['command']}，请检查 PATH 或先安装依赖",
@@ -3488,6 +3605,31 @@ class _RequestHandler(BaseHTTPRequestHandler):
             (s for s in self.web.mcp.snapshot()["servers"] if s["name"] == name), None
         )
         self._json({"ok": True, "connector": self._connector_item(name, spec, state)})
+
+    def _handle_connector_retry(self) -> None:
+        """重试一个连接失败的连接器（只重连，不改配置）。"""
+        if not self._connector_target() or self._connector_running_guard():
+            return
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON")
+            return
+        name = str(body.get("name") or "").strip()
+        if not name:
+            self._fail(400, "缺少连接器标识")
+            return
+        cfg = connector_store.load()
+        if name not in cfg["servers"]:
+            self._fail(404, "连接器不存在")
+            return
+        self.web.mcp.reload(name)
+        state = next(
+            (s for s in self.web.mcp.snapshot()["servers"] if s["name"] == name), None
+        )
+        self._json({
+            "ok": True,
+            "connector": self._connector_item(name, cfg["servers"][name], state),
+        })
 
     def _handle_connector_delete(self, params: dict) -> None:
         if not self._connector_target() or self._connector_running_guard():

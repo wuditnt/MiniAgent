@@ -543,8 +543,12 @@ export interface HealthInfo {
 /** 连接器暴露的一个工具 */
 export interface ConnectorTool {
   name: string;
+  /** 服务端原始工具名（工具级开关用这个名字） */
+  raw_name?: string;
   description: string;
   dangerous?: boolean;
+  /** false = 被 disabled_tools 关闭，未注册给模型 */
+  enabled?: boolean;
 }
 
 /** 已配置的连接器（GET /api/connectors） */
@@ -552,13 +556,19 @@ export interface ConnectorInfo {
   name: string;
   display_name: string;
   description: string;
+  transport: "stdio" | "http";
   command: string;
   args: string[];
+  url: string;
   cwd: string;
   env: Record<string, string>;
+  /** 自定义请求头（值为掩码） */
+  headers: Record<string, string>;
   timeout: number;
   enabled: boolean;
   dangerous: boolean;
+  /** 被禁用的工具（服务端原始工具名） */
+  disabled_tools: string[];
   /** 启动命令当前是否能在 PATH 中找到（python 视为可用） */
   command_found: boolean;
   /** ready / failed / stopped */
@@ -566,7 +576,16 @@ export interface ConnectorInfo {
   error: string;
   server_info: Record<string, unknown>;
   tools: ConnectorTool[];
+  /** 已注册（启用）的工具数 / 服务端发现的总数 */
   tool_count: number;
+  tool_total: number;
+  /** 最近一次启动耗时（毫秒）与尝试次数 */
+  started_ms: number;
+  attempts: number;
+  /** 启动失败时子进程 stderr 的尾部 */
+  stderr_tail: string[];
+  /** 服务端通知日志（notifications/message） */
+  logs: string[];
 }
 
 /** 宿主机运行环境（决定 npx 类连接器是否可用） */
@@ -590,14 +609,17 @@ export interface ConnectorSpec {
   name: string;
   display_name?: string;
   description?: string;
-  transport?: "stdio";
+  transport?: "stdio" | "http";
   command: string;
   args?: string[];
+  url?: string;
+  headers?: Record<string, string>;
   cwd?: string;
   env?: Record<string, string>;
   timeout?: number;
   enabled?: boolean;
   dangerous?: boolean;
+  disabled_tools?: string[];
 }
 
 export interface ConnectorTestResult {
@@ -606,6 +628,25 @@ export interface ConnectorTestResult {
   stderr?: string[];
   server_info?: Record<string, unknown>;
   tools?: { name: string; description: string }[];
+}
+
+/** 内置模板（GET /api/connectors/presets） */
+export interface ConnectorPreset {
+  key: string;
+  display_name: string;
+  description: string;
+  command: string;
+  args: string[];
+  dangerous: boolean;
+  hint: string;
+  docs: string;
+}
+
+/** 导入结果（POST /api/connectors/import） */
+export interface ConnectorImportResult {
+  ok: boolean;
+  results: { name: string; ok: boolean; error?: string }[];
+  warnings: string[];
 }
 
 declare global {

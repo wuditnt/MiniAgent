@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import threading
+from urllib.parse import urlparse
 
 from core._paths import ROOT, data_dir
 
@@ -23,6 +24,7 @@ _PY_RE = re.compile(r"^python(?:\d+(?:\.\d+)?)?(?:\.exe)?$|^py(?:\.exe)?$", re.I
 _MAX_TEXT = 2000
 _MAX_ARGS = 64
 _MAX_ENV = 64
+_MAX_DISABLED_TOOLS = 128
 
 _lock = threading.RLock()
 
@@ -65,12 +67,32 @@ def normalize(name: str, spec: dict) -> dict:
         raise ConnectorError("连接器配置必须是对象")
 
     transport = str(spec.get("transport") or "stdio").strip().lower()
-    if transport != "stdio":
-        raise ConnectorError("当前版本只支持 stdio 连接器")
+    if transport not in ("stdio", "http"):
+        raise ConnectorError("传输方式只能是 stdio 或 http")
 
-    command = _text(spec.get("command"), "启动命令", 512)
-    if not command:
-        raise ConnectorError("启动命令不能为空")
+    if transport == "stdio":
+        command = _text(spec.get("command"), "启动命令", 512)
+        if not command:
+            raise ConnectorError("启动命令不能为空")
+        url = ""
+        headers: dict[str, str] = {}
+    else:
+        command = ""
+        url = _text(spec.get("url"), "服务地址", 2048)
+        if not url:
+            raise ConnectorError("HTTP 连接器必须填写服务地址")
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ConnectorError("服务地址必须是 http(s):// 开头的完整 URL")
+        raw_headers = spec.get("headers") or {}
+        if not isinstance(raw_headers, dict) or len(raw_headers) > _MAX_ENV:
+            raise ConnectorError(f"请求头必须是键值对象（最多 {_MAX_ENV} 项）")
+        headers = {}
+        for k, v in raw_headers.items():
+            key = _text(k, "请求头名", 128)
+            if not key:
+                continue
+            headers[key] = _text(v, f"请求头 {key}", 4000)
 
     raw_args = spec.get("args") or []
     if isinstance(raw_args, str):
@@ -100,17 +122,33 @@ def normalize(name: str, spec: dict) -> dict:
     if not 1 <= timeout <= 600:
         raise ConnectorError("超时范围是 1-600 秒")
 
+    # 工具级开关：存服务端原始工具名（不是派生的 server__tool），
+    # 这样改连接器标识 / 截断命名都不会让禁用列表失效。
+    raw_disabled = spec.get("disabled_tools") or []
+    if isinstance(raw_disabled, str):
+        raw_disabled = [line.strip() for line in raw_disabled.splitlines() if line.strip()]
+    if not isinstance(raw_disabled, list) or len(raw_disabled) > _MAX_DISABLED_TOOLS:
+        raise ConnectorError(f"禁用工具必须是字符串列表（最多 {_MAX_DISABLED_TOOLS} 项）")
+    disabled: list[str] = []
+    for item in raw_disabled:
+        tool_name = _text(item, "工具名", 128)
+        if tool_name and tool_name not in disabled:
+            disabled.append(tool_name)
+
     return {
         "display_name": _text(spec.get("display_name"), "显示名称", 80) or name,
         "description": _text(spec.get("description"), "说明"),
-        "transport": "stdio",
+        "transport": transport,
         "command": command,
         "args": args,
+        "url": url,
+        "headers": headers,
         "cwd": _text(spec.get("cwd"), "工作目录", 1024),
         "env": env,
         "timeout": timeout,
         "enabled": bool(spec.get("enabled", True)),
         "dangerous": bool(spec.get("dangerous", True)),
+        "disabled_tools": disabled,
     }
 
 
@@ -264,6 +302,60 @@ def resolve_selection(selected: list[str] | None) -> list[str]:
     else:
         pool = selected
     return [n for n in pool if n in enabled]
+
+
+# ---------------------------------------------------------------- 掩码与导入导出
+
+#: 密钥掩码前缀。保存时值以它开头 = 「保持原值不变」。
+MASK_PREFIX = "***"
+
+
+def mask_value(value: str) -> str:
+    """把密钥类值掩码成 ***末4位；空值原样返回空串。"""
+    if not isinstance(value, str) or not value:
+        return ""
+    if len(value) <= 4:
+        return MASK_PREFIX
+    return MASK_PREFIX + value[-4:]
+
+
+def is_masked(value) -> bool:
+    return isinstance(value, str) and value.startswith(MASK_PREFIX)
+
+
+def merge_masked_env(old_env: dict, new_env: dict) -> tuple[dict, list[str]]:
+    """把提交上来的掩码 env 还原成原值。
+
+    返回 (合并后的 env, 无法还原的键)。无法还原只发生在「导入文件里的新连接器」：
+    导出时脱敏了，原来就没存过这个键，只能让用户手工补。
+    """
+    out: dict[str, str] = {}
+    lost: list[str] = []
+    for key, value in (new_env or {}).items():
+        if is_masked(value):
+            if key in old_env:
+                out[key] = old_env[key]
+            else:
+                lost.append(key)
+        else:
+            out[key] = value
+    return out, lost
+
+
+def export_payload() -> dict:
+    """导出全部连接器配置：env 值脱敏，不带会话勾选与全局默认。"""
+    data = load()
+    servers: dict[str, dict] = {}
+    for name, spec in data["servers"].items():
+        item = dict(spec)
+        item["env"] = {
+            k: mask_value(v) for k, v in (spec.get("env") or {}).items()
+        }
+        item["headers"] = {
+            k: mask_value(v) for k, v in (spec.get("headers") or {}).items()
+        }
+        servers[name] = item
+    return {"version": 1, "servers": servers}
 
 
 # ---------------------------------------------------------------- 运行环境

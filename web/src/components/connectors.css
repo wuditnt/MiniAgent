@@ -189,6 +189,82 @@
   white-space: nowrap;
 }
 
+.connector-fail {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.connector-fail-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.connector-stderr {
+  margin: 0;
+  max-height: 96px;
+  overflow: auto;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.04);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--tx-ink-060);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.connector-tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.connector-tool-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-weak);
+  border-radius: 8px;
+}
+
+.connector-tool-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.connector-tool-info code {
+  font-size: 12px;
+}
+
+.connector-tool-info span {
+  font-size: 12px;
+  color: var(--tx-ink-045);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connector-preset-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+}
+
+.connector-preset-desc {
+  font-size: 12px;
+  color: var(--tx-ink-045);
+}
+
 /* ---------------------------------------------------------------- 编辑抽屉 */
 
 .connector-editor .ant-drawer-body {
