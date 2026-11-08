@@ -69,7 +69,7 @@ Agent 核心循环  src/core/agent.py      ← 消息 → LLM(流式) → tool_c
 | 路径 | 怎么做 | 出现形式 |
 |---|---|---|
 | 工具文件 | 往 `user_tools/` 丢一个 `.py` | 进程内函数，进同一张注册表 |
-| 连接（MCP server） | 改 `mcp/mcp_servers.json` | 独立进程，工具名 `server__tool` |
+| 连接（MCP server） | 在「连接」页添加（数据目录 `connectors.json`） | 本地进程或 HTTP 服务，工具名 `server__tool` |
 | 内置工具 | 改 `builtin_tools/*.py` | 随项目发布 |
 
 外加**技能（Skill）**：模型可遵循的工作流（`SKILL.md`），启动时只注入一行清单，命中后通过 `use_skill` 拉正文进上下文。

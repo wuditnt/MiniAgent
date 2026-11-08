@@ -11,7 +11,7 @@
 | `core` | `src/core/*.py` | 核心工具：`request_approval`、`ask_user`、`remember`、`search_tools`、`delegate`、`use_skill` |
 | `builtin` | `builtin_tools/` | 28 个模块、109 个工具，文件 / 代码 / 执行 / 网络 / 视觉 / 系统 / 数据 / 文档 / 表格 / 文档转换 / OCR 等 |
 | `user` | `user_tools/` | 你自己写的工具，丢一个 `.py` 就多一个 |
-| `mcp` | `mcp/mcp_servers.json` | 外部 MCP server 桥接的工具，名形如 `server__tool` |
+| `mcp` | 数据目录 `connectors.json`（界面「连接」页） | 外部 MCP server 桥接的工具，名形如 `server__tool`；支持 stdio 与 HTTP 传输、工具级开关 |
 
 **工具档位**（通用配置 `tool_tier`）：
 

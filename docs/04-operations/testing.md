@@ -84,6 +84,8 @@ scripts\run_tests.bat --reinstall
 | `test_memory.py` | 存储 / 保护区 / 工具不可见 / prelude / shell / 注入 / 分级淘汰 / 提炼 / 检索合并 |
 | `test_logging.py` | 按日目录 / 错误聚合 / 幂等重配 / 关闭 / 配置 / 清理 |
 | `test_workbench.py` | 目录 / 安全 / 编码 / 图片 / HTML / MHTML / PDF / 下载 / 表格 |
+| `test_connectors.py` | 连接器：配置校验 / CRUD / 首次迁移 / 热加载与试连 / 工具开关 / 掩码与导入导出 / 模板 / HTTP 接口 |
+| `test_mcp_http.py` | MCP HTTP 传输：JSON / SSE / 超时与取消 / 工具变更自动重载 |
 | `test_skill_admin.py` | 列表 / 详情 / 启停 / 编辑（内置 403、重名拦截）/ 软删除 |
 | `test_events.py` | 只追加 / 请求可重建 / 裁剪留痕 / 开关 / 兜底 |
 | `test_model_config.py` | 厂家 spec / 三种参数风格 / 迁移 / 会话解析 |
@@ -103,7 +105,7 @@ scripts\run_tests.bat --reinstall
 
 ### 1. 解释器不一致 → MCP 握手超时
 
-`mcp/mcp_servers.json` 写 `"command": "python"`。客户端会把裸解释器名（`python` / `python3` / `python3.x` / `py`）改写成 `MINI_AGENT_PYTHON` 指定的解释器，并摘掉 `py -3` 的版本参数；子进程 PATH 也前置了解释器目录。解法：在 `.env` 里写绝对路径的 `MINI_AGENT_PYTHON`，不要依赖「终端里 activate 过」。仍报超时时，对比两边 `python -c "import mcp"` 是否都能成功。
+连接器的启动命令写 `"command": "python"`（界面「连接」页，或数据目录 `connectors.json`）。客户端会把裸解释器名（`python` / `python3` / `python3.x` / `py`）改写成 `MINI_AGENT_PYTHON` 指定的解释器，并摘掉 `py -3` 的版本参数；子进程 PATH 也前置了解释器目录。解法：在 `.env` 里写绝对路径的 `MINI_AGENT_PYTHON`，不要依赖「终端里 activate 过」。仍报超时时，对比两边 `python -c "import mcp"` 是否都能成功。
 
 ### 2. `py -m venv` 与 `python -m venv` 可能不同
 

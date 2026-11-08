@@ -68,10 +68,12 @@ cd web; npm install; npm run build
 | 现象 | 原因与处理 |
 |---|---|
 | 握手超时，而不是 ImportError | 解释器不一致：MCP server 子进程落在没装依赖的 Python 里；在 `.env` 写绝对路径的 `MINI_AGENT_PYTHON`，别依赖「终端里 activate 过」 |
-| server 没挂上 | 检查 `mcp_servers.json` 的 `enabled`、命令是否存在、启动日志 |
-| demo 工具不可见 | `mcp_demo_server.py` 默认关闭，把 `enabled` 改成 `true` |
+| server 没挂上 | 连接器卡片会显示失败原因、启动耗时、尝试次数与 stderr 尾巴；按提示修好后点「重试」，仍失败再看启动日志 |
+| demo 工具不可见 | `mcp_demo_server.py` 默认关闭，在「连接」页启用即可 |
+| 工具看不到 | 检查该连接器编辑抽屉里的工具开关：`disabled_tools` 里的工具不会注册 |
+| HTTP 连接器连不上 | 确认地址是完整的 `http(s)://`；鉴权放在「请求头」里；服务端不支持 GET 通知流不影响工具调用 |
 | 取消后服务端还在跑 | 协议只负责送达；服务端要实现「收到通知就停手」 |
-| 改配置不生效 | MCP 不热重载，需重启后端 |
+| 改配置不生效 | 界面保存即时生效；手工改 `connectors.json` 后需重启后端或再触发一次保存 |
 
 ## 数据与日志
 
