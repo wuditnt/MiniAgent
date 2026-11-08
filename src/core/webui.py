@@ -43,6 +43,7 @@ from core import connector_store
 from core import events
 from core import logging_setup
 from core import model_config
+from core import scope as scope_var
 from core import settings
 from core import workspace_config
 from core.images import ATTACH_NOTE
@@ -287,6 +288,8 @@ class _Session:
         self.model_id: str | None = None     # 本会话的模型配置 id（None = 跟全局默认）
         self.reasoning: str | None = None    # 本会话的推理等级（None = 跟全局默认）
         self.web = False                     # 本会话的联网搜索开关（每个对话独立）
+        # 本会话勾选的连接器（None = 跟进全局默认；[] = 显式一个都不勾）
+        self.connectors: list[str] | None = None
         now = time.time()
         self.created_at = now
         self.updated_at = now
@@ -364,6 +367,7 @@ class _Session:
         self.model_id = data.get("model_id") or None
         self.reasoning = model_config.normalize_reasoning(data.get("reasoning"))
         self.web = bool(data.get("web", False))
+        self.connectors = _normalize_connector_names(data.get("connectors"))
         # 会话模式：每轮落盘后从这里还原，保证「打开旧会话 = 上次用的模式」
         if data.get("mode") in ("chat", "agent"):
             self.mode = data["mode"]
@@ -453,6 +457,7 @@ class _Session:
             "model_id": self.model_id,        # 本会话的模型配置（None = 跟全局默认）
             "reasoning": self.reasoning,     # 本会话的推理等级（None = 跟全局默认）
             "web": self.web,                 # 本会话的联网搜索开关
+            "connectors": self.connectors,   # 本会话勾选的连接器（None = 跟全局默认）
             "mode": self.mode,               # 本会话的模式：chat=快速对话 / agent=智能体
             "messages": messages,
             "runs": self.runs[-50:],        # 最近 50 轮的执行时间线（有上限，避免文件无限增长）
@@ -1491,6 +1496,8 @@ def _list_session_files() -> list[dict]:
             "model_id": data.get("model_id") or "",
             "reasoning": model_config.normalize_reasoning(data.get("reasoning")) or "",
             "web": bool(data.get("web", False)),
+            # None = 跟全局默认；列表 = 本会话显式勾选
+            "connectors": _normalize_connector_names(data.get("connectors")),
             # 侧栏据此显示「对话 / 任务」标签，并让前端切回该会话时还原模式；
             # 老会话文件没有该字段时按智能体（历史默认）处理
             "mode": data.get("mode") if data.get("mode") in ("chat", "agent") else "agent",
@@ -1527,6 +1534,18 @@ def _user_text(content: object) -> str:
             if isinstance(p, dict) and p.get("type") == "text"
         )
     return ""
+
+
+def _normalize_connector_names(raw: object) -> list[str] | None:
+    """会话级连接器勾选：None = 跟全局默认；列表 = 显式选择（去重、去空）。"""
+    if not isinstance(raw, list):
+        return None
+    out: list[str] = []
+    for name in raw:
+        name = str(name).strip()
+        if name and name not in out:
+            out.append(name)
+    return out
 
 
 def _is_injected(m: dict) -> bool:
@@ -2401,6 +2420,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_session_delete_messages(m.group(1))
         elif (m := re.match(r"^/api/sessions/([^/]+)/model$", route)):
             self._handle_session_model(m.group(1))
+        elif (m := re.match(r"^/api/sessions/([^/]+)/connectors$", route)):
+            self._handle_session_connectors(m.group(1))
         elif route == "/api/workspaces/pick":
             self._handle_workspace_pick()
         elif route == "/api/workspaces":
@@ -3035,6 +3056,55 @@ class _RequestHandler(BaseHTTPRequestHandler):
         finally:
             session.run_lock.release()
 
+    def _handle_session_connectors(self, sid: str) -> None:
+        """设置本会话勾选的连接器：{connectors: string[] | null, sync_global?}。
+
+        null = 跟全局默认；列表 = 显式勾选（[] 表示一个都不用）。
+        本机超级管理员默认同步写回全局默认；远程/普通用户只改本会话。
+        不做运行中拦截：本会话下一轮才生效，不打断正在跑的任务。
+        """
+        sid = self._sid_or_fail(sid)
+        if sid is None:
+            return
+        body = self._read_body()
+        if body is None or "connectors" not in body:
+            self._fail(400, "请求体需包含 connectors")
+            return
+        raw = body.get("connectors")
+        if raw is not None and not isinstance(raw, list):
+            self._fail(400, "connectors 必须是数组或 null")
+            return
+        selected = _normalize_connector_names(raw)
+        known = set(connector_store.load()["servers"])
+        if selected is not None:
+            unknown = [n for n in selected if n not in known]
+            if unknown:
+                self._fail(400, "连接器不存在：" + ", ".join(unknown))
+                return
+        with self.web._lock:
+            sess = self.web.sessions.get(sid)
+        data = _load_session_file(sid)
+        if data is None:
+            self._fail(404, "会话不存在")
+            return
+        data["connectors"] = selected
+        _save_session_file(sid, data)
+        if sess is not None:
+            sess.connectors = selected
+        defaults = connector_store.get_defaults()
+        can_sync = (not self._is_remote()) and (
+            not self.web.login_enabled
+            or (self._user or {}).get("role") == auth.ROLE_SUPERADMIN
+        )
+        if selected is not None and bool(body.get("sync_global", True)) and can_sync:
+            defaults = connector_store.set_defaults(selected)
+        self._json({
+            "ok": True,
+            "connectors": selected,
+            "defaults": defaults,
+            "effective": connector_store.resolve_selection(selected),
+        })
+
     def _handle_session_update(self, sid: str) -> None:
         """修改会话标题：{title}。改过之后不再按首条消息自动生成标题。"""
         sid = self._sid_or_fail(sid)
@@ -3318,6 +3388,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._json({
                 "connectors": [], "runtime": runtime, "mcp_enabled": False,
                 "running": 0, "cancel_stats": {},
+                "defaults": connector_store.get_defaults(),
             })
             return
         snap = self.web.mcp.snapshot()
@@ -3341,6 +3412,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             "mcp_enabled": True,
             "running": len(self.web.running_sessions()),
             "cancel_stats": snap.get("cancel_stats", {}),
+            "defaults": connector_store.get_defaults(),
         })
 
     def _handle_connector_save(self) -> None:
@@ -4265,6 +4337,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 rlv = str(body.get("reasoning") or "")[:16]
                 if rlv in model_config.REASONING_LEVELS:
                     session.reasoning = rlv
+                # 草稿会话首条消息：把输入框「能力 → 连接器」的勾选一并落进会话
+                if "connectors" in body:
+                    session.connectors = _normalize_connector_names(body.get("connectors"))
 
             agent = session.ensure_agent()
             # 会话级模型配置与内存 Agent 脱节（磁盘恢复晚于构造 / 上次运行中换过模型）→ 重建
@@ -4419,11 +4494,21 @@ class _RequestHandler(BaseHTTPRequestHandler):
             agent.approval_mode = approval   # 三档确认逐轮生效
             agent.session_id = session.id   # 工作区切换后仍按本会话沉淀摘要
             agent.registry = _session_registry(mode, approval, web)
+            # 本会话勾选的连接器 → 本轮 MCP 工具白名单；
+            # 未勾选（None）时按「全局默认/全部已启用」解析，保持 P0 行为。
+            agent.connector_scope = {
+                f"mcp:{name}"
+                for name in connector_store.resolve_selection(session.connectors)
+            }
+            # 同步给子代理（delegate）：子代理不能绕开本会话的勾选
+            scope_var.connector_scope.set(agent.connector_scope)
             # 新的一轮：清空上一轮的工具产物图片（WebUI 跨轮复用）
             reset_arts = getattr(getattr(agent, "ui", None), "reset_artifacts", None)
             if callable(reset_arts):
                 reset_arts()
             agent.chat_mode = mode == "chat"   # 快速对话：显式关闭思考（推理等级只在智能体模式生效）
+            # 轨迹定位：把本轮的用户轮次写给 agent，run_start 事件会带上它
+            agent.user_turn = (session.run or {}).get("turn")
             answer = agent.run(
                 message,
                 attachments=_resolve_attachments(attachments or [], ws_root),

@@ -473,6 +473,9 @@ class Agent:
         self.keep_recent_turns = max(1, int(_pick(keep_recent_turns, "keep_recent_turns", 8)))
         # 不能写 `registry or REGISTRY`：ToolRegistry 有 __len__，空注册表是 falsy
         self.registry = registry if registry is not None else REGISTRY
+        # 本会话可见的 MCP 连接器（模块名集合 mcp:<name>）。
+        # None = 不限制（老路径与子流程默认全开）；空集合 = 只用内置工具。
+        self.connector_scope: set[str] | None = None
         self.ui = ui if ui is not None else PlainUI(enabled=verbose)
         self.approve = approve
         # 显式三档优先；否则由旧开关推断：approve=True → ask（逐次询问），
@@ -529,6 +532,8 @@ class Agent:
         self.event_writer: events.EventWriter | None = None
         self._system_sha: str | None = None   # 已 emit 的 system prompt 哈希（变了才重发）
         self._turn = 0                        # 当前轮次：给 _prepare 等非轮参场景用
+        # 本次 run 对应的用户轮次（webui 在 run() 前写入；仅供轨迹定位，不参与推理）
+        self.user_turn: int | None = None
 
     # ------------------------------------------------------------ 事件流薄封装
 
@@ -843,6 +848,7 @@ class Agent:
         self._turn = 0
         self._emit(
             events.RUN_START, source=events.SRC_LOOP, phase=events.PH_RUN_START,
+            user_turn=self.user_turn,
             model=self.model, approval=self.approval_mode,
             message_chars=len(user_input or ""),
             attachment_count=len(attachments or []),
@@ -1543,7 +1549,7 @@ class Agent:
             # 本会话表，只有重算才能让它们在本轮请求里被正常声明。
             # schemas() 按名字排序（registry.schemas），同样的工具表每次都产出
             # 逐字节相同的 JSON —— 这是前缀缓存能命中的前提，别改成集合遍历。
-            schemas = self.registry.schemas()
+            schemas = self.registry.schemas(include_modules=self.connector_scope)
             payload = {
                 "model": self.model,
                 "messages": msgs,
@@ -2172,6 +2178,18 @@ class Agent:
             available = ", ".join(self.registry.names()[:20])
             return tc, None, args, f"[error] 未知工具：{name}。当前可用工具：{available}"
 
+        if not self._connector_allowed(tool):
+            self._emit(
+                events.TOOL_CALL, source=events.SRC_TOOL, phase=events.PH_TURN,
+                turn=self._turn or None, id=tc.get("id"), name=name, args=args,
+                args_chars=len(raw_args), dangerous=bool(tool.dangerous),
+                exclusive=False, confirm="skip",
+            )
+            return tc, None, args, (
+                f"[error] 工具所属连接器未在本会话启用：{name}。"
+                "请让用户在输入框的「能力 → 连接器」中勾选后再试。"
+            )
+
         needs = self._needs_confirm(tool)
         # 硬特例：MCP 危险工具在 auto / full 档仍强制弹窗（底线②，语义一行不动）
         confirm = "skip"
@@ -2218,12 +2236,20 @@ class Agent:
             return tool.source == "mcp"
         return bool(self.approve)  # 未知档位：退回旧开关语义
 
+    def _connector_allowed(self, tool: Tool) -> bool:
+        """该工具是否落在本会话勾选的连接器范围内（非 MCP 工具永远放行）。"""
+        if self.connector_scope is None or not tool.module.startswith("mcp:"):
+            return True
+        return tool.module in self.connector_scope
+
     def _call_tool(self, tool: Tool, args: dict) -> tuple[str, float]:
         """真正执行（可能跑在工作线程里）。注册表内部已兜住所有异常。
 
         执行前先查取消令牌：排队还没轮到的调用在这里快速失败，
         不必等前面的工具跑完才发现整批都白跑。
         """
+        if not self._connector_allowed(tool):
+            return "[error] 工具所属连接器未在本会话启用，未执行", 0.0
         token = self.cancel_token
         if token is not None:
             token.check()

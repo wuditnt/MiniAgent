@@ -24,6 +24,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 
 from . import cancel
+from . import scope as tool_scope
 from .agent import Agent
 from .registry import REGISTRY, Tool, ToolRegistry
 
@@ -149,6 +150,8 @@ def run_subagent(
         client=client,
         verbose=False,
     )
+    # 继承父会话的连接器勾选：子代理不能看到父会话没启用的 MCP 工具
+    agent.connector_scope = tool_scope.connector_scope.get()
     # session_id 留空：不落会话、不触发记忆提炼、不写事件流 —— 过程对主对话不可见。
 
     timed_out = threading.Event()

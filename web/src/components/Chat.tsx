@@ -51,7 +51,7 @@ import ToolChain from "./ToolChain";
 import RunHeader from "./RunHeader";
 import WelcomePane from "./WelcomePane";
 import SkillInput from "./composer/SkillInput";
-import SkillPicker from "./composer/SkillPicker";
+import AbilityPicker from "./composer/AbilityPicker";
 import {
   insertSkillToken,
   parseComposer,
@@ -148,8 +148,8 @@ function MessageToolbar({
   onEdit?: () => void;
   onRegenerate?: (msgId: string) => void;
   onDelete?: (msgId: string) => void;
-  /** 打开本会话的运行轨迹抽屉（P0 事实层） */
-  onTrajectory?: () => void;
+  /** 打开本会话的运行轨迹抽屉（P0 事实层）；传入该消息所属轮次用于自动定位 */
+  onTrajectory?: (turn?: number) => void;
   /** 是否常驻显示（最后一对问答），否则鼠标悬停该条消息才出现 */
   pinned?: boolean;
   /** 追加到根节点的类名（user 气泡右对齐用 msg-toolbar-user） */
@@ -232,7 +232,7 @@ function MessageToolbar({
       )}
       {onTrajectory && (
         <Tooltip title="查看运行轨迹">
-          <span className="msg-tool" onClick={onTrajectory}>
+          <span className="msg-tool" onClick={() => onTrajectory(item.run?.turn)}>
             <HistoryOutlined />
           </span>
         </Tooltip>
@@ -399,7 +399,7 @@ function AssistantBodyInner({
   item: ChatItem;
   onRegenerate?: (msgId: string) => void;
   onDelete?: (msgId: string) => void;
-  onTrajectory?: () => void;
+  onTrajectory?: (turn?: number) => void;
   workspaceId: string;
   pendingAsk?: PendingAsk | null;
   onAnswerAsk?: (answer: string) => void;
@@ -532,8 +532,8 @@ interface Props {
   onCancelEdit?: () => void;
   /** 多选删除：按选中的消息 id 删除（任意组合，不再限定「此条及之后」） */
   onDeleteMessages?: (ids: string[]) => void;
-  /** 打开本会话的运行轨迹抽屉（P0 事实层） */
-  onTrajectory?: () => void;
+  /** 打开本会话的运行轨迹抽屉（P0 事实层）；轮次用于自动定位 */
+  onTrajectory?: (turn?: number) => void;
   /** 内联提问：正在等待作答的 ask_user 卡片（渲染在当前流式气泡内） */
   pendingAsk?: PendingAsk | null;
   onAnswerAsk?: (answer: string) => void;
@@ -555,6 +555,11 @@ interface Props {
   onManageModels: () => void;
   /** 技能管理页点「在对话框中试用」：nonce 变化时把技能插进输入框 */
   trialSkill?: { name: string; source: "builtin" | "custom"; nonce: number } | null;
+  /** 本会话勾选的连接器（null = 跟全局默认） */
+  connectors?: string[] | null;
+  /** 草稿会话尚未落盘：勾选只存前端，首条消息时随请求保存 */
+  connectorsDraft?: boolean;
+  onConnectorsChange?: (list: string[] | null) => void;
 }
 
 /** 推理等级的展示文案（三档：low / high / max） */
@@ -910,6 +915,9 @@ export default function Chat({
   onSetReasoning,
   onManageModels,
   trialSkill,
+  connectors,
+  connectorsDraft,
+  onConnectorsChange,
 }: Props) {
   const [input, setInput] = useState("");
   // 已展开的长用户气泡：仅当前会话内有效，切会话即清空（不持久化）
@@ -1489,6 +1497,14 @@ export default function Chat({
       if (!lastUserId && items[i].role === "user") lastUserId = items[i].id;
       if (lastUserId && lastAssistantId) break;
     }
+    // 用户轮次（按整份 items 计数，不受「加载更早」截断影响）：
+    // 点击「查看运行轨迹」时用它定位，不依赖 item.run 是否随历史带回
+    let turnCount = 0;
+    const turnOf = new Map<string, number>();
+    for (const it of items) {
+      if (it.role === "user") turnCount += 1;
+      else if (it.role === "assistant") turnOf.set(it.id, turnCount);
+    }
     return items.slice(hiddenCount).map((it) => {
     // 每条消息套一层带 id 的容器，供搜索命中后 scrollIntoView 定位
     if (it.role === "assistant") {
@@ -1514,7 +1530,11 @@ export default function Chat({
                     }
               }
               onDelete={busy ? undefined : (id: string) => enterSelect(id)}
-              onTrajectory={onTrajectory}
+              onTrajectory={
+                onTrajectory
+                  ? () => onTrajectory(turnOf.get(it.id) || undefined)
+                  : undefined
+              }
               workspaceId={workspaceId}
               pendingAsk={pendingAsk}
               onAnswerAsk={onAnswerAsk}
@@ -1850,12 +1870,16 @@ export default function Chat({
                           <DownOutlined className="tb-mode-caret" />
                         </span>
                       </Dropdown>
-                      {/* 技能选择（第三个交互按钮）：树形列表，插完即关闭；快速对话模式不提供 */}
+                      {/* 能力（第三个交互按钮）：技能 + 连接器；快速对话模式不提供 */}
                       {mode === "agent" && (
-                        <SkillPicker
+                        <AbilityPicker
                           skills={visibleSkills}
                           open={skillOpen && (visibleSkills === null || visibleSkills.length > 0)}
                           searching={skillQueryText !== ""}
+                          sessionId={sessionId}
+                          connectors={connectors ?? null}
+                          draft={connectorsDraft}
+                          onConnectorsChange={(list) => onConnectorsChange?.(list)}
                           onOpenChange={(o) => {
                             if (o) {
                               // 从工具栏按钮打开：清掉可能残留的 "/查询" 会话，按「浏览全部」展示

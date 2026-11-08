@@ -40,7 +40,9 @@ def _legacy_path() -> str:
 
 
 def _empty() -> dict:
-    return {"version": 1, "servers": {}}
+    # defaults.connectors = None 表示「未设置」：新建会话继承全部已启用连接器。
+    # 空列表则是用户显式选择「一个都不勾」。
+    return {"version": 1, "servers": {}, "defaults": {"connectors": None}}
 
 
 def _text(value, field: str, limit: int = _MAX_TEXT) -> str:
@@ -132,7 +134,22 @@ def _normalize_all(raw: dict) -> dict:
             # 旧配置里可能有不合规的条目：保留给用户看不如直接跳过，
             # 否则一个坏条目会让整个连接器页面打不开。
             continue
-    return {"version": 1, "servers": out}
+    return {"version": 1, "servers": out, "defaults": _normalize_defaults(raw, out)}
+
+
+def _normalize_defaults(raw: dict, servers: dict[str, dict]) -> dict:
+    """规范化全局默认勾选；缺失/非法一律视为「未设置」（None）。"""
+    defaults = raw.get("defaults") if isinstance(raw, dict) else None
+    names = defaults.get("connectors") if isinstance(defaults, dict) else None
+    if not isinstance(names, list):
+        return {"connectors": None}
+    out: list[str] = []
+    for name in names:
+        name = str(name).strip()
+        # 连接器已被删除时顺手清掉，避免默认勾选里留着不存在的名字
+        if name in servers and name not in out:
+            out.append(name)
+    return {"connectors": out}
 
 
 def load() -> dict:
@@ -195,6 +212,10 @@ def remove(name: str) -> bool:
         data = load()
         existed = data["servers"].pop(str(name), None) is not None
         if existed:
+            # 默认勾选里也顺手摘掉，避免别处读到已删除的名字
+            names = data["defaults"]["connectors"]
+            if isinstance(names, list) and name in names:
+                data["defaults"]["connectors"] = [n for n in names if n != name]
             _write(data)
         return existed
 
@@ -207,6 +228,42 @@ def set_enabled(name: str, enabled: bool) -> dict:
         data["servers"][name]["enabled"] = bool(enabled)
         _write(data)
         return data["servers"][name]
+
+
+def get_defaults() -> list[str] | None:
+    """全局默认勾选：None = 未设置（新建会话继承全部已启用项）。"""
+    return load()["defaults"]["connectors"]
+
+
+def set_defaults(names: list[str]) -> list[str]:
+    """写入全局默认勾选（只保留真实存在的连接器，顺序按传入顺序）。"""
+    with _lock:
+        data = load()
+        out: list[str] = []
+        for name in names:
+            name = str(name).strip()
+            if name in data["servers"] and name not in out:
+                out.append(name)
+        data["defaults"]["connectors"] = out
+        _write(data)
+        return out
+
+
+def resolve_selection(selected: list[str] | None) -> list[str]:
+    """把「会话勾选」解析成本轮实际可用的连接器名。
+
+    - selected is None：跟全局默认；默认也没设置就继承全部已启用项；
+    - 结果再与当前 enabled 求交集，禁用/已删除的连接器自动失效。
+    """
+    data = load()
+    enabled = [n for n, spec in data["servers"].items() if spec.get("enabled", True)]
+    if selected is None:
+        pool = data["defaults"]["connectors"]
+        if pool is None:
+            pool = enabled
+    else:
+        pool = selected
+    return [n for n in pool if n in enabled]
 
 
 # ---------------------------------------------------------------- 运行环境

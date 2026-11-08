@@ -9,11 +9,13 @@
  * 数据来源：打开时 fetchTrajectory 拉全量；运行中把父级透传的实时 trace 帧按 seq 并入；
  * 收到 done/error/cancelled 后父级会改变 reloadNonce，触发一次全量兜底拉取。
  */
-import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import {
   CloseOutlined,
   CodeOutlined,
+  DownOutlined,
   PlayCircleOutlined,
+  RightOutlined,
 } from "@ant-design/icons";
 import { Empty, Segmented, Tooltip } from "antd";
 import { fetchTrajectory } from "../api";
@@ -28,6 +30,10 @@ interface Props {
   liveEvents: TraceEvent[];
   /** 每次「运行结束」父级自增；变化即触发一次全量拉取做磁盘兜底 */
   reloadNonce: number;
+  /** 从某条消息打开时要定位的轮次（null/缺省 = 普通打开，全部折叠） */
+  focusTurn?: number | null;
+  /** 每次「查看运行轨迹」点击自增：同一轮重复点击也强制重新展开并滚动 */
+  focusNonce?: number;
   onClose: () => void;
 }
 
@@ -141,32 +147,54 @@ export default function Trajectory({
   session,
   liveEvents,
   reloadNonce,
+  focusTurn = null,
+  focusNonce = 0,
   onClose,
 }: Props) {
   const [fetched, setFetched] = useState<TrajectoryData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  // 已加载完成（且属于当前会话）的 session；用于防止拿旧会话/旧缓存做定位
+  const [loadedSession, setLoadedSession] = useState("");
   const [filter, setFilter] = useState<FilterKey>("all");
   const [onlyLatest, setOnlyLatest] = useState(false);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  // 按轮折叠：默认全收起（打开轨迹时重置），只记录用户显式展开的 run_id
+  const [expandedRuns, setExpandedRuns] = useState<Set<string>>(new Set());
   // 单轮回放：正在回放的 turn 键 + 已揭示行数（null = 未回放，全部可见）
   const [replay, setReplay] = useState<{ key: string; shown: number } | null>(null);
   const [width, setWidth] = useState(loadWidth);
   const [resizing, setResizing] = useState(false);
+  // run_id → DOM（从消息打开时滚动定位）
+  const runRefs = useRef(new Map<string, HTMLDivElement>());
+  // 时间线滚动容器（直接算偏移，避免 scrollIntoView 受外层布局影响）
+  const timelineRef = useRef<HTMLDivElement>(null);
+  // 已定位过的会话+轮次，避免实时事件持续刷新时重复滚动/展开
+  const focusApplied = useRef("");
 
   // 打开 / 切换会话 / 运行结束兜底 → 全量拉取
   useEffect(() => {
     if (!open || !session) return;
     let alive = true;
     setLoading(true);
-    fetchTrajectory(session, 0, 2000)
+    setLoadedSession("");
+    setFetched(null);
+    // 先探到 last_seq 再取尾部 2000 条：长会话的新轮次在文件末尾，
+    // 从头取会看不到当前对话，定位自然失败。
+    fetchTrajectory(session, 0, 1)
+      .then((head) =>
+        fetchTrajectory(session, Math.max(0, (head.last_seq || 0) - 2000), 2000)
+      )
       .then((d) => {
         if (!alive) return;
         setFetched(d);
+        setLoadedSession(session);
         setError("");
       })
       .catch((e: unknown) => {
-        if (alive) setError(e instanceof Error ? e.message : "读取轨迹失败");
+        if (!alive) return;
+        setLoadedSession(session);
+        setError(e instanceof Error ? e.message : "读取轨迹失败");
       })
       .finally(() => {
         if (alive) setLoading(false);
@@ -179,16 +207,20 @@ export default function Trajectory({
   // 切换会话/关闭抽屉时重置视图状态
   useEffect(() => {
     setExpanded(new Set());
+    setExpandedRuns(new Set());
     setReplay(null);
+    focusApplied.current = "";
   }, [session, open]);
 
   // 合并「磁盘拉取」与「实时镜像」：按 seq 去重，保持 seq 升序
   const merged = useMemo(() => {
     const bySeq = new Map<number, TraceEvent>();
-    for (const ev of fetched?.events || []) bySeq.set(ev.seq, ev);
+    // 只信任当前会话的拉取结果，切换会话后的旧缓存一律忽略
+    const disk = fetched?.session === session ? fetched.events : [];
+    for (const ev of disk) bySeq.set(ev.seq, ev);
     for (const ev of liveEvents) if (!bySeq.has(ev.seq)) bySeq.set(ev.seq, ev);
     return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
-  }, [fetched, liveEvents]);
+  }, [fetched, liveEvents, session]);
 
   // 过滤后的分组：run → turn
   const runs = useMemo<RunGroup[]>(() => {
@@ -206,6 +238,61 @@ export default function Trajectory({
     }
     return out;
   }, [merged, filter, onlyLatest]);
+
+  // 按时间顺序出现的 run_id（一次对话轮次 = 一个 run，顺序与「第 N 轮」一致）
+  const orderedRunIds = useMemo(() => {
+    const ids: string[] = [];
+    for (const ev of merged) {
+      if (ids[ids.length - 1] !== ev.run_id) ids.push(ev.run_id);
+    }
+    return ids;
+  }, [merged]);
+
+  // run_id → 用户轮次（run_start.payload.user_turn，新会话才有；老会话回退到顺序映射）
+  const runUserTurns = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const ev of merged) {
+      if (ev.type !== "run_start") continue;
+      const t = Number((ev.payload as Record<string, unknown>)?.user_turn);
+      if (Number.isInteger(t) && t > 0) m.set(t, ev.run_id);
+    }
+    return m;
+  }, [merged]);
+
+  // 从某条消息打开：定位到该轮所属的 run，只展开它并滚到可视区（其它轮保持折叠）
+  useEffect(() => {
+    if (!open || focusTurn == null || !orderedRunIds.length) return;
+    // 数据必须已按当前会话加载完，避免用旧缓存定位到错误的轮次
+    if (loadedSession !== session) return;
+    // focusNonce 每次点击都变：手动收起后再次点同一条消息，也要重新展开并滚动
+    const key = `${session}:${focusTurn}:${focusNonce}`;
+    if (focusApplied.current === key) return;
+    // 优先用 run_start 里记录的用户轮次精确匹配；
+    // trace 事件里的 turn 是「ReAct 迭代轮」，不能拿来当用户轮次用
+    const target =
+      runUserTurns.get(focusTurn) ||
+      orderedRunIds[focusTurn - 1] ||
+      orderedRunIds[orderedRunIds.length - 1];
+    if (!target) return;
+    focusApplied.current = key;
+    // 定位是显式导航：关掉过滤，确保目标轮不会被「只看本轮 / 分类筛选」藏掉
+    setOnlyLatest(false);
+    setFilter("all");
+    setExpandedRuns(new Set([target]));
+    const scroll = () => {
+      const box = timelineRef.current;
+      const el = runRefs.current.get(target);
+      if (!box || !el) return;
+      const top = el.getBoundingClientRect().top - box.getBoundingClientRect().top;
+      box.scrollTop = Math.max(0, box.scrollTop + top - 8);
+    };
+    // 展开后的列表需要一次渲染才撑开高度：双 rAF + 兜底定时各滚一次
+    requestAnimationFrame(() => {
+      requestAnimationFrame(scroll);
+    });
+    const timer = setTimeout(scroll, 120);
+    return () => clearTimeout(timer);
+  }, [open, focusTurn, focusNonce, orderedRunIds, runUserTurns, loadedSession, session]);
 
   // 每个 turn 的行数（回放用）
   const turnTotals = useMemo(() => {
@@ -237,6 +324,20 @@ export default function Trajectory({
       else next.add(seq);
       return next;
     });
+
+  /** 全部轮次是否都已展开（决定按钮显示「收起全部」还是「展开全部」） */
+  const allExpanded = runs.length > 0 && runs.every((r) => expandedRuns.has(r.runId));
+
+  const toggleRun = (runId: string) =>
+    setExpandedRuns((prev) => {
+      const next = new Set(prev);
+      if (next.has(runId)) next.delete(runId);
+      else next.add(runId);
+      return next;
+    });
+
+  const toggleAllRuns = () =>
+    setExpandedRuns(allExpanded ? new Set() : new Set(runs.map((r) => r.runId)));
 
   const startReplay = (k: string) => {
     setExpanded(new Set());
@@ -311,11 +412,19 @@ export default function Trajectory({
               onChange={(v) => setFilter(v as FilterKey)}
               options={FILTERS.map((f) => ({ label: f.label, value: f.key }))}
             />
-            <span
-              className={`tj-only ${onlyLatest ? "on" : ""}`}
-              onClick={() => setOnlyLatest((v) => !v)}
-            >
-              只看本轮
+            <span className="tj-toolbar-right">
+              <span
+                className={`tj-only ${onlyLatest ? "on" : ""}`}
+                onClick={() => setOnlyLatest((v) => !v)}
+              >
+                只看本轮
+              </span>
+              <span
+                className={`tj-all ${allExpanded ? "on" : ""}`}
+                onClick={toggleAllRuns}
+              >
+                {allExpanded ? "收起全部" : "展开全部"}
+              </span>
             </span>
           </div>
 
@@ -335,7 +444,7 @@ export default function Trajectory({
               )}
             </div>
           ) : (
-            <div className="tj-timeline">
+            <div className="tj-timeline" ref={timelineRef}>
               {runs.map((run) => {
                 const first = run.events[0];
                 const last = run.events[run.events.length - 1];
@@ -348,14 +457,39 @@ export default function Trajectory({
                   else turns.push({ turn: ev.turn, events: [ev] });
                 }
                 return (
-                  <div className="tj-run" key={run.runId}>
-                    <div className="tj-run-head">
+                  <div
+                    className="tj-run"
+                    key={run.runId}
+                    ref={(el) => {
+                      if (el) runRefs.current.set(run.runId, el);
+                      else runRefs.current.delete(run.runId);
+                    }}
+                  >
+                    <div
+                      className="tj-run-head"
+                      role="button"
+                      tabIndex={0}
+                      aria-expanded={expandedRuns.has(run.runId)}
+                      onClick={() => toggleRun(run.runId)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          toggleRun(run.runId);
+                        }
+                      }}
+                    >
+                      <span
+                        className={`tj-run-caret ${expandedRuns.has(run.runId) ? "open" : ""}`}
+                      >
+                        {expandedRuns.has(run.runId) ? <DownOutlined /> : <RightOutlined />}
+                      </span>
                       <span className="tj-run-id">{run.runId}</span>
                       <span className="tj-run-meta">
                         {fmtTime(first.ts)} · {dur.toFixed(1)}s · {run.events.length} 条
                       </span>
                     </div>
-                    {turns.map((g) => {
+                    {expandedRuns.has(run.runId) &&
+                      turns.map((g) => {
                       const k = turnKey(run.runId, g.turn);
                       const playing = replay?.key === k;
                       const rows = playing ? g.events.slice(0, replay!.shown) : g.events;

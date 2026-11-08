@@ -168,9 +168,26 @@ class ToolRegistry:
 
     # ---------------------------------------------------------- 对模型接口
 
-    def schemas(self, exclude: set[str] | None = None) -> list[dict]:
+    def schemas(
+        self,
+        exclude: set[str] | None = None,
+        include_modules: set[str] | None = None,
+    ) -> list[dict]:
+        """模型可见的工具表。
+
+        include_modules 只约束 MCP 工具：None = 全部可见；给了集合则只保留
+        模块名在集合里的 MCP 工具，非 MCP 工具始终可见（连接器开关不影响内置工具）。
+        """
         exclude = exclude or set()
-        return [t.schema() for n, t in sorted(self._tools.items()) if n not in exclude]
+        return [
+            t.schema() for n, t in sorted(self._tools.items())
+            if n not in exclude
+            and (
+                include_modules is None
+                or not t.module.startswith("mcp:")
+                or t.module in include_modules
+            )
+        ]
 
     def call(self, name: str, arguments: dict[str, Any] | None) -> str:
         """执行工具。任何异常都转成文本还给模型，绝不让主循环崩掉。

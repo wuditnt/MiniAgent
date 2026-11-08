@@ -247,6 +247,8 @@ export default function App({
     modelId: string;
     reasoning: ReasoningLevel;
   } | null>(null);
+  // 草稿会话勾选的连接器（null = 跟全局默认；首条消息时随请求落盘）
+  const [draftConnectors, setDraftConnectors] = useState<string[] | null>(null);
   // 厂家 → 支持的推理档位（来自内置模板声明）
   const [tplLevels, setTplLevels] = useState<Record<string, ReasoningLevel[]>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -266,6 +268,10 @@ export default function App({
   // 运行轨迹抽屉（P0 事实层）：与工作台抽屉互斥，同一位置只开一个
   const [trajectoryOpen, setTrajectoryOpen] = useState(false);
   const [tjSession, setTjSession] = useState("");
+  // 从某条消息打开轨迹时要定位的轮次（null = 普通打开，全部保持折叠）
+  const [tjFocusTurn, setTjFocusTurn] = useState<number | null>(null);
+  // 每次点击「查看运行轨迹」都自增：同一轮重复点击也能强制重新展开并滚动
+  const [tjFocusNonce, setTjFocusNonce] = useState(0);
   // 当前 run 的实时镜像事件（trace 帧），打开抽屉时并入时间线
   const [traces, setTraces] = useState<TraceEvent[]>([]);
   // 每次运行结束自增，通知 Trajectory 做一次磁盘全量兜底拉取
@@ -803,6 +809,8 @@ export default function App({
         // 会话级模型配置：新会话（草稿）在首条消息时随请求落盘
         model_id: effModelId,
         reasoning: effReasoning,
+        // 会话级连接器勾选：草稿先暂存，随首条消息一起落盘
+        connectors: isDraft ? draftConnectors : (currentSession?.connectors ?? null),
       },
       (ev: SSEEvent) => {
         switch (ev.type) {
@@ -1042,6 +1050,8 @@ export default function App({
     setDraftWs(ws);
     // 新对话的联网搜索默认关闭（每个对话各自独立配置）
     setWeb(false);
+    // 连接器勾选回到「跟全局默认」
+    setDraftConnectors(null);
     setSession(id);
   };
 
@@ -1093,10 +1103,12 @@ export default function App({
   };
 
   /** 打开某会话的运行轨迹抽屉（与工作台互斥，同一位置只开一个） */
-  const openTrajectory = (sid: string) => {
+  const openTrajectory = (sid: string, turn?: number) => {
     setWorkbenchOpen(false);
     setWbFullscreen(false);
     setTjSession(sid);
+    setTjFocusTurn(turn ?? null);
+    setTjFocusNonce((n) => n + 1);
     setTrajectoryOpen(true);
   };
 
@@ -1292,6 +1304,17 @@ export default function App({
         setWeb(!w);
         message.error(e instanceof Error ? e.message : "保存联网配置失败");
       });
+  };
+
+  /** 当前会话的连接器勾选：草稿只暂存前端，已有会话直接改本地列表（保存由菜单内完成） */
+  const handleConnectorsChange = (list: string[] | null) => {
+    if (isDraft) {
+      setDraftConnectors(list);
+      return;
+    }
+    setSessions((prev) =>
+      prev.map((s) => (s.id === session ? { ...s, connectors: list } : s))
+    );
   };
 
   /** 打开「模型」设置页 */
@@ -1644,7 +1667,7 @@ export default function App({
           onEditSend={sendEdit}
           onCancelEdit={() => setEditingId(null)}
           onDeleteMessages={busy ? undefined : handleDeleteMessages}
-          onTrajectory={() => openTrajectory(session)}
+          onTrajectory={(turn?: number) => openTrajectory(session, turn)}
           contextUsage={contextUsage}
           contextLimit={contextLimit}
           pendingAsk={ask}
@@ -1661,6 +1684,9 @@ export default function App({
           onSetReasoning={handleSetReasoning}
           onManageModels={handleManageModels}
           trialSkill={trialSkill}
+          connectors={isDraft ? draftConnectors : (currentSession?.connectors ?? null)}
+          connectorsDraft={isDraft}
+          onConnectorsChange={handleConnectorsChange}
         />
 
         <WorkspaceModal
@@ -1811,6 +1837,8 @@ export default function App({
         session={tjSession || session}
         liveEvents={tjSession === session ? traces : []}
         reloadNonce={tjReload}
+        focusTurn={tjFocusTurn}
+        focusNonce={tjFocusNonce}
         onClose={() => setTrajectoryOpen(false)}
       />
     </div>

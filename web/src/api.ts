@@ -212,6 +212,26 @@ export async function deleteSession(sid: string): Promise<void> {
   if (!res.ok) throw new Error(await readError(res));
 }
 
+/** 设置本会话勾选的连接器；null = 跟全局默认。返回同步后的全局默认值。 */
+export async function setSessionConnectors(
+  sid: string,
+  connectors: string[] | null,
+  syncGlobal = true
+): Promise<{
+  ok: boolean;
+  connectors: string[] | null;
+  defaults: string[] | null;
+  effective: string[];
+}> {
+  const res = await req(`/api/sessions/${encodeURIComponent(sid)}/connectors`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ connectors, sync_global: syncGlobal }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 /** 截断会话：保留前 keep 条 user/assistant 消息（不含 system），删除其后的全部内容 */
 export async function truncateSession(sid: string, keep: number): Promise<{ ok: boolean; keep: number }> {
   const res = await req(`/api/sessions/${encodeURIComponent(sid)}/truncate`, {
@@ -721,6 +741,8 @@ export async function chatStream(
     /** 会话级模型配置：新会话（磁盘上还没有文件）首条消息时随请求落盘 */
     model_id?: string;
     reasoning?: string;
+    /** 会话级连接器勾选：新会话首条消息时一并落盘（null = 跟全局默认） */
+    connectors?: string[] | null;
   },
   onEvent: (ev: SSEEvent) => void,
   signal?: AbortSignal

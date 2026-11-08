@@ -236,6 +236,8 @@ export interface SessionItem {
   reasoning?: ReasoningLevel;
   /** 本会话的联网搜索开关（每个对话独立） */
   web?: boolean;
+  /** 本会话勾选的连接器名；null/缺省 = 跟全局默认 */
+  connectors?: string[] | null;
   /** 本会话的模式：chat=快速对话 / agent=智能体（随每轮消息落盘） */
   mode?: Mode;
   /** 是否正在执行（来自后端内存状态，侧栏据此显示运行指示器） */
@@ -579,6 +581,8 @@ export interface ConnectorsData {
   mcp_enabled: boolean;
   running: number;
   cancel_stats?: Record<string, unknown>;
+  /** 全局默认勾选；null = 未设置（新建会话继承全部已启用项） */
+  defaults?: string[] | null;
 }
 
 /** 新增/编辑连接器提交的字段 */
