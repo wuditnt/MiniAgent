@@ -61,10 +61,14 @@ import Workbench from "./components/Workbench";
 import { useTheme, type ThemeMode } from "./theme";
 import Trajectory from "./components/Trajectory";
 import SkillManager from "./components/SkillManager";
+import ConnectorsPage from "./components/ConnectorsPage";
 
 const SESSION_KEY = "miniagent.session";
 const MODE_KEY = "miniagent.mode";
 const WS_KEY = "miniagent.workspace";
+
+/** 主区视图：左栏导航与之一一对应；新增页面只需在这里加一项 */
+type MainView = "chat" | "skills" | "connectors";
 const APPROVAL_KEY = "miniagent.approval";
 const SIDEBAR_W_KEY = "miniagent.sidebar-width";
 const SIDEBAR_W_MIN = 220;
@@ -251,8 +255,8 @@ export default function App({
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [wbFullscreen, setWbFullscreen] = useState(false);
-  // 技能管理页：占满主区（对话保持挂载，输入内容不丢）
-  const [skillsPage, setSkillsPage] = useState(false);
+  // 主区视图：chat = 对话（含右侧工作台），其余为占满整块主区的功能页
+  const [view, setView] = useState<MainView>("chat");
   // 从技能管理页点「在对话框中试用」的一次性请求（nonce 保证只消费一次）
   const [trialSkill, setTrialSkill] = useState<{
     name: string;
@@ -1043,6 +1047,7 @@ export default function App({
 
   /** 新建会话：按指定模式（对话 / 任务）；已有草稿则只切换模式，不重复占位 */
   const handleNewSession = (nextMode: Mode = mode) => {
+    setView("chat");
     setMode(nextMode);
     if (draftWs !== null) return;
     startDraft();
@@ -1071,6 +1076,7 @@ export default function App({
 
   /** 切换对话；hitIndex 来自搜索结果，用于点进去后定位闪烁 */
   const handleSelectSession = (sid: string, hitIndex?: number) => {
+    setView("chat"); // 会话属于导航：在任何功能页点会话都回到对话
     const hasHit = typeof hitIndex === "number" && hitIndex >= 0;
     if (sid === session) {
       // 已停在该会话：历史就在屏上，直接定位即可
@@ -1096,6 +1102,7 @@ export default function App({
 
   /** 侧栏会话项「回放」：先切到该会话，再打开它的轨迹 */
   const handleReplaySession = (sid: string) => {
+    setView("chat");
     if (sid !== session) handleSelectSession(sid);
     openTrajectory(sid);
   };
@@ -1353,10 +1360,100 @@ export default function App({
     localStorage.setItem(SIDEBAR_W_KEY, String(SIDEBAR_W_DEFAULT));
   };
 
+  /** 底部人员菜单：头像 + 名字，账号功能统一收在这里（--no-login 时没有身份，不渲染） */
+  const accountMenu = loginEnabled ? (
+    <Tooltip
+      title={`${user.display_name || user.username} · ${
+        user.role === "superadmin" ? "超级管理员" : "普通用户"
+      }`}
+      placement="top"
+    >
+      <Dropdown
+        trigger={["click"]}
+        placement="topLeft"
+        menu={{
+          items: [
+            {
+              key: "me",
+              disabled: true,
+              label: (
+                <span className="user-menu-me">
+                  <span className="user-menu-name">
+                    {user.display_name || user.username}
+                  </span>
+                  <span className="user-menu-role">
+                    {user.role === "superadmin" ? "超级管理员" : "普通用户"}
+                  </span>
+                </span>
+              ),
+            },
+            { type: "divider" as const },
+            ...(user.role === "superadmin"
+              ? [
+                  {
+                    key: "accounts",
+                    icon: <TeamOutlined />,
+                    label: "账号管理",
+                  },
+                ]
+              : []),
+            {
+              key: "password",
+              icon: <LockOutlined />,
+              label: "修改密码",
+            },
+            {
+              key: "theme",
+              icon: <BgColorsOutlined />,
+              label: "主题",
+              children: [
+                { key: "theme-system", label: "跟随系统" },
+                { key: "theme-light", label: "浅色" },
+                { key: "theme-dark", label: "深色" },
+              ].map((it) => ({
+                ...it,
+                icon:
+                  themeMode === it.key.replace("theme-", "") ? (
+                    <CheckOutlined />
+                  ) : (
+                    <span style={{ display: "inline-block", width: 14 }} />
+                  ),
+              })),
+            },
+            { type: "divider" as const },
+            {
+              key: "logout",
+              icon: <LogoutOutlined />,
+              label: "退出登录",
+            },
+          ],
+          onClick: ({ key }) => {
+            if (key === "accounts") setAccountsOpen(true);
+            else if (key === "password") setPwdOpen(true);
+            else if (key === "logout") onLogout();
+            else if (key.startsWith("theme-")) {
+              setThemeMode(key.slice("theme-".length) as ThemeMode);
+            }
+          },
+        }}
+      >
+        <span className="sidebar-user">
+          {/* 默认头像：渐变圆底 + 白色人形；后续支持自定义时在这里换成 <img> 即可 */}
+          <span className="user-avatar">
+            <UserOutlined />
+          </span>
+          <span className="sidebar-user-name">{user.display_name || user.username}</span>
+        </span>
+      </Dropdown>
+    </Tooltip>
+  ) : null;
+
   return (
     <div
       ref={appRef}
-      className={`app ${wbFullscreen ? "wb-fullscreen" : ""}`}
+      className={`app ${wbFullscreen && view === "chat" ? "wb-fullscreen" : ""} ${
+        view !== "chat" ? "page-view" : ""
+      }`}
       style={{
         "--sidebar-w": collapsed ? "0px" : `${isMobile ? SIDEBAR_W_DEFAULT : sidebarW}px`,
       } as CSSProperties}
@@ -1403,14 +1500,19 @@ export default function App({
             setSettingsOpen(true);
           }}
           onOpenSkills={() => {
-            setSkillsPage(true);
-            setWorkbenchOpen(false);
+            setView("skills");
             setTrajectoryOpen(false);
           }}
+          onOpenConnectors={() => {
+            setView("connectors");
+            setTrajectoryOpen(false);
+          }}
+          activeView={view}
+          accountMenu={accountMenu}
         />
       </aside>
 
-      <div className={`main ${skillsPage ? "skill-view" : ""}`}>
+      <div className="main">
         <header className="app-header">
           <div className="header-left">
             {collapsed && (
@@ -1495,84 +1597,6 @@ export default function App({
               </Dropdown>
             </Tooltip>
             {/* 联网搜索开关已移到输入框上方，右对齐输入框 */}
-            {/* 账号菜单：账号相关功能统一收在这个用户图标下（--no-login 时没有身份，不显示） */}
-            {loginEnabled && (
-              <Tooltip title={user.display_name || user.username}>
-                <Dropdown
-                  trigger={["click"]}
-                  placement="bottomRight"
-                  menu={{
-                    items: [
-                      {
-                        key: "me",
-                        disabled: true,
-                        label: (
-                          <span className="user-menu-me">
-                            <span className="user-menu-name">
-                              {user.display_name || user.username}
-                            </span>
-                            <span className="user-menu-role">
-                              {user.role === "superadmin" ? "超级管理员" : "普通用户"}
-                            </span>
-                          </span>
-                        ),
-                      },
-                      { type: "divider" as const },
-                      ...(user.role === "superadmin"
-                        ? [
-                            {
-                              key: "accounts",
-                              icon: <TeamOutlined />,
-                              label: "账号管理",
-                            },
-                          ]
-                        : []),
-                      {
-                        key: "password",
-                        icon: <LockOutlined />,
-                        label: "修改密码",
-                      },
-                      {
-                        key: "theme",
-                        icon: <BgColorsOutlined />,
-                        label: "主题",
-                        children: [
-                          { key: "theme-system", label: "跟随系统" },
-                          { key: "theme-light", label: "浅色" },
-                          { key: "theme-dark", label: "深色" },
-                        ].map((it) => ({
-                          ...it,
-                          icon:
-                            themeMode === it.key.replace("theme-", "") ? (
-                              <CheckOutlined />
-                            ) : (
-                              <span style={{ display: "inline-block", width: 14 }} />
-                            ),
-                        })),
-                      },
-                      { type: "divider" as const },
-                      {
-                        key: "logout",
-                        icon: <LogoutOutlined />,
-                        label: "退出登录",
-                      },
-                    ],
-                    onClick: ({ key }) => {
-                      if (key === "accounts") setAccountsOpen(true);
-                      else if (key === "password") setPwdOpen(true);
-                      else if (key === "logout") onLogout();
-                      else if (key.startsWith("theme-")) {
-                        setThemeMode(key.slice("theme-".length) as ThemeMode);
-                      }
-                    },
-                  }}
-                >
-                  <span className="tb-icon-btn user-btn">
-                    <UserOutlined />
-                  </span>
-                </Dropdown>
-              </Tooltip>
-            )}
             {/* 工作台抽屉开关 */}
             <Tooltip title={workbenchOpen ? "收起工作区" : "工作区文件"}>
               <span
@@ -1638,18 +1662,6 @@ export default function App({
           onManageModels={handleManageModels}
           trialSkill={trialSkill}
         />
-
-        {skillsPage && (
-          <SkillManager
-            workspaceId={ws}
-            onClose={() => setSkillsPage(false)}
-            onTrial={(skill: SkillItem) => {
-              setSkillsPage(false);
-              setMode("agent");     // 试用技能必须处于智能体模式
-              setTrialSkill({ name: skill.name, source: skill.source, nonce: Date.now() });
-            }}
-          />
-        )}
 
         <WorkspaceModal
           open={wsModal !== null}
@@ -1763,6 +1775,26 @@ export default function App({
           })()}
         </Modal>
       </div>
+
+      {/* 功能页：占满整个主区（对话区 + 右侧工作台）；对话与工作台保持挂载，返回时状态不丢 */}
+      {view !== "chat" && (
+        <div className="page-shell">
+          {view === "skills" && (
+            <SkillManager
+              workspaceId={ws}
+              onClose={() => setView("chat")}
+              onTrial={(skill: SkillItem) => {
+                setView("chat");
+                setMode("agent");     // 试用技能必须处于智能体模式
+                setTrialSkill({ name: skill.name, source: skill.source, nonce: Date.now() });
+              }}
+            />
+          )}
+          {view === "connectors" && (
+            <ConnectorsPage onClose={() => setView("chat")} remote={!!state?.remote} />
+          )}
+        </div>
+      )}
 
       <Workbench
         open={workbenchOpen}

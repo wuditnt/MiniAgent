@@ -8,6 +8,9 @@ import type {
   AgentState,
   ApprovalMode,
   Attachment,
+  ConnectorSpec,
+  ConnectorTestResult,
+  ConnectorsData,
   GeneralSettings,
   HealthInfo,
   HistoryMessage,
@@ -498,6 +501,53 @@ export async function setModelReasoning(
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
+}
+
+// ---------------------------------------------------------------- 连接器（MCP）
+
+/** 已配置的连接器 + 宿主机 Node 运行环境 */
+export async function fetchConnectors(): Promise<ConnectorsData> {
+  const res = await req("/api/connectors");
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/** 新增/更新连接器（保存后后端会热重载工具） */
+export async function saveConnector(spec: ConnectorSpec): Promise<{ ok: boolean }> {
+  const res = await req("/api/connectors", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(spec),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/** 保存前试连：起进程、握手、列工具后立即关闭 */
+export async function testConnector(spec: ConnectorSpec): Promise<ConnectorTestResult> {
+  const res = await req("/api/connectors/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(spec),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function toggleConnector(name: string, enabled: boolean): Promise<void> {
+  const res = await req("/api/connectors/toggle", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, enabled }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+export async function deleteConnector(name: string): Promise<void> {
+  const res = await req(`/api/connectors?name=${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await readError(res));
 }
 
 // ---------------------------------------------------------------- 通用配置

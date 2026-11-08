@@ -536,6 +536,74 @@ export interface HealthInfo {
   uptime: number;
 }
 
+// ---------------------------------------------------------------- 连接器（MCP）
+
+/** 连接器暴露的一个工具 */
+export interface ConnectorTool {
+  name: string;
+  description: string;
+  dangerous?: boolean;
+}
+
+/** 已配置的连接器（GET /api/connectors） */
+export interface ConnectorInfo {
+  name: string;
+  display_name: string;
+  description: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  env: Record<string, string>;
+  timeout: number;
+  enabled: boolean;
+  dangerous: boolean;
+  /** 启动命令当前是否能在 PATH 中找到（python 视为可用） */
+  command_found: boolean;
+  /** ready / failed / stopped */
+  status: string;
+  error: string;
+  server_info: Record<string, unknown>;
+  tools: ConnectorTool[];
+  tool_count: number;
+}
+
+/** 宿主机运行环境（决定 npx 类连接器是否可用） */
+export interface ConnectorRuntime {
+  node: { found: boolean; path: string; version: string };
+  npx: { found: boolean; path: string };
+}
+
+export interface ConnectorsData {
+  connectors: ConnectorInfo[];
+  runtime: ConnectorRuntime;
+  mcp_enabled: boolean;
+  running: number;
+  cancel_stats?: Record<string, unknown>;
+}
+
+/** 新增/编辑连接器提交的字段 */
+export interface ConnectorSpec {
+  name: string;
+  display_name?: string;
+  description?: string;
+  transport?: "stdio";
+  command: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  timeout?: number;
+  enabled?: boolean;
+  dangerous?: boolean;
+}
+
+export interface ConnectorTestResult {
+  ok: boolean;
+  error?: string;
+  stderr?: string[];
+  server_info?: Record<string, unknown>;
+  tools?: { name: string; description: string }[];
+}
+
 declare global {
   interface Window {
     __DESKTOP__?: DesktopBridge;

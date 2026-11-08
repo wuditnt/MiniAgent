@@ -4,7 +4,7 @@
  *  ② 大号「新会话」按钮
  *  ③ 功能菜单区：连接 / 自动化任务（暂为占位，点击仅提示）
  *  ④ 工作区：按工作区分组的会话列表（搜索 / 新建 / 改名 / 删除）
- *  ⑤ 底部设置区：直接进入系统配置
+ *  ⑤ 底部工具区：人员菜单 + 系统配置（纯图标，靠右下角）
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -56,6 +56,12 @@ interface Props {
   onOpenSettings: () => void;
   /** 打开技能管理页（仅本机可用；远程访问时不渲染入口） */
   onOpenSkills: () => void;
+  /** 打开连接器（MCP 外部能力）页 */
+  onOpenConnectors: () => void;
+  /** 当前主区视图：用于高亮左栏导航 */
+  activeView?: "chat" | "skills" | "connectors";
+  /** 底部人员菜单节点（由 App 构造，未登录时为 null） */
+  accountMenu?: ReactNode;
   /** 正在执行的会话 id 集合：有则在该会话标题前显示呼吸圆点 */
   runningIds?: Set<string>;
 }
@@ -148,6 +154,9 @@ export default function Sidebar({
   onSearch,
   onOpenSettings,
   onOpenSkills,
+  onOpenConnectors,
+  activeView,
+  accountMenu,
   runningIds,
 }: Props) {
   const [searchOpen, setSearchOpen] = useState(false);
@@ -248,12 +257,18 @@ export default function Sidebar({
       <div className="sidebar-scroll">
         <div className="sidebar-menu">
           {!remote && (
-            <div className="menu-item" onClick={onOpenSkills}>
+            <div
+              className={`menu-item ${activeView === "skills" ? "active" : ""}`}
+              onClick={onOpenSkills}
+            >
               <BookOutlined className="menu-item-icon" />
               <span>技能</span>
             </div>
           )}
-          <div className="menu-item" onClick={() => message.info("「连接」功能开发中")}>
+          <div
+            className={`menu-item ${activeView === "connectors" ? "active" : ""}`}
+            onClick={onOpenConnectors}
+          >
             <AppstoreOutlined className="menu-item-icon" />
             <span>连接</span>
           </div>
@@ -477,12 +492,14 @@ export default function Sidebar({
         </div>
       </div>
 
-      {/* ⑤ 底部设置区：直接进入系统配置 */}
+      {/* ⑤ 底部工具区：人员菜单 + 系统配置，只显示图标、靠右下角 */}
       <div className="sidebar-foot">
-        <div className="foot-settings" onClick={onOpenSettings}>
-          <SettingOutlined />
-          <span>系统配置</span>
-        </div>
+        {accountMenu}
+        <Tooltip title="系统配置" placement="top">
+          <span className="sidebar-foot-btn" onClick={onOpenSettings}>
+            <SettingOutlined />
+          </span>
+        </Tooltip>
       </div>
     </div>
   );

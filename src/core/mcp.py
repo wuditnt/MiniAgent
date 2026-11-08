@@ -559,8 +559,14 @@ class MCPManager:
         self.registry = registry
         self.clients: dict[str, MCPStdioClient] = {}
         self.report = MCPReport()
+        # 界面上保存/启停会触发重载；重载要串行，避免两个请求同时改 clients / 注册表
+        self._load_lock = threading.RLock()
 
     def load(self, only: list[str] | None = None) -> MCPReport:
+        with self._load_lock:
+            return self._load(only)
+
+    def _load(self, only: list[str] | None = None) -> MCPReport:
         try:
             cfg = load_config(self.config_path)
         except MCPError as e:
@@ -645,6 +651,82 @@ class MCPManager:
         for client in self.clients.values():
             client.stop()
         self.clients.clear()
+
+    def reload(self, name: str) -> MCPReport:
+        """只重载一个连接器（新增/修改/删除都走这里）。
+
+        删除时配置里已经没有这个名字，`_load(only=[name])` 的收尾逻辑会关掉旧连接、
+        摘掉它的工具，所以不需要单独的 delete 路径。
+        """
+        return self.load(only=[str(name)])
+
+    def snapshot(self) -> dict:
+        """给界面用的只读快照：连接状态 + 工具清单 + 取消统计。"""
+        with self._load_lock:
+            states = list(self.report.servers.values())
+            cancel = self.cancel_stats()
+        by_module: dict[str, list] = {}
+        for t in self.registry.all(source="mcp"):
+            by_module.setdefault(t.module, []).append(t)
+        servers = []
+        for st in states:
+            tools = [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "dangerous": bool(t.dangerous),
+                }
+                for t in by_module.get(f"mcp:{st.name}", [])
+            ]
+            servers.append({
+                "name": st.name,
+                "command": st.command,
+                "args": list(st.args),
+                "status": st.status,
+                "error": st.error,
+                "server_info": dict(st.server_info),
+                "tools": tools,
+                "tool_count": len(tools),
+            })
+        return {"servers": servers, "cancel_stats": cancel}
+
+    def test_spec(self, spec: dict) -> dict:
+        """临时起一个连接器做试连：握手、列工具、立刻关闭，不写注册表。"""
+        name = str(spec.get("name") or "test")
+        cwd = spec.get("cwd") or self.root
+        if not os.path.isabs(cwd):
+            cwd = os.path.join(self.root, cwd)
+        client = MCPStdioClient(
+            name=name,
+            command=spec.get("command", ""),
+            args=list(spec.get("args") or []),
+            cwd=cwd,
+            env=spec.get("env") or {},
+            timeout=float(spec.get("timeout", 30)),
+        )
+        try:
+            client.start()
+            tools = [
+                {
+                    "name": t.get("name", ""),
+                    "description": t.get("description", ""),
+                }
+                for t in client.list_tools()
+            ]
+            return {
+                "ok": True,
+                "server_info": client.server_info,
+                "tools": tools,
+                "stderr": client.stderr_tail(),
+            }
+        except Exception as e:  # noqa: BLE001 - 直接把原因回给界面
+            return {
+                "ok": False,
+                "error": str(e),
+                "stderr": client.stderr_tail(),
+            }
+        finally:
+            client.stop()
 
     def cancel_stats(self) -> dict[str, int]:
         """汇总所有连接的取消相关统计（界面用来显示「通知真的发出去了吗」）。"""

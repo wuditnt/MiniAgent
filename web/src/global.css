@@ -1,4 +1,4 @@
-﻿/* 调色板：浅色取值写在这里，深色在 theme-dark.css 里按同名变量覆盖。
+/* 调色板：浅色取值写在这里，深色在 theme-dark.css 里按同名变量覆盖。
    命名按「属性 + 字面值」，保证浅色主题与改造前逐像素一致。 */
 :root {
   --bg-ffffff: #ffffff;
@@ -2777,27 +2777,87 @@ body.sidebar-resizing .sidebar-resizer::after {
   color: #1677ff;
 }
 
-/* ---- 侧栏：底部设置区（直接进入系统配置） ---- */
-.sidebar-foot {
-  flex: none;
-  padding: 8px 10px 10px;
-  border-top: 1px solid var(--bd-f0f0f0);
+/* 当前打开的功能页：淡蓝底 + 主色，和 hover 区分开 */
+.menu-item.active {
+  background: var(--bg-e6f4ff);
+  color: #1677ff;
+  font-weight: 500;
 }
 
-.foot-settings {
+.menu-item.active .menu-item-icon {
+  color: #1677ff;
+}
+
+/* ---- 侧栏：底部工具区（人员菜单 + 系统配置） ---- */
+.sidebar-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 8px 10px 10px;
+  /* 分隔线：浅色下 #d9d9d9 在渐变底上清晰可见，深色主题同步换成浅一档 */
+  border-top: 1px solid var(--bd-d9d9d9);
+}
+
+/* 人员菜单：头像 + 用户名，整体可点，名字过长省略 */
+.sidebar-user {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 34px;
-  padding: 0 10px;
-  border-radius: 8px;
+  min-width: 0;
+  max-width: calc(100% - 44px);
+  padding: 4px 8px 4px 4px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.sidebar-user:hover {
+  background: var(--bg-f0f5ff);
+}
+
+.sidebar-user-name {
+  min-width: 0;
   font-size: 13px;
+  color: var(--tx-1f1f1f);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 默认头像：清爽的薄荷绿→青渐变圆底 + 白色人形；自定义头像后续在这里替换为 <img> */
+.user-avatar {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #5fd3b4 0%, #3fa9d9 100%);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 0 1px 3px rgba(63, 169, 217, 0.25);
+  color: #fff;
+  font-size: 14px;
+}
+
+/* 底部工具按钮：与顶栏图标按钮同尺寸，去掉文字后保持 30×30 点击热区 */
+.sidebar-foot-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
   color: var(--tx-595959);
+  font-size: 16px;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
 
-.foot-settings:hover {
+.sidebar-foot-btn:hover {
   background: var(--bg-f0f5ff);
   color: #1677ff;
 }
@@ -4405,13 +4465,81 @@ body.sidebar-resizing .sidebar-resizer::after {
   color: var(--tx-999999);
 }
 
-/* ================================================================ 技能管理页 */
+/* ================================================================ 功能页（占满主区） */
 
-/* 打开技能页时只隐藏对话区，Chat 保持挂载 —— 输入内容与附件不丢 */
-.main.skill-view > .app-header,
-.main.skill-view > .chat-scroll,
-.main.skill-view > .composer {
-  display: none;
+/* 打开功能页时隐藏对话区与右侧工作台；两者保持挂载，草稿 / 滚动 / 工作台 tab 不丢 */
+.app.page-view > .main,
+.app.page-view > .workbench {
+  display: none !important;
+}
+
+.page-shell {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 页面通用骨架：标题栏 + 可滚动正文 */
+.page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-fafbfc);
+}
+
+.page-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 24px;
+  background: var(--bg-ffffff);
+  border-bottom: 1px solid var(--bd-f0f0f0);
+}
+
+.page-head-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.page-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.page-title-icon {
+  font-size: 16px;
+  color: #1677ff;
+}
+
+.page-title {
+  flex: none;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--tx-1f1f1f);
+}
+
+.page-sub {
+  font-size: 12px;
+  color: var(--tx-999999);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.page-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 22px 24px 48px;
 }
 
 .skill-page {

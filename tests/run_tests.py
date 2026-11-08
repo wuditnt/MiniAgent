@@ -50,7 +50,7 @@ PKG = os.path.join(SRC, "core")
 
 # (文件名, 说明, 是否需要 API Key) —— 路径相对于本文件所在的 tests/
 #
-# 免费用例 28 个 + 真实用例 1 个。真实用例默认跳过（加 --real 才跑，会消耗 token）。
+# 免费用例 29 个 + 真实用例 1 个。真实用例默认跳过（加 --real 才跑，会消耗 token）。
 # 关于真实用例只有一个：它的价值是「端到端验真」—— 真模型 + 真 MCP 子进程，
 # 一次性覆盖「本端立刻停 + 通知真的发出去 + 服务端真的收手」这条完整链路，
 # 比拆成两个半覆盖的用例更省 token，也不会有「两个都跑一半」的重复开销。
@@ -70,6 +70,7 @@ SUITES: list[tuple[str, str, bool]] = [
     ("test_memory.py", "记忆系统 15 项：存储 / 保护区 / 工具不可见 / prelude / shell / 注入 / 分级淘汰 / 提炼过滤 / 检索合并 / 显式指令", False),
     ("test_logging.py", "文件日志 6 项：按日目录 / 错误聚合 / 幂等重配 / 关闭 / 配置 / 清理", False),
     ("test_workbench.py", "工作台文件接口 9 项：目录 / 安全 / 编码 / 图片 / HTML / MHTML / 资源管理器", False),
+    ("test_connectors.py", "连接器 5 项：配置校验 / CRUD / 首次迁移 / 热加载与试连 / HTTP 五接口", False),
     ("test_events.py", "事件流 10 项：只追加 / 请求可重建 / 正文不截断 / 裁剪留痕 / 开关 / 兜底 / 非法 id", False),
     ("test_model_config.py", "模型配置 10 项：厂家 spec（low/high/max）/ 三种参数风格与 values 重映射 / 迁移 / 会话解析 / 地址协议校验 / 密钥文件权限", False),
     ("test_web_search.py", "联网搜索 3 项：后端选择 / DeepSeek Key 复用 / 请求与解析", False),

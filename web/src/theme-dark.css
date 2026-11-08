@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 深色主题：只覆盖调色板变量 + 少量无法变量化的渐变/阴影。
  *
  * 机制：<html data-theme="dark"> 由 src/theme.tsx 写入；antd 组件由

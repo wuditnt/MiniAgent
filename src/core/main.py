@@ -251,11 +251,14 @@ def _attach_mcp(args: argparse.Namespace) -> MCPManager | None:
     """按配置挂载 MCP server；--no-mcp 时返回 None。"""
     if args.no_mcp:
         return None
+    from core import connector_store
     from core.mcp import MCPManager
     from core.registry import REGISTRY
 
+    # 连接器配置放在 ~/.mini-agent；首次启动会从安装目录的 mcp_servers.json 迁移
+    connector_store.load()
     manager = MCPManager(
-        config_path=os.path.join(HERE, "mcp", "mcp_servers.json"),
+        config_path=connector_store.config_path(),
         project_root=HERE,
         registry=REGISTRY,
     )
@@ -289,6 +292,7 @@ def _run_web(
             login_enabled=not args.no_login,
             skill_loader=skill_loader,
             desktop=args.desktop,
+            mcp_manager=mcp_manager,
         )
     except OSError as e:
         logging.getLogger("mini-agent.app").exception("Web UI 启动失败：%s", e)

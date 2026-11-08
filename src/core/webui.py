@@ -39,6 +39,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from core._paths import ROOT, data_dir
 from core import auth
+from core import connector_store
 from core import events
 from core import logging_setup
 from core import model_config
@@ -1930,6 +1931,7 @@ class WebServer:
         login_enabled: bool = True,
         skill_loader=None,
         desktop: bool = False,
+        mcp_manager=None,
     ) -> None:
         self.host = host
         self.port = port
@@ -1940,6 +1942,8 @@ class WebServer:
         self.login_enabled = login_enabled
         # 技能加载器：/api/skills 与「本轮显式选择的技能」都从它取；None = 未启用技能
         self.skill_loader = skill_loader
+        # MCP 连接器：界面的增删改查要复用同一份 manager（热更新工具注册表）
+        self.mcp = mcp_manager
         self.sessions: dict[str, _Session] = {}
         self._lock = threading.Lock()
         self._httpd: ThreadingHTTPServer | None = None
@@ -2331,6 +2335,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_memory_get(parse_qs(parsed.query))
         elif route == "/api/tools":
             self._handle_tools_list()
+        elif route == "/api/connectors":
+            self._handle_connectors_get()
         elif route == "/api/skills":
             self._handle_skills_list()
         elif route == "/api/skills/detail":
@@ -2407,6 +2413,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_model_reasoning()
         elif route == "/api/skills/enabled":
             self._handle_skill_enabled()
+        elif route == "/api/connectors":
+            self._handle_connector_save()
+        elif route == "/api/connectors/test":
+            self._handle_connector_test()
+        elif route == "/api/connectors/toggle":
+            self._handle_connector_toggle()
         else:
             m = re.match(r"^/api/models/([^/]+)/(test|activate)$", route)
             if m:
@@ -2457,6 +2469,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
             return
         if route == "/api/memory/topic":
             self._handle_memory_topic_delete()
+            return
+        if route == "/api/connectors":
+            self._handle_connector_delete(parse_qs(parsed.query))
             return
         m = re.match(r"^/api/sessions/([^/]+)$", route)
         if m:
@@ -3249,6 +3264,173 @@ class _RequestHandler(BaseHTTPRequestHandler):
             "groups": groups,
             "sources": REGISTRY.sources(),
         })
+
+    # ------------------------------------------------ 连接器（MCP）API
+
+    def _connector_target(self) -> bool:
+        """连接器写操作的闸门：本机 + 超级管理员。
+
+        连接器能指定任意启动命令，等于在宿主机执行程序；远程访问者即使登录了
+        也不能改，否则就是把本机 RCE 暴露到局域网（和「打开所在文件夹」同理）。
+        """
+        if self.web.mcp is None:
+            self._fail(503, "MCP 未启用（启动参数 --no-mcp）")
+            return False
+        if self._is_remote():
+            self._fail(403, "仅本机访问可修改连接器")
+            return False
+        if self.web.login_enabled and not self._require_superadmin():
+            return False
+        return True
+
+    def _connector_running_guard(self) -> bool:
+        """有任务在跑时拒绝改配置：替换连接器会让正在执行的外部工具调用失败。"""
+        if self.web.running_sessions():
+            self._fail(409, "有任务正在执行，连接器配置暂时不能修改，请稍后再试")
+            return True
+        return False
+
+    @staticmethod
+    def _connector_item(name: str, spec: dict, state: dict | None) -> dict:
+        state = state or {}
+        return {
+            "name": name,
+            "display_name": spec.get("display_name") or name,
+            "description": spec.get("description", ""),
+            "command": spec.get("command", ""),
+            "args": list(spec.get("args") or []),
+            "cwd": spec.get("cwd", ""),
+            "env": dict(spec.get("env") or {}),
+            "timeout": spec.get("timeout", 30),
+            "enabled": bool(spec.get("enabled", True)),
+            "dangerous": bool(spec.get("dangerous", True)),
+            "command_found": connector_store.command_available(spec.get("command", "")),
+            "status": state.get("status", "stopped"),
+            "error": state.get("error", ""),
+            "server_info": state.get("server_info", {}),
+            "tools": state.get("tools", []),
+            "tool_count": state.get("tool_count", 0),
+        }
+
+    def _handle_connectors_get(self) -> None:
+        runtime = connector_store.runtime_info()
+        if self.web.mcp is None:
+            self._json({
+                "connectors": [], "runtime": runtime, "mcp_enabled": False,
+                "running": 0, "cancel_stats": {},
+            })
+            return
+        snap = self.web.mcp.snapshot()
+        states = {s["name"]: s for s in snap["servers"]}
+        cfg = connector_store.load()
+        items = [
+            self._connector_item(name, spec, states.get(name))
+            for name, spec in cfg["servers"].items()
+        ]
+        known = set(cfg["servers"])
+        # 报告里可能有配置之外的异常条目（例如整个配置文件读失败）
+        for name, st in states.items():
+            if name not in known:
+                items.append(self._connector_item(
+                    name, {"command": st.get("command", "")}, st
+                ))
+        items.sort(key=lambda x: (not x["enabled"], x["display_name"].lower()))
+        self._json({
+            "connectors": items,
+            "runtime": runtime,
+            "mcp_enabled": True,
+            "running": len(self.web.running_sessions()),
+            "cancel_stats": snap.get("cancel_stats", {}),
+        })
+
+    def _handle_connector_save(self) -> None:
+        if not self._connector_target() or self._connector_running_guard():
+            return
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON")
+            return
+        name = str(body.get("name") or "").strip()
+        if not name:
+            self._fail(400, "缺少连接器标识")
+            return
+        try:
+            spec = connector_store.normalize(name, body)
+            connector_store.upsert(name, body)
+        except connector_store.ConnectorError as e:
+            self._fail(400, str(e))
+            return
+        except OSError as e:
+            self._fail(500, f"写入连接器配置失败：{e}")
+            return
+        self.web.mcp.reload(name)
+        state = next(
+            (s for s in self.web.mcp.snapshot()["servers"] if s["name"] == name), None
+        )
+        _log.info("connector.save name=%s command=%s", name, spec["command"])
+        self._json({"ok": True, "connector": self._connector_item(name, spec, state)})
+
+    def _handle_connector_test(self) -> None:
+        if not self._connector_target():
+            return
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON")
+            return
+        name = str(body.get("name") or "test").strip() or "test"
+        try:
+            spec = connector_store.normalize(name, body)
+        except connector_store.ConnectorError as e:
+            self._fail(400, str(e))
+            return
+        if not connector_store.command_available(spec["command"]):
+            self._json({
+                "ok": False,
+                "error": f"找不到命令 {spec['command']}，请检查 PATH 或先安装依赖",
+                "stderr": [], "tools": [],
+            })
+            return
+        self._json(self.web.mcp.test_spec({**spec, "name": name}))
+
+    def _handle_connector_toggle(self) -> None:
+        if not self._connector_target() or self._connector_running_guard():
+            return
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON")
+            return
+        name = str(body.get("name") or "").strip()
+        if not name:
+            self._fail(400, "缺少连接器标识")
+            return
+        try:
+            spec = connector_store.set_enabled(name, bool(body.get("enabled")))
+        except connector_store.ConnectorError as e:
+            self._fail(404, str(e))
+            return
+        except OSError as e:
+            self._fail(500, f"写入连接器配置失败：{e}")
+            return
+        self.web.mcp.reload(name)
+        state = next(
+            (s for s in self.web.mcp.snapshot()["servers"] if s["name"] == name), None
+        )
+        self._json({"ok": True, "connector": self._connector_item(name, spec, state)})
+
+    def _handle_connector_delete(self, params: dict) -> None:
+        if not self._connector_target() or self._connector_running_guard():
+            return
+        name = (params.get("name") or [""])[0].strip()
+        if not name:
+            self._fail(400, "缺少 name 参数")
+            return
+        try:
+            existed = connector_store.remove(name)
+        except OSError as e:
+            self._fail(500, f"写入连接器配置失败：{e}")
+            return
+        self.web.mcp.reload(name)
+        self._json({"ok": True, "removed": existed})
 
     def _handle_skills_list(self) -> None:
         """可用技能清单（输入框选择器 / 技能管理页共用）。
@@ -4446,6 +4628,7 @@ def serve(
     login_enabled: bool = True,
     skill_loader=None,
     desktop: bool = False,
+    mcp_manager=None,
 ) -> None:
     """便捷入口：构建服务并阻塞运行（main.py 启动时走这里）。"""
     settings.apply_to_runtime()      # 通用配置里的运行时项（工具输出上限、日志）先落地
@@ -4469,7 +4652,7 @@ def serve(
         host=host, port=port, model=model,
         system_prompt=system_prompt, max_turns=max_turns,
         login_enabled=login_enabled, skill_loader=skill_loader,
-        desktop=desktop,
+        desktop=desktop, mcp_manager=mcp_manager,
     )
     _install_signal_handlers(server)
     server.serve_forever()
