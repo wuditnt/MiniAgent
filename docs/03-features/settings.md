@@ -18,6 +18,7 @@
 
 | 分组 | 项 | 说明 |
 |---|---|---|
+| 外观 | 主题 | 跟随系统 / 浅色 / 深色（仅本机保存，见下节） |
 | 循环 | 最大轮数 | 用尽后自动收尾 |
 | 上下文 | 上下文字符上限 | 输入区水位条的上限 |
 | 上下文 | 保留最近轮数 | 硬截断窗口 |
@@ -30,7 +31,25 @@
 | 子智能体 | 开关 / 子任务轮次 / 超时 | 默认超时 120s |
 | 运行日志 | 启用 / 级别 / 保留天数 | 默认 INFO / 7 天 |
 
-页面底部提供「恢复默认」。
+页面底部提供「恢复默认」。该按钮只重置写入 `settings.json` 的运行项，不影响外观主题。
+
+## 外观与主题
+
+支持三档：**跟随系统 / 浅色 / 深色**，默认跟随系统。
+
+两个入口，改的是同一份状态：
+
+1. 系统配置 → 通用配置 → 外观 → 主题
+2. 顶栏右上角用户菜单 → 主题（子菜单带勾选）
+
+行为约定：
+
+- **只存本机**：写在浏览器 `localStorage["ma-theme"]`，不写 `settings.json`、不随账号同步 —— 手机想深色、电脑想浅色是常见需求，且未登录时也能生效。
+- **即时生效**：不需要点保存，也不影响正在进行的对话。
+- **跟随系统**会监听 `prefers-color-scheme`，系统切换深浅色时页面实时跟随；同时更新 `<meta name="theme-color">`，手机状态栏颜色同步。
+- **首帧无闪白**：`index.html` 里有一段内联脚本，在 React 加载前就把 `data-theme` 写到 `<html>` 上。
+- 深色覆盖范围：antd 组件走 `darkAlgorithm`；自定义样式全部改用语义调色板变量（`--bg-*` / `--tx-*` / `--bd-*`），深色只需在 `theme-dark.css` 覆盖变量；代码高亮切 `oneDark`，Mermaid / ECharts 使用深色主题。
+- 图片、PDF、HTML 预览的**内容本身**不做颜色反转（预览即所见）。
 
 ## 取值优先级
 
@@ -90,12 +109,13 @@
 - 运行时应用：`src/core/agent.py` 的 `_setting()` / `_pick()`；`src/core/sandbox.py` 的 `set_read_policy()` / `set_max_output_chars()`
 - 日志：`src/core/logging_setup.py`（按日目录、四类文件、保留清理、幂等重配）
 - 接口：`src/core/webui.py` 的 `_handle_settings_get()` / `_handle_settings_put()` / `_settings_public()`
-- 前端：`web/src/components/SettingsModal.tsx`
+- 前端：`web/src/components/SettingsModal.tsx`、`web/src/theme.tsx`（主题状态与系统跟随）、`web/src/theme-dark.css`（深色调色板）、`web/src/main.tsx`（antd algorithm）、`web/index.html`（首帧主题脚本）
 - 测试：`tests/test_logging.py`、`tests/test_webui.py`（通用配置用例）
 
 ## 注意事项
 
 - 配置保存即生效；但工具模块与 MCP 配置的改动仍需重启后端。
 - 「恢复默认」只重置通用配置，不动模型配置与账号。
+- 主题是设备本地偏好：换浏览器、清站点数据、换设备都会回到「跟随系统」，这是预期行为；需要多设备一致时目前只能各自设置一次。
 - 日志里没有对话正文，排障时结合事件流（运行轨迹）看模型实际收到了什么。
 - 命令行参数优先级最高，适合临时覆盖，不要和持久配置混着排查。

@@ -58,6 +58,21 @@ OCR 依赖约 230MB、近 3 千个文件，但只有 `ocr_image` / `ocr_pdf` 用
 - 安装目录只读，可写数据在 `%APPDATA%\mini-agent`（配置 / 会话 / 账号库 / 日志）
 - 后端启动成功后向 stdout 输出 `MINI_AGENT_READY {...}`，Electron 解析到这一行才开始加载页面
 
+### 2.5 图标与品牌
+
+同一套视觉在四处出现，改图标时按需一起替换：
+
+| 位置 | 文件 | 用途 |
+|---|---|---|
+| 安装包 / exe / 快捷方式 / 任务栏 | `desktop/build/icon.ico` | electron-builder 的 `win.icon`，含 16/24/32/48/64/128/256 |
+| 浏览器 favicon / PWA / 侧栏 logo | `web/public/icon-192.png`、`icon-512.png` | 192 / 512 透明底 PNG |
+| iOS 主屏 | `web/public/apple-touch-icon.png` | 180×180，深色底（iOS 不支持透明） |
+| 设计源图 | `docs/assets/logo-helmet.png` | 1024 透明底，改图标时从这里重新导出 |
+
+- 图标主体是深色拉丝金属机器人头盔 + 蓝紫渐变面罩，四周留 6% 透明安全区。
+- 侧栏 logo 与 favicon 共用同一个 `icon-192.png`，不再单独维护副本。
+- 更换流程：替换 `docs/assets/logo-helmet.png` → 导出上述 PNG → 用多尺寸 ico 工具生成 `desktop/build/icon.ico` → 重新打包。
+
 ## 3. 使用方式
 
 ### 3.1 前置条件
@@ -154,6 +169,8 @@ cd desktop; npm run dist
 | `src/core/main.py` | `--desktop`、固定端口与 `--host` 校验 |
 | `src/core/extra_libs.py` | 解压 `ocr-pack.zip` 到数据目录并注入 `sys.path` / `PYTHONPATH`（`MINI_AGENT_EXTRA_PACK` / `MINI_AGENT_EXTRA_LIBS`） |
 | `src/core/webui.py` | `MINI_AGENT_READY / MINI_AGENT_ERROR` 握手、`/api/health` 的 `mode / host / lan_urls` |
+| `desktop/build/icon.ico` | Windows 图标（安装包 / exe / 开始菜单 / 任务栏） |
+| `desktop/src/main.ts` 的 `icon` | 窗口与开发态任务栏图标 |
 
 安装后的目录结构：
 

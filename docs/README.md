@@ -26,6 +26,7 @@
 | 核心循环 / 消息裁剪 / 流式 / 并行 | [产品架构](02-architecture.md)、[对话与智能体](03-features/chat-and-agent.md) |
 | 加工具 / 改工具加载 | [工具系统](03-features/tools.md)、[沙箱与安全](03-features/sandbox.md) |
 | 改前端界面 / 接口 | [产品架构](02-architecture.md)、[工作台](03-features/workbench.md)、[会话](03-features/sessions.md) |
+| 改外观主题 / 桌面端图标 | [通用配置](03-features/settings.md#外观与主题)、[桌面端打包](04-operations/desktop-build.md#25-图标与品牌) |
 | 改模型接入 / 推理等级 | [模型与推理等级](03-features/models-and-reasoning.md) |
 | 改确认、提问、取消 | [确认与授权](03-features/approval.md)、[内联提问](03-features/ask-user.md)、[取消机制](03-features/chat-and-agent.md#取消) |
 | 改记忆 / 事件流 / 登录 | [记忆](03-features/memory.md)、[运行轨迹](03-features/trajectory.md)、[登录与账号](03-features/auth-and-access.md) |
@@ -65,7 +66,7 @@ docs/
 │   ├── workbench.md              工作区文件抽屉（预览）
 │   ├── trajectory.md             事件流与运行轨迹
 │   ├── auth-and-access.md        登录、账号与权限
-│   └── settings.md               通用配置与运行日志
+│   └── settings.md               通用配置、外观主题与运行日志
 └── 04-operations/
     ├── testing.md                本地测试指南
     ├── desktop-build.md          桌面端打包（Electron + 内置 Python）

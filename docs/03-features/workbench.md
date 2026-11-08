@@ -2,10 +2,10 @@
 
 ## 用途
 
-右侧抽屉用于浏览当前工作区的文件、提供多格式预览，并支持删除文件（不支持编辑保存）。它与「工作区管理」（左侧按工作区分组会话）不是一回事：
+右侧抽屉用于浏览当前工作区的文件、提供多格式预览，并支持下载、删除与右键菜单（不支持编辑保存）。它与「工作区管理」（左侧按工作区分组会话）不是一回事：
 
 - **工作区**：一个目录，就是 Agent 的文件操作边界（沙箱根）。左侧边栏可新建 / 改名 / 移除；默认工作区锚在用户数据目录下的 `~/mini-agent`，不可删除。
-- **文件抽屉**：浏览、预览、下载、删除当前工作区的文件，不提供编辑保存。
+- **文件抽屉**：浏览、预览、下载、删除当前工作区的文件，不提供编辑保存。桌面端还可以在资源管理器中定位文件。
 
 ## 使用方式
 
@@ -15,6 +15,21 @@
 - 文件行 hover 出现下载与删除按钮（触屏常显）；大小显示在文件名后面，目录不显示大小。
 - 删除前弹确认框；目录会连同内容一起删除，删掉的标签会自动关闭。
 - 关闭全部标签 → 抽屉自动收起；再次打开回到「开始」页。
+
+### 右键菜单
+
+行与空白区的右键菜单：
+
+| 位置 | 菜单项 |
+|---|---|
+| 文件 | 打开 / 下载 / 复制相对路径 / 打开所在文件夹* / 删除 |
+| 目录 | 打开 / 复制相对路径 / 打开所在文件夹* / 删除 |
+| 空白区 | 刷新 / 打开当前文件夹* |
+
+`*` 仅在**桌面端且本机访问**时出现：这个动作要在宿主机上拉起资源管理器，浏览器版与手机远程访问都不显示（不是置灰）。语义是「文件 = 打开父目录并选中该文件，目录 = 直接打开该目录」。
+
+- 「复制相对路径」复制的是相对工作区根的路径（如 `src/app.py`），失败时提示手动复制。
+- 空白区菜单在点击页面、滚动或窗口尺寸变化时自动关闭。
 
 ### 预览格式
 
@@ -58,19 +73,21 @@ CSV / TSV：
 | `GET /api/workspace/table` | CSV / TSV 行窗口 |
 | `GET /api/workspace/asset` | HTML 预览的相对资源 |
 | `POST /api/workspace/delete` | 删除文件或目录（目录连同内容） |
+| `POST /api/workspace/reveal` | 资源管理器中定位文件 / 打开目录（仅桌面端 + 本机） |
 
 ## 关键代码位置
 
 - 工作区配置：`src/core/workspace_config.py` 的 `ensure_default_workspace()` / `list_workspaces()` / `create_workspace()` / `update_workspace()` / `delete_workspace()` / `resolve_path()`
-- 文件接口：`src/core/webui.py` 的 `_handle_workspace_dir()` / `_handle_workspace_file()` / `_handle_workspace_raw()` / `_handle_workspace_download()` / `_handle_workspace_table()` / `_handle_workspace_asset()` / `_handle_workspace_entry_delete()` / `_read_table()`
+- 文件接口：`src/core/webui.py` 的 `_handle_workspace_dir()` / `_handle_workspace_file()` / `_handle_workspace_raw()` / `_handle_workspace_download()` / `_handle_workspace_table()` / `_handle_workspace_asset()` / `_handle_workspace_entry_delete()` / `_handle_workspace_reveal()` / `_read_table()`；资源管理器调用封装在 `_reveal_in_explorer()`
 - 预览类型表：`_BINARY_PREVIEWS`
 - MHTML：`src/core/mhtml.py`
-- 前端：`web/src/components/Workbench.tsx`、`WorkbenchFiles.tsx`、`FilePreview.tsx`、`HtmlPreview.tsx`、`components/preview/registry.tsx`、`PdfPreview.tsx`、`TablePreview.tsx`
+- 前端：`web/src/components/Workbench.tsx`、`WorkbenchFiles.tsx`（列表与右键菜单）、`FilePreview.tsx`、`HtmlPreview.tsx`、`components/preview/registry.tsx`、`PdfPreview.tsx`、`TablePreview.tsx`
 - 测试：`tests/test_workbench.py`
 
 ## 注意事项
 
 - 接口严格限制在当前工作区内：`../`、绝对路径与 `.memory` 均被拒绝。
+- 「打开所在文件夹」接口双重校验：必须 `web.desktop`（Electron 壳）且对端是回环地址；局域网里的手机即使已登录也会被 403，避免远程遥控宿主机弹窗。
 - 删除是物理删除、不进回收站；目录会连同内容一起删掉，操作前有确认框。
 - 文件抽屉不支持编辑保存，改文件请让 Agent 用工具，或在编辑器里改。
 - 工作区有会话时不允许删除。
