@@ -25,6 +25,7 @@ import io
 import json
 import os
 import queue
+from collections import deque
 import re
 import shutil
 import signal
@@ -63,6 +64,59 @@ MAX_BODY = 32 * 1024 * 1024    # 请求体上限 32MB（base64 附件膨胀约 1
 MAX_UPLOAD_BYTES = 24 * 1024 * 1024   # 单个附件解码后上限
 MAX_ATTACHMENT_TEXT = 8000     # 文本附件注入消息的内容节选上限（字符）
 ATTACH_DIR = ".attachments"    # 工作区内附件存放子目录
+
+# ---------------------------------------------------------------- 实时事件序号
+# 一条 SSE 可以同时观看多个会话，靠帧里的 session 分流；断线续传则靠全局单调序号
+# （Last-Event-ID 只有一个值，所以序号必须跨会话唯一，不能各会话各数各的）。
+_EVENT_SEQ = 0
+_EVENT_SEQ_LOCK = threading.Lock()
+_REPLAY: "deque[dict]" = deque()
+_REPLAY_BYTES = 0
+_REPLAY_MAX_EVENTS = 2000             # 回放缓冲最多留多少帧
+_REPLAY_MAX_BYTES = 4 * 1024 * 1024   # 以及最多占多少内存（防止长任务撑爆）
+
+
+def _event_size(ev: dict) -> int:
+    """粗估一帧体积：不序列化，避免每个 token 都多一次 json.dumps。"""
+    n = 200
+    for k in ("text", "content", "result", "detail", "reasoning", "message"):
+        v = ev.get(k)
+        if isinstance(v, str):
+            n += len(v)
+    return n
+
+
+def _stamp_event(sid: str, event: dict) -> dict:
+    """补上会话 id 与全局序号，并登记进回放缓冲。"""
+    global _EVENT_SEQ, _REPLAY_BYTES
+    with _EVENT_SEQ_LOCK:
+        _EVENT_SEQ += 1
+        ev = {**event, "session": sid, "seq": _EVENT_SEQ}
+        _REPLAY.append(ev)
+        _REPLAY_BYTES += _event_size(ev)
+        while _REPLAY and (
+            len(_REPLAY) > _REPLAY_MAX_EVENTS or _REPLAY_BYTES > _REPLAY_MAX_BYTES
+        ):
+            _REPLAY_BYTES -= _event_size(_REPLAY.popleft())
+    return ev
+
+
+def _replay_since(last_id: int, sids: set[str]) -> tuple[bool, list[dict]]:
+    """断线续传：能否从 last_id 之后接着补，以及要补的帧。
+
+    缓冲已经丢掉了 last_id 之后的帧（或服务端序号倒退，比如进程重启）时，
+    只能回落到整份快照 —— 宁可多传一次，也不能让前端静默缺帧。
+    """
+    with _EVENT_SEQ_LOCK:
+        if last_id <= 0 or _EVENT_SEQ < last_id:
+            return False, []
+        if not _REPLAY:
+            return True, []
+        if _REPLAY[0]["seq"] > last_id + 1:
+            return False, []
+        return True, [
+            ev for ev in _REPLAY if ev["seq"] > last_id and ev.get("session") in sids
+        ]
 
 # 远程访问识别：判定依据是 TCP 对端地址 —— 回环地址视为本机，其余视为远程。
 # 该标志仅用于 /api/state → 前端侧栏隐藏工作区管理入口（软性收窄）；
@@ -472,9 +526,13 @@ class _Session:
         }
         _save_session_file(self.id, data)
 
-    def subscribe(self) -> queue.Queue:
-        """挂一个 SSE 订阅者，返回它专属的队列。"""
-        q: queue.Queue = queue.Queue()
+    def subscribe(self, q: queue.Queue | None = None) -> queue.Queue:
+        """挂一个 SSE 订阅者，返回它的队列。
+
+        传入同一个队列可以把它同时挂到多个会话上 —— 多会话共享一条 SSE 时，
+        各会话 emit 出来的事件都汇进同一条流。
+        """
+        q = q or queue.Queue()
         with self.sub_lock:
             self.subscribers.add(q)
         return q
@@ -490,11 +548,16 @@ class _Session:
             return bool(self.subscribers)
 
     def emit(self, event: dict) -> None:
-        """把事件广播给所有订阅者（没人看也不报错，事件直接丢弃）。"""
+        """把事件广播给所有订阅者（没人看也不报错，事件直接丢弃）。
+
+        广播前统一补上 session/seq 并登记回放缓冲：前端靠 session 分流、
+        靠 seq 去重与断线续传。
+        """
+        ev = _stamp_event(self.id, event)
         with self.sub_lock:
             subs = list(self.subscribers)
         for q in subs:
-            q.put(event)
+            q.put(ev)
 
     # ---------------------------------------------------------- 执行记录
     # 一轮 = 一段时间线：开始时刻由后端写，动作（工具/提示）逐条追加，
@@ -2237,7 +2300,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def _sse_frame(self, event: dict) -> bool:
         """写一帧 SSE。返回 False 表示客户端已断开。"""
         try:
-            self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"))
+            seq = event.get("seq")
+            # id: 行给断线续传用（前端读 Last-Event-ID 之外的 query 也支持）
+            head = f"id: {seq}\n" if isinstance(seq, int) else ""
+            self.wfile.write(
+                f"{head}data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
+            )
             self.wfile.flush()
             return True
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
@@ -2823,47 +2891,95 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self._json({"sessions": {sid: {"since": since} for sid, since in running.items()},
                     "server_now": time.time()})
 
-    def _handle_chat_stream(self, params: dict) -> None:
-        """接入一条正在后台执行的任务：先发快照，再实时广播后续事件。
+    def _snapshot_event(self, session: "_Session") -> dict:
+        """一个会话的整份快照（消息 + 本轮时间线 + 未定稿草稿）。"""
+        sid = session.id
+        if session.agent is not None:
+            src = session.agent.messages[1:]
+            runs = session.runs
+        else:
+            data = _load_session_file(sid) or {}
+            src = data.get("messages", [])
+            runs = data.get("runs") or []
+        messages = [
+            {k: v for k, v in it.items() if k not in ("_end", "_start")}
+            for it in _display_items(src)
+        ]
+        run = session.run
+        with _EVENT_SEQ_LOCK:
+            seq = _EVENT_SEQ
+        return {
+            "type": "snapshot", "session": sid, "messages": messages,
+            "runs": runs[-50:],
+            # 正在跑的这轮带完整时间线：重连/刷新后计时与动作一条不丢
+            "run": ({**run, "actions": [dict(a) for a in run["actions"]]}
+                    if run else None),
+            "server_now": time.time(),
+            "running": session.running_since is not None,
+            # 已经流式生成、但还没定稿的正文/思考：重连后接着往气泡里补
+            "live": session.live_snapshot(),
+            "seq": seq,
+        }
 
-        GET /api/chat/stream?session=<sid> —— 刷新页面 / 换标签页 / 断线回来时用。
-        任务没在跑就只发一条 running=false 的快照并关闭，前端据此回落到历史。
+    def _handle_chat_stream(self, params: dict) -> None:
+        """多路复用：一条 SSE 同时观看多个会话。
+
+        GET /api/chat/stream?sessions=a,b,c[&last_id=N][&snapshot=b]
+          · sessions：本页关心的会话；每帧都带 session/seq，前端按会话分流
+          · last_id ：断线续传序号（也接受 Last-Event-ID 头），命中回放缓冲就只补增量
+          · snapshot：重连后才加入的会话，单独要一份整份快照
+        旧用法 ?session=a 仍然等价于单会话，保持兼容。
+
+        多流常驻期间，某一路进入终态不会关闭整条连接 —— 只是该会话本轮结束。
         """
-        sid = self._sid_or_fail((params.get("session") or ["default"])[0])
-        if sid is None:
-            return
-        session = self.web.session(sid)
-        # 先订阅再取快照：中间产生的事件排队等着，不会丢（顺序上最多重复一次）
-        q = session.subscribe()
+        raw = (params.get("sessions") or [""])[0]
+        single = not raw          # 旧接口 ?session=：单会话，终态即关流（保持兼容）
+        raws = raw.split(",") if raw else [(params.get("session") or ["default"])[0]]
+        sids: list[str] = []
+        for item in raws:
+            sid = str(item or "").strip()[:64]
+            if not sid or not events.valid_sid(sid):
+                self._fail(400, "会话 id 不合法（只允许字母、数字、下划线、点、短横线）")
+                return
+            if sid not in sids:
+                sids.append(sid)
+            if len(sids) > 8:
+                self._fail(400, "一次最多订阅 8 个会话")
+                return
+        sessions = [self.web.session(sid) for sid in sids]
+
+        raw_snap = (params.get("snapshot") or [""])[0]
+        want_snap = {s.strip() for s in raw_snap.split(",") if s.strip()} & set(sids)
+        last_raw = (params.get("last_id") or [""])[0] or (self.headers.get("Last-Event-ID") or "")
         try:
-            if session.agent is not None:
-                src = session.agent.messages[1:]
-                runs = session.runs
-            else:
-                data = _load_session_file(sid) or {}
-                src = data.get("messages", [])
-                runs = data.get("runs") or []
-            messages = [
-                {k: v for k, v in it.items() if k not in ("_end", "_start")}
-                for it in _display_items(src)
-            ]
-            run = session.run
+            last_id = max(0, int(str(last_raw).strip()))
+        except (TypeError, ValueError):
+            last_id = 0
+
+        q: queue.Queue = queue.Queue()
+        for s in sessions:
+            s.subscribe(q)      # 先订阅再取快照：构建期间的事件排队等着，不会丢
+        try:
             self._sse_headers()
             self.close_connection = True
-            if not self._sse_frame({
-                "type": "snapshot", "session": sid, "messages": messages,
-                "runs": runs[-50:],
-                # 正在跑的这轮带完整时间线：重连/刷新后计时与动作一条不丢
-                "run": ({**run, "actions": [dict(a) for a in run["actions"]]}
-                        if run else None),
-                "server_now": time.time(),
-                "running": session.running_since is not None,
-                # 已经流式生成、但还没定稿的正文/思考：重连后接着往气泡里补
-                "live": session.live_snapshot(),
-            }):
-                return
-            if session.running_since is None:
-                return          # 空闲会话：快照即全量，不需要继续等事件
+            resumed, replay = _replay_since(last_id, set(sids))
+            if resumed:
+                for ev in replay:
+                    if not self._sse_frame(ev):
+                        return
+                for sid in sids:
+                    # 新加入的会话客户端手里没有数据；续传缓冲里没有帧的会话也补一份
+                    if sid in want_snap or not any(
+                        ev.get("session") == sid for ev in replay
+                    ):
+                        if not self._sse_frame(self._snapshot_event(self.web.session(sid))):
+                            return
+            else:
+                for s in sessions:
+                    if not self._sse_frame(self._snapshot_event(s)):
+                        return
+            if not any(s.running_since is not None for s in sessions):
+                return          # 全都空闲：帧发完就关，不需要继续等
             while True:
                 try:
                     event = q.get(timeout=PUMP_IDLE)
@@ -2876,10 +2992,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     continue
                 if not self._sse_frame(event):
                     return
-                if event.get("type") in ("done", "error", "cancelled"):
+                if single and event.get("type") in ("done", "error", "cancelled"):
                     return
         finally:
-            session.unsubscribe(q)
+            for s in sessions:
+                s.unsubscribe(q)
 
     def _handle_session_create(self) -> None:
         """新建一个空会话，归属指定工作区（缺省用默认工作区）。"""

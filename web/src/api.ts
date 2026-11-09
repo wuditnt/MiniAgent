@@ -804,22 +804,28 @@ export async function chatStream(
 }
 
 /**
- * 接入一条正在后台执行的任务（刷新页面 / 换标签页 / 断线回来后用）。
+ * 一条 SSE 同时观看多个会话（多路复用）。
  *
- * 服务端先推一帧 `snapshot`（当前全部消息 + 是否仍在运行），随后继续
- * 实时广播本轮事件；任务已结束就只发快照，函数随即返回。
+ * @param sessions 本页关心的会话集合；每帧都带 session，调用方按会话分流
+ * @param lastSeq  已收到的最大序号（断线续传用；0 = 不要增量，直接要快照）
+ * @param needSnap 重连后新加入的会话：它们在服务端没有可续传的历史，需要整份快照
  */
-export async function reconnectStream(
-  session: string,
+export async function multiStream(
+  sessions: string[],
+  lastSeq: number,
+  needSnap: string[],
   onEvent: (ev: SSEEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {
-  const res = await req(`/api/chat/stream?session=${encodeURIComponent(session)}`, { signal });
+  const qs = new URLSearchParams({ sessions: sessions.join(",") });
+  if (lastSeq > 0) qs.set("last_id", String(lastSeq));
+  if (needSnap.length) qs.set("snapshot", needSnap.join(","));
+  const res = await req(`/api/chat/stream?${qs.toString()}`, { signal });
   if (!res.ok || !res.body) throw new Error(await readError(res));
   await readSSE(res, onEvent);
 }
 
-/** 逐帧解析 SSE 响应（chatStream / reconnectStream 共用） */
+/** 逐帧解析 SSE 响应（chatStream / multiStream 共用） */
 async function readSSE(res: Response, onEvent: (ev: SSEEvent) => void): Promise<void> {
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();

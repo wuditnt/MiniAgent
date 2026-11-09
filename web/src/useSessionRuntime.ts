@@ -8,7 +8,7 @@
  *  · 终态后关闭流但保留数据，空闲 10 分钟或超上限时释放。
  *  · 后台会话的确认/提问不自动拒绝：继续等待，由侧栏红点 + 顶部横幅提示。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { ChatItem, ConfirmInfo, PendingAsk, TraceEvent } from "./types";
 
 export interface SessionRuntime {
@@ -45,7 +45,6 @@ type Updater = (rt: SessionRuntime) => void;
 export function useSessionRuntime(activeSid: string) {
   const mapRef = useRef(new Map<string, SessionRuntime>());
   const memoRef = useRef(new Map<string, Memo>());
-  const streamsRef = useRef(new Map<string, AbortController>());
   const activeRef = useRef(activeSid);
   activeRef.current = activeSid;
   const [ver, force] = useState(0);
@@ -112,70 +111,68 @@ export function useSessionRuntime(activeSid: string) {
     mapRef.current.delete(sid);
   }, []);
 
-  /** 开始消费一条流；同一会话已有流则先断掉旧的 */
-  const beginStream = useCallback(
-    (sid: string) => {
-      streamsRef.current.get(sid)?.abort();
-      const ac = new AbortController();
-      streamsRef.current.set(sid, ac);
-      update(sid, (rt) => {
-        rt.streaming = true;
-        rt.finished = false;
-      });
-      return ac;
+  /** 标记某会话本页是否正在接收实时事件（共享流订阅 / 本页发送） */
+  const setStreaming = useCallback(
+    (sid: string, on: boolean, forceRender = false) => {
+      let rt = mapRef.current.get(sid);
+      if (!rt) {
+        if (!on) return;
+        rt = ensure(sid);
+      }
+      if (rt.streaming === on) return;
+      rt.streaming = on;
+      rt.touchedAt = Date.now();
+      if (forceRender || sid === activeRef.current) bump();
     },
-    [update]
+    [ensure, bump]
   );
 
-  const endStream = useCallback(
-    (sid: string, ac: AbortController) => {
-      if (streamsRef.current.get(sid) !== ac) return;
-      streamsRef.current.delete(sid);
-      const rt = mapRef.current.get(sid);
-      if (rt) {
-        rt.streaming = false;
-        rt.touchedAt = Date.now();
+  /** 按订阅集合整体同步（共享流只有一条，订阅关系是一份集合而不是每会话一条连接） */
+  const syncStreaming = useCallback(
+    (subscribed: Set<string>) => {
+      let changed = false;
+      for (const rt of mapRef.current.values()) {
+        const want = subscribed.has(rt.sid);
+        if (rt.streaming !== want) {
+          rt.streaming = want;
+          rt.touchedAt = Date.now();
+          changed = true;
+        }
       }
-      if (sid === activeRef.current) bump();
+      if (changed) bump();
     },
     [bump]
   );
 
-  const isStreaming = useCallback((sid: string) => !!streamsRef.current.get(sid), []);
+  const isStreaming = useCallback(
+    (sid: string) => !!mapRef.current.get(sid)?.streaming,
+    []
+  );
 
-  /** 清理空闲/超额的运行时（返回被断开后台流的会话 id） */
+  const isFinished = useCallback(
+    (sid: string) => !!mapRef.current.get(sid)?.finished,
+    []
+  );
+
+  const has = useCallback((sid: string) => mapRef.current.has(sid), []);
+
+  /** 轮询确认已空闲的会话：清掉「本页刚收过终态」挡板 */
+  const clearFinished = useCallback((running: Set<string>) => {
+    for (const rt of mapRef.current.values()) {
+      if (!running.has(rt.sid)) rt.finished = false;
+    }
+  }, []);
+
+  /** 清理空闲运行时（订阅关系由 App 控制，这里只负责释放数据） */
   const prune = useCallback(
-    (current: string): string[] => {
+    (current: string) => {
       const now = Date.now();
       for (const rt of [...mapRef.current.values()]) {
         if (rt.sid === current || rt.streaming) continue;
         if (now - rt.touchedAt > KEEP_IDLE_MS) release(rt.sid);
       }
-      // 后台运行中的会话按最近活跃排序，超出的断开流并释放（降级为 A+B 恢复）
-      const running = [...mapRef.current.values()]
-        .filter((rt) => rt.streaming && rt.sid !== current)
-        .sort((a, b) => a.touchedAt - b.touchedAt);
-      const dropped: string[] = [];
-      while (running.length > MAX_BACKGROUND) {
-        const rt = running.shift()!;
-        streamsRef.current.get(rt.sid)?.abort();
-        streamsRef.current.delete(rt.sid);
-        rt.streaming = false;
-        release(rt.sid);
-        dropped.push(rt.sid);
-      }
-      return dropped;
     },
     [release]
-  );
-
-  /** 页面卸载：断开所有流（后端任务不受影响，仍会在后台跑完） */
-  useEffect(
-    () => () => {
-      for (const ac of streamsRef.current.values()) ac.abort();
-      streamsRef.current.clear();
-    },
-    []
   );
 
   return useMemo(
@@ -187,9 +184,12 @@ export function useSessionRuntime(activeSid: string) {
       scrollOf,
       draftOf,
       release,
-      beginStream,
-      endStream,
+      setStreaming,
+      syncStreaming,
       isStreaming,
+      isFinished,
+      has,
+      clearFinished,
       prune,
       /** 后台在等用户确认/回答的会话（侧栏红点 + 顶部横幅） */
       attention: [...mapRef.current.values()].filter(
@@ -198,6 +198,6 @@ export function useSessionRuntime(activeSid: string) {
     }),
     // ver 让后台确认/提问（forceRender）时重新计算 attention
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [ensure, update, saveScroll, saveDraft, scrollOf, draftOf, release, beginStream, endStream, isStreaming, prune, activeSid, ver]
+    [ensure, update, saveScroll, saveDraft, scrollOf, draftOf, release, setStreaming, syncStreaming, isStreaming, isFinished, has, clearFinished, prune, activeSid, ver]
   );
 }

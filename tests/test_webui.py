@@ -788,6 +788,110 @@ def _make_file(name: str) -> None:
         f.write("tmp")
 
 
+def _read_sse(path: str, stop_when=None, timeout: float = 60) -> list[dict]:
+    """读一条 SSE 并逐帧解析；stop_when(已收帧) 为真时主动断开。"""
+    resp = urllib.request.urlopen(f"http://127.0.0.1:{WEB_PORT}{path}", timeout=timeout)
+    out: list[dict] = []
+    try:
+        for raw in resp:
+            line = raw.decode("utf-8").strip()
+            if not line.startswith("data:"):
+                continue
+            out.append(json.loads(line[5:]))
+            if stop_when and stop_when(out):
+                break
+    finally:
+        resp.close()
+    return out
+
+
+def _wait_idle(sids: list[str], timeout: float = 25) -> None:
+    """等这些会话从 /api/running 里消失（本轮执行收尾）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        _s, body = api("GET", "/api/running")
+        if not (set(sids) & set(body.get("sessions", {}))):
+            return
+        time.sleep(0.3)
+    raise AssertionError(f"会话未在 {timeout}s 内结束：{sids}")
+
+
+def _start_run(sid: str) -> None:
+    """发起一轮长任务，读到 tool_start 就断开（任务继续在后台跑）。"""
+    client = SSEClient({"message": "并行跑", "mode": "agent", "web": False, "session": sid})
+    for ev in client.events():
+        if ev["type"] == "confirm_request":
+            _approve(sid, ev)
+        elif ev["type"] == "tool_start":
+            break
+    client.resp.close()
+
+
+def scenario_multi_stream() -> None:
+    """⑳ 共享流：一条 SSE 同时观看多个会话，断线按 seq 续传。
+
+    这是「保活」方案的传输层：一个标签页只占一条连接，后台会话的事件
+    靠帧里的 session 分流；断线重连带 last_id 只补增量，缓冲不够才回落快照。
+    """
+    global SCRIPT
+    SCRIPT = [("run_python", {"code": "import time; time.sleep(2)"})]
+
+    # ① 两路同时运行：一条连接收到两份快照 + 两个会话各自的实时帧与终态
+    ab = ["t-multi-a", "t-multi-b"]
+    for sid in ab:
+        _start_run(sid)
+    events = _read_sse(
+        "/api/chat/stream?sessions=" + ",".join(ab),
+        stop_when=lambda evs: len(
+            {e.get("session") for e in evs if e["type"] == "done"}
+        ) >= 2,
+        timeout=90,
+    )
+    snaps = [e for e in events if e["type"] == "snapshot"]
+    assert [e["session"] for e in snaps] == ab, f"每个会话都应有快照：{snaps}"
+    assert all(e["running"] for e in snaps), f"快照时应仍在运行：{snaps}"
+    live = [e for e in events if e["type"] != "snapshot"]
+    assert {e.get("session") for e in live} == set(ab), \
+        f"两路事件都应到达同一条流：{ {e.get('session') for e in live} }"
+    assert all(isinstance(e.get("seq"), int) for e in live), f"实时帧应带全局序号：{live[:3]}"
+    seqs = [e["seq"] for e in live]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), f"序号应递增无重复：{seqs}"
+    assert {e["session"] for e in live if e["type"] == "done"} == set(ab), "两路都应跑到终态"
+
+    # ② 断线续传：断开 → 任务跑完 → 带 last_id 重连，只补增量，不再整份重建
+    cd = ["t-multi-c", "t-multi-d"]
+    for sid in cd:
+        _start_run(sid)
+    first = _read_sse(
+        "/api/chat/stream?sessions=" + ",".join(cd),
+        stop_when=lambda evs: len([e for e in evs if e["type"] == "snapshot"]) >= 2,
+        timeout=60,
+    )
+    last_seq = max(e["seq"] for e in first)
+    _wait_idle(cd)
+
+    resumed = _read_sse(
+        f"/api/chat/stream?sessions={','.join(cd)}&last_id={last_seq}", timeout=30)
+    assert resumed, "续传应有内容"
+    assert resumed[0]["type"] != "snapshot", f"能续传时不该重发快照：{resumed[0]}"
+    assert resumed[0]["seq"] > last_seq, f"续传应从 last_id 之后开始：{resumed[0]}"
+    assert {e["session"] for e in resumed} == set(cd), f"两路都应补上：{resumed}"
+    assert {e["session"] for e in resumed if e["type"] == "done"} == set(cd), \
+        f"两路终态都应补上：{resumed}"
+
+    # ③ last_id 超出回放缓冲：自动回落成整份快照（宁可重传，不能静默缺帧）
+    fallback = _read_sse(
+        f"/api/chat/stream?sessions={','.join(cd)}&last_id=999999999", timeout=30)
+    assert len(fallback) == 2 and all(e["type"] == "snapshot" for e in fallback), \
+        f"无法续传时应回落成快照：{[e['type'] for e in fallback]}"
+
+    # ④ 参数校验：非法会话 id 直接 400，不建立流
+    status, _body = api("GET", "/api/chat/stream?sessions=bad%20id")
+    assert status == 400, f"非法会话 id 应 400，实际 {status}"
+
+    print("  [20] 共享流多会话通过（双路帧 + seq 续传 + 快照回落 + 参数校验）")
+
+
 def scenario_confirm(deny: bool) -> None:
     """⑥⑦ 危险确认：
     拒绝 → agent 不执行（不发 tool_start/tool_end），结果直接回给模型，最终 done；
@@ -1424,6 +1528,7 @@ def main() -> int:
         ("运行中指示器", scenario_running_indicator),
         ("接入后台任务", scenario_reconnect),
         ("实时草稿", scenario_live_draft),
+        ("共享流多会话", scenario_multi_stream),
         ("危险确认-拒绝", lambda: scenario_confirm(deny=True)),
         ("危险确认-允许", lambda: scenario_confirm(deny=False)),
         ("同会话并发 409", scenario_409),

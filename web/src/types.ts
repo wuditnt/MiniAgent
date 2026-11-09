@@ -74,8 +74,11 @@ export interface RunInfo {
   actions: RunAction[];
 }
 
-/** SSE 事件（/api/chat 响应流；终态 = done / error / cancelled） */
-export type SSEEvent =
+/** SSE 事件（/api/chat 响应流；终态 = done / error / cancelled）
+ *  · session：共享多路复用流里标识事件属于哪个会话
+ *  · seq：服务端全局单调序号，用于去重与断线续传（Last-Event-ID）
+ */
+export type SSEEvent = { session?: string; seq?: number } & (
   | { type: "turn"; turn: number; mode: Mode }
   | { type: "run_start"; turn: number; started_at: number; actions: RunAction[]; server_now: number }
   | { type: "delta"; text: string; kind: "content" | "reasoning" }
@@ -105,7 +108,8 @@ export type SSEEvent =
       running: boolean;
       /** 已经流式生成、但还没定稿的正文/思考（重连时补进流式气泡） */
       live?: { content: string; reasoning: string };
-    };
+    }
+);
 
 /** 轨迹事件的来源（决定 Trajectory 视图的着色） */
 export type TraceSource =

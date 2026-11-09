@@ -2,7 +2,7 @@
  * 应用编排：模式/联网开关、消息流、SSE 消费、危险确认都在这里。
  * Chat / WelcomePane / ConfirmPanel / ToolChain 是纯展示组件。
  */
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, MoreOutlined, TeamOutlined, LockOutlined, LogoutOutlined, UserOutlined, BgColorsOutlined, CheckOutlined } from "@ant-design/icons";
 import { Dropdown, Input, message, Modal, Tooltip } from "antd";
 import {
@@ -21,7 +21,6 @@ import {
   postAnswer,
   postConfirm,
   postStop,
-  reconnectStream,
   setSessionModel,
   truncateSession,
   updateSession,
@@ -55,7 +54,8 @@ import type { SettingsTab } from "./components/SettingsModal";
 import AccountSettingsModal from "./components/AccountSettingsModal";
 import ChangePasswordModal from "./components/ChangePasswordModal";
 import Workbench from "./components/Workbench";
-import { useSessionRuntime } from "./useSessionRuntime";
+import { MAX_BACKGROUND, useSessionRuntime } from "./useSessionRuntime";
+import { closeSessionStream, setInterest, setStreamHandler } from "./sessionStream";
 import { useTheme, type ThemeMode } from "./theme";
 import Trajectory from "./components/Trajectory";
 import SkillManager from "./components/SkillManager";
@@ -181,8 +181,12 @@ export default function App({
   const rtApi = useSessionRuntime(session);
   const rt = rtApi.ensure(session);
   const { items, confirm, ask, traces } = rt;
-  // 「正在看」的会话有活跃 SSE 才算 busy：后台保活的会话不锁当前发送按钮
-  const busy = rt.streaming;
+  // 本页正在发送（POST 流）的会话：期间不把它放进共享流兴趣集，避免同一帧收两遍
+  const [posting, setPosting] = useState<string | null>(null);
+  // 本页订阅了实时事件的会话（当前会话优先 + 最多 MAX_BACKGROUND 个后台运行会话）
+  const [subscribed, setSubscribed] = useState<Set<string>>(() => new Set());
+  // 「正在看」的会话有实时来源（共享流订阅或本页发送）才算 busy
+  const busy = rt.streaming || posting === session;
   /** 当前会话的 items 写入器（沿用原来的 setItems 调用口径） */
   const setItems = (
     next: ChatItem[] | ((prev: ChatItem[]) => ChatItem[])
@@ -318,7 +322,9 @@ export default function App({
         setSessions(list);
         // 非搜索态才同步运行状态：搜索结果只是子集，不能拿它覆盖全局指示器
         if (!q) {
-          setRunningIds(new Set(list.filter((s) => s.running).map((s) => s.id)));
+          const ids = new Set(list.filter((s) => s.running).map((s) => s.id));
+          setRunningIds(ids);
+          rtApiRef.current.clearFinished(ids);
         }
       })
       .catch(() => {});
@@ -378,7 +384,10 @@ export default function App({
         .then((map) => {
           if (stopped) return;
           fails = 0;
-          setRunningIds(new Set(Object.keys(map)));
+          const ids = new Set(Object.keys(map));
+          setRunningIds(ids);
+          // 轮询确认已空闲：清掉「本页刚收过终态」挡板，下一轮任务才允许重新接入
+          rtApiRef.current.clearFinished(ids);
         })
         .catch(() => {
           if (stopped) return;
@@ -453,7 +462,8 @@ export default function App({
             r.loaded = true;
             r.curAsstId = asstId;
           }, true);
-          attachRun(session);
+          // 交给共享流接手：放回运行集合，订阅集合会带上它并拉一份快照
+          setRunningIds((prev) => new Set(prev).add(session));
         } else {
           rtApi.update(session, (r) => {
             r.items = base;
@@ -556,218 +566,286 @@ export default function App({
     }));
   };
 
-  /**
-   * 接入一条正在后台执行的任务：先收快照重建对话，再实时消费本轮事件。
-   * 场景：刷新页面 / 换标签页 / 断线回来 —— 执行一直在后端跑，这里只是重新「看」。
-   */
-  const attachRun = (sid: string) => {
-    const ac = rtApi.beginStream(sid);
-    const asstId = `r-${Date.now()}`;
-    // 是否收到本轮终态：没收到就断流（网络中断等）时先不自动重连，避免死循环
-    let gotTerminal = false;
-    setRunningIds((prev) => new Set(prev).add(sid));
-    reconnectStream(
-      sid,
-      (ev) => {
-        switch (ev.type) {
-          case "snapshot": {
-            syncServerNow(ev.server_now);
-            const base = toItems(ev.messages, ev.runs);
-            rtApi.update(sid, (r) => {
-              r.items = ev.running
-                ? [
-                    ...base,
-                    {
-                      id: asstId,
-                      role: "assistant",
-                      // 本轮还没结束：先补上已生成但未定稿的正文/思考，再接收后续帧
-                      content: ev.live?.content || "",
-                      reasoning: ev.live?.reasoning || undefined,
-                      status: "streaming",
-                      mode,
-                      ts: Date.now() / 1000,
-                      run: ev.run || undefined,
-                    },
-                  ]
-                : base;
-              r.loaded = true;
-              r.curAsstId = ev.running ? asstId : null;
-              if (!ev.running) r.finished = true;
-            }, true);
-            break;
-          }
-          case "delta":
-            patchAssistant(sid, asstId, (it) =>
-              ev.kind === "reasoning"
-                ? { ...it, reasoning: (it.reasoning || "") + ev.text }
-                : { ...it, content: it.content + ev.text }
-            );
-            break;
-          case "run_start":
-            syncServerNow(ev.server_now);
-            patchAssistant(sid, asstId, (it) => ({
-              ...it,
-              run: {
-                turn: ev.turn,
-                started_at: ev.started_at,
-                ended_at: null,
-                elapsed_ms: null,
-                status: "running",
-                actions: ev.actions,
-              },
-            }));
-            break;
-          case "tool_start":
-            patchAssistant(sid, asstId, (it) =>
-              pushAction(
-                { ...it, tools: [...(it.tools || []), { id: ev.id, name: ev.name, args: ev.args }] },
-                {
-                  ts: ev.ts ?? 0,
-                  kind: "tool",
-                  id: ev.id,
-                  name: ev.name,
-                  detail: briefArgs(ev.args),
-                  status: "running",
-                  dur_ms: null,
-                }
-              )
-            );
-            break;
-          case "tool_end":
-            patchAssistant(sid, asstId, (it) =>
-              updateAction(
-                {
-                  ...it,
-                  tools: (it.tools || []).map((t) =>
-                    t.id === ev.id ? { ...t, ok: ev.ok, sec: ev.sec, result: ev.result } : t
-                  ),
-                },
-                ev.id,
-                { status: ev.ok ? "ok" : "fail", dur_ms: ev.sec * 1000 }
-              )
-            );
-            break;
-          case "artifact":
-            // 工具把图片写进了工作区：气泡下方直接给缩略图，不用等模型自己引用
-            patchAssistant(sid, asstId, (it) => addArtifacts(it, ev.items));
-            break;
-          case "confirm_request":
-            rtApi.update(sid, (r) => {
-              r.confirm = { id: ev.id, tool: ev.tool, args: ev.args };
-            }, true);
-            break;
-          case "ask_request":
-            // 内联提问：卡片渲染在当前流式的助手气泡里，等用户点选/输入
-            rtApi.update(sid, (r) => {
-              r.ask = {
-                id: ev.id,
-                question: ev.question,
-                options: ev.options,
-                allowFreeText: ev.allow_free_text,
-                multi: ev.multi,
-              };
-            }, true);
-            break;
-          case "notice":
-            // 降级/重试提示进本轮时间线，不再单独占一条对话气泡
-            patchAssistant(sid, asstId, (it) =>
-              pushAction(it, {
-                ts: ev.ts ?? 0,
-                kind: "notice",
-                name: "降级提示",
-                detail: ev.text,
-                status: "info",
-                dur_ms: null,
-              })
-            );
-            break;
-          case "done":
-            // 与本页主动发送的 done 同口径：必须 endRun 定稿 run 状态，
-            // 否则「接入」视角的时间线会永远停在「执行中」走表（另一浏览器发起的回合）
-            gotTerminal = true;
-            patchAssistant(sid, asstId, (it) =>
-              endRun(
-                {
-                  ...it,
-                  status: "done",
-                  content: ev.answer || it.content,
-                  sec: ev.sec,
-                  usage: ev.usage,
-                },
-                "done",
-                ev.elapsed_ms
-              )
-            );
-            foldAsk(sid, asstId);
-            rtApi.update(sid, (r) => {
-              r.finished = true;
-            });
-            if (ev.title_pending) window.setTimeout(() => refreshSessions(), 5000);
-            break;
-          case "error":
-            gotTerminal = true;
-            patchAssistant(sid, asstId, (it) =>
-              endRun(
-                finalizeTools({ ...it, status: "error", error: ev.message, usage: ev.usage }),
-                "error",
-                ev.elapsed_ms
-              )
-            );
-            foldAsk(sid, asstId);
-            rtApi.update(sid, (r) => {
-              r.confirm = null;
-              r.finished = true;
-            }, true);
-            break;
-          case "cancelled":
-            gotTerminal = true;
-            patchAssistant(sid, asstId, (it) =>
-              finalizeTools({ ...it, status: "cancelled", reason: ev.reason, usage: ev.usage })
-            );
-            foldAsk(sid, asstId);
-            rtApi.update(sid, (r) => {
-              r.confirm = null;
-              r.finished = true;
-            }, true);
-            break;
-          default:
-            break;
-        }
-      },
-      ac.signal
-    )
-      .catch((err: unknown) => {
-        if (ac.signal.aborted) return;
-        message.warning(err instanceof Error ? err.message : "接入运行失败");
-      })
-      .finally(() => {
-        // 没收到终态就断流：先挡住自动重连（等 /api/running 清零后再允许接入下一轮），
-        // 否则 effect 会在 busy 回落时立刻反复重连
-        if (!gotTerminal && !ac.signal.aborted) {
-          rtApi.update(sid, (r) => {
-            r.finished = true;
-          });
-        }
-        rtApi.endStream(sid, ac);
-        refreshAll();
-        setTjReload((n) => n + 1);
-      });
+  /** 为一轮还没有气泡的实时事件补一个流式助手气泡（快照没赶上时的兜底） */
+  const asstFor = (sid: string): string => {
+    const cur = rtApi.ensure(sid).curAsstId;
+    if (cur) return cur;
+    const id = `r-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+    rtApi.update(sid, (r) => {
+      r.curAsstId = id;
+      r.loaded = true;
+      r.items = [
+        ...r.items,
+        { id, role: "assistant", content: "", status: "streaming", mode, ts: Date.now() / 1000 },
+      ];
+    }, true);
+    return id;
   };
 
-  // 打开一个正在后台跑的会话（刷新 / 换标签页 / 断线回来 / 超出保活上限被降级）→ 自动接入
-  useEffect(() => {
-    if (busy || rtApi.isStreaming(session)) return;
-    const cur = rtApi.ensure(session);
-    // 轮询确认已空闲：清掉「本页刚收过终态」标记，之后该会话再有后台任务才允许接入
-    if (!runningIds.has(session)) {
-      if (cur.finished) rtApi.update(session, (r) => { r.finished = false; });
-      return;
+  /** 本轮终态：挡住轮询未清时的重复接入，并让侧栏尽快摘掉「运行中」 */
+  const settleRun = (sid: string) => {
+    rtApi.update(sid, (r) => {
+      r.finished = true;
+    });
+    setRunningIds((prev) => {
+      if (!prev.has(sid)) return prev;
+      const next = new Set(prev);
+      next.delete(sid);
+      return next;
+    });
+    refreshAll();
+    setTjReload((n) => n + 1);
+  };
+
+  /**
+   * 实时帧的统一处理：后台共享流与本页 POST 流共用同一套逻辑。
+   * 返回 true 表示收到了本轮终态。
+   */
+  const handleFrame = (sid: string, ev: SSEEvent): boolean => {
+    switch (ev.type) {
+      case "snapshot": {
+        syncServerNow(ev.server_now);
+        const base = toItems(ev.messages, ev.runs);
+        const asstId = `r-${Date.now()}`;
+        rtApi.update(sid, (r) => {
+          r.items = ev.running
+            ? [
+                ...base,
+                {
+                  id: asstId,
+                  role: "assistant",
+                  // 本轮还没结束：先补上已生成但未定稿的正文/思考，再接收后续帧
+                  content: ev.live?.content || "",
+                  reasoning: ev.live?.reasoning || undefined,
+                  status: "streaming",
+                  mode,
+                  ts: Date.now() / 1000,
+                  run: ev.run || undefined,
+                },
+              ]
+            : base;
+          r.loaded = true;
+          r.curAsstId = ev.running ? asstId : null;
+          if (!ev.running) r.finished = true;
+        }, true);
+        return false;
+      }
+      case "delta": {
+        const asstId = asstFor(sid);
+        patchAssistant(sid, asstId, (it) =>
+          ev.kind === "reasoning"
+            ? { ...it, reasoning: (it.reasoning || "") + ev.text }
+            : { ...it, content: it.content + ev.text }
+        );
+        return false;
+      }
+      case "run_start": {
+        syncServerNow(ev.server_now);
+        const asstId = asstFor(sid);
+        patchAssistant(sid, asstId, (it) => ({
+          ...it,
+          run: {
+            turn: ev.turn,
+            started_at: ev.started_at,
+            ended_at: null,
+            elapsed_ms: null,
+            status: "running",
+            actions: ev.actions,
+          },
+        }));
+        return false;
+      }
+      case "tool_start": {
+        const asstId = asstFor(sid);
+        patchAssistant(sid, asstId, (it) =>
+          pushAction(
+            { ...it, tools: [...(it.tools || []), { id: ev.id, name: ev.name, args: ev.args }] },
+            {
+              ts: ev.ts ?? 0,
+              kind: "tool",
+              id: ev.id,
+              name: ev.name,
+              detail: briefArgs(ev.args),
+              status: "running",
+              dur_ms: null,
+            }
+          )
+        );
+        return false;
+      }
+      case "tool_end": {
+        const asstId = asstFor(sid);
+        patchAssistant(sid, asstId, (it) =>
+          updateAction(
+            {
+              ...it,
+              tools: (it.tools || []).map((t) =>
+                t.id === ev.id ? { ...t, ok: ev.ok, sec: ev.sec, result: ev.result } : t
+              ),
+            },
+            ev.id,
+            { status: ev.ok ? "ok" : "fail", dur_ms: ev.sec * 1000 }
+          )
+        );
+        return false;
+      }
+      case "artifact": {
+        const asstId = asstFor(sid);
+        patchAssistant(sid, asstId, (it) => addArtifacts(it, ev.items));
+        return false;
+      }
+      case "confirm_request":
+        rtApi.update(sid, (r) => {
+          r.confirm = { id: ev.id, tool: ev.tool, args: ev.args };
+        }, true);
+        return false;
+      case "ask_request":
+        // 内联提问：卡片渲染在当前流式的助手气泡里，等用户点选/输入
+        rtApi.update(sid, (r) => {
+          r.ask = {
+            id: ev.id,
+            question: ev.question,
+            options: ev.options,
+            allowFreeText: ev.allow_free_text,
+            multi: ev.multi,
+          };
+        }, true);
+        return false;
+      case "notice": {
+        const asstId = asstFor(sid);
+        // 降级/重试提示进本轮时间线，不再单独占一条对话气泡
+        patchAssistant(sid, asstId, (it) =>
+          pushAction(it, {
+            ts: ev.ts ?? 0,
+            kind: "notice",
+            name: "降级提示",
+            detail: ev.text,
+            status: "info",
+            dur_ms: null,
+          })
+        );
+        return false;
+      }
+      case "memory":
+        // 用户显式「请帮我记住 XXX」：写入成功/重复/被开关拦截都给一条轻提示
+        if (ev.ok) message.success(ev.duplicate ? "该内容已在用户画像中" : "已记入用户画像");
+        else message.warning(ev.error || "未记入用户画像");
+        return false;
+      case "done": {
+        const asstId = asstFor(sid);
+        // answer 是服务端合并后的最终回答，比逐帧拼接更可靠
+        patchAssistant(sid, asstId, (it) =>
+          endRun(
+            { ...it, status: "done", content: ev.answer || it.content, sec: ev.sec, usage: ev.usage },
+            "done",
+            ev.elapsed_ms
+          )
+        );
+        foldAsk(sid, asstId); // 若有未答的卡片，随本轮结束标记失效
+        settleRun(sid);
+        // 标题没被用户命名过：记忆提炼会在后台再补一个模型标题，晚于 done 落盘
+        if (ev.title_pending) window.setTimeout(() => refreshSessions(), 5000);
+        return true;
+      }
+      case "error": {
+        const asstId = asstFor(sid);
+        patchAssistant(sid, asstId, (it) =>
+          endRun(
+            finalizeTools({ ...it, status: "error", error: ev.message, usage: ev.usage }),
+            "error",
+            ev.elapsed_ms
+          )
+        );
+        foldAsk(sid, asstId);
+        rtApi.update(sid, (r) => {
+          r.confirm = null;
+        }, true);
+        settleRun(sid);
+        return true;
+      }
+      case "cancelled": {
+        // 串行路径取消时 agent 不发 tool_end：这里把挂着的 pending 节点收尾，避免永远转圈
+        const asstId = asstFor(sid);
+        patchAssistant(sid, asstId, (it) =>
+          endRun(
+            finalizeTools({ ...it, status: "cancelled", reason: ev.reason, usage: ev.usage }),
+            "cancelled",
+            ev.elapsed_ms
+          )
+        );
+        foldAsk(sid, asstId);
+        rtApi.update(sid, (r) => {
+          r.confirm = null;
+        }, true);
+        settleRun(sid);
+        return true;
+      }
+      case "trace":
+        // 事件流的实时镜像（可选）：累积给轨迹抽屉并排展示，落盘全量仍以兜底拉取为准
+        rtApi.update(sid, (r) => {
+          if (r.traces.length < 4000) r.traces = [...r.traces, ev.event];
+        });
+        return false;
+      default:
+        return false; // turn / llm_done：前端无需单独处理
     }
-    // 本页刚收到终态、轮询还没把 running 清掉：不要把刚跑完的这轮再接入一遍
-    if (cur.finished) return;
-    attachRun(session);
+  };
+
+  // 共享流只有一个处理器入口；用 ref 保证每次重渲染后闭包都是最新的
+  const frameRef = useRef<(ev: SSEEvent) => void>(() => {});
+  frameRef.current = (ev) => {
+    if (!ev.session) return;
+    // 已释放的会话（LRU/切走清理）收到残留帧也不重建，免得凭空长出一条消息
+    if (!rtApiRef.current.has(ev.session)) return;
+    handleFrame(ev.session, ev);
+  };
+  const rtApiRef = useRef(rtApi);
+  rtApiRef.current = rtApi;
+
+  useEffect(() => {
+    setStreamHandler((ev) => frameRef.current(ev));
+    return () => closeSessionStream();
+  }, []);
+
+  // 订阅集合：当前会话优先；其余后台运行会话按「已在保活」优先，最多 MAX_BACKGROUND 个
+  useEffect(() => {
+    setSubscribed((prev) => {
+      const curRunning = runningIds.has(session) && !rtApiRef.current.isFinished(session);
+      const cap = MAX_BACKGROUND + (curRunning ? 1 : 0);
+      const next = new Set<string>();
+      if (curRunning) next.add(session);
+      const others = [...runningIds]
+        .filter((sid) => sid !== session && !rtApiRef.current.isFinished(sid))
+        .sort((a, b) => Number(prev.has(b)) - Number(prev.has(a)));
+      for (const sid of others) {
+        if (next.size >= cap) break;
+        next.add(sid);
+      }
+      if (next.size === prev.size && [...next].every((sid) => prev.has(sid))) return prev;
+      return next;
+    });
+  }, [runningIds, session]);
+
+  // 兴趣集 = 订阅集合 - 本页正在发送的会话（POST 自己就是一条流，避免同一帧收两遍）
+  const interest = useMemo(() => {
+    const set = new Set(subscribed);
+    if (posting) set.delete(posting);
+    return [...set].sort();
+  }, [subscribed, posting]);
+  const interestKey = interest.join(",");
+  useEffect(() => {
+    setInterest(interest);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, runningIds, busy]);
+  }, [interestKey]);
+
+  // 运行时上的 streaming 标记 = 「本页有实时来源」（共享流订阅或正在 POST）
+  useEffect(() => {
+    const set = new Set(subscribed);
+    if (posting) set.add(posting);
+    for (const sid of set) rtApi.ensure(sid);
+    rtApi.syncStreaming(set);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subscribed, posting]);
 
   /** 用户在内联卡片上作答：回传服务端并折叠卡片 */
   const handleAnswerAsk = (answer: string) => {
@@ -850,10 +928,14 @@ export default function App({
     rtApi.update(sid, (r) => {
       r.traces = []; // 新一轮 run：清掉上一轮的实时镜像
     });
-    const ac = rtApi.beginStream(sid);
-    // 409 分支把收尾交给「接入」流，避免 finally 又把 busy 打回空闲
+    const ac = new AbortController();
+    // 本页发送期间：该会话由这条 POST 流负责，不进共享流兴趣集；但 streaming 标记
+    // 要立刻打开，否则切走会话时会被当成空闲运行时释放掉
+    rtApi.setStreaming(sid, true);
+    setPosting(sid);
+    // 409 分支把收尾交给共享流，避免 finally 又把 busy 打回空闲
     let handedToAttach = false;
-    // 是否收到本轮终态：没收到就断流时不自动重连（同 attachRun）
+    // 是否收到本轮终态：没收到就断流时不自动重连（同共享流的 finished 挡板）
     let gotTerminal = false;
 
     chatStream(
@@ -1046,21 +1128,23 @@ export default function App({
             r.finished = false;
           });
           message.info("该对话正在后台执行，已接入实时输出");
-          attachRun(sid);
+          // 交给共享流接管：把它放回运行集合，订阅集合会带上它并拉快照
+          setRunningIds((prev) => new Set(prev).add(sid));
           return;
         }
         patchAssistant(sid, asstId, (it) => ({ ...it, status: "error", error: msg }));
         foldAsk(sid, asstId);
       })
       .finally(() => {
+        // POST 流结束：交还共享流（若该会话仍在运行，订阅集合会把它接回去）
+        setPosting(null);
         if (handedToAttach) return;
         if (!gotTerminal && !ac.signal.aborted) {
-          // 流意外中断：先挡住自动重连，等 /api/running 清零后再允许接入下一轮
+          // 流意外中断：先挡住重复接入，等 /api/running 清零后再允许接入下一轮
           rtApi.update(sid, (r) => {
             r.finished = true;
           });
         }
-        rtApi.endStream(sid, ac);
         refreshAll(); // 对话结束后刷新列表（标题/时间/计数可能变了）
         setTjReload((n) => n + 1); // 运行结束：让轨迹抽屉拉一次磁盘全量兜底
       });
