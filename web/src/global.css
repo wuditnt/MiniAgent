@@ -1590,6 +1590,49 @@ body.sidebar-resizing .sidebar-resizer::after {
   }
 }
 
+/* 后台会话在等确认/回答：侧栏标题后的红点 */
+.session-attention-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ff4d4f;
+}
+
+/* 顶栏下方的提示横幅：点击切到那个等待中的会话 */
+.session-attention-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 24px;
+  background: var(--bg-fff2f0);
+  border-bottom: 1px solid rgba(255, 77, 79, 0.25);
+  color: #cf1322;
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.session-attention-banner:hover {
+  background: var(--bg-fff1f0);
+}
+
+.session-attention-banner .session-attention-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-attention-action {
+  flex: none;
+  margin-left: auto;
+  color: #1677ff;
+  font-weight: 500;
+}
+
 /* 会话项右侧「时间 ↔ 快捷工具」共用一个槽位：默认只显示相对时间；
    悬停时时间淡出、快捷工具在同一位置淡入（绝对定位覆盖，默认不占位，
    把原先常驻 3 个图标的宽度让给标题显示更多文字）。 */

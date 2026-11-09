@@ -64,6 +64,8 @@ interface Props {
   accountMenu?: ReactNode;
   /** 正在执行的会话 id 集合：有则在该会话标题前显示呼吸圆点 */
   runningIds?: Set<string>;
+  /** 后台在等用户确认/回答的会话 id 集合：标题后显示红点提示 */
+  attentionIds?: Set<string>;
 }
 
 /** 把命中的词用 <mark> 包起来（多词 AND，命中片段全部高亮） */
@@ -158,6 +160,7 @@ export default function Sidebar({
   activeView,
   accountMenu,
   runningIds,
+  attentionIds,
 }: Props) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -429,6 +432,13 @@ export default function Sidebar({
                                   <div className="session-item-title">
                                     {highlight(s.title, terms)}
                                   </div>
+                                  {attentionIds?.has(s.id) && (
+                                    <span
+                                      className="session-attention-dot"
+                                      aria-label="等待确认"
+                                      title="该对话正在等待你的确认/回答"
+                                    />
+                                  )}
                                 </div>
                               )}
                               {s.snippet && editId !== s.id ? (

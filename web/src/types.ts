@@ -103,6 +103,8 @@ export type SSEEvent =
       run?: RunInfo | null;
       server_now?: number;
       running: boolean;
+      /** 已经流式生成、但还没定稿的正文/思考（重连时补进流式气泡） */
+      live?: { content: string; reasoning: string };
     };
 
 /** 轨迹事件的来源（决定 Trajectory 视图的着色） */

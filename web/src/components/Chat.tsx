@@ -560,6 +560,13 @@ interface Props {
   /** 草稿会话尚未落盘：勾选只存前端，首条消息时随请求保存 */
   connectorsDraft?: boolean;
   onConnectorsChange?: (list: string[] | null) => void;
+  /** 切回本会话时要恢复的滚动位置（0 = 默认贴底） */
+  initialScrollTop?: number;
+  /** 滚动位置变化：App 按会话记忆，切走再切回可还原 */
+  onScrollTop?: (top: number) => void;
+  /** 本会话的输入草稿：切会话时恢复，未发的字不会丢 */
+  draft?: string;
+  onDraftChange?: (text: string) => void;
 }
 
 /** 推理等级的展示文案（三档：low / high / max） */
@@ -921,8 +928,12 @@ export default function Chat({
   connectors,
   connectorsDraft,
   onConnectorsChange,
+  initialScrollTop,
+  onScrollTop,
+  draft,
+  onDraftChange,
 }: Props) {
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState(draft ?? "");
   // 已展开的长用户气泡：仅当前会话内有效，切会话即清空（不持久化）
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const knownUserIds = useRef<Set<string>>(new Set());
@@ -1138,6 +1149,7 @@ export default function Chat({
   // 切换会话：展开状态只在当前会话内有效，切走再切回一律恢复折叠
   useEffect(() => {
     setExpandedIds(new Set());
+    setVisibleCount(INITIAL_VISIBLE);
     // 当前列表里的用户消息算作「历史」：回放时不自动展开
     knownUserIds.current = new Set(
       items.filter((it) => it.role === "user").map((it) => it.id)
@@ -1145,6 +1157,22 @@ export default function Chat({
     // 只跟随会话切换；items 此处可能是切换前的旧值，增量交给下一个 effect
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
+
+  // 切会话时恢复该会话的输入草稿（未发送的文字不会因为切走而丢）
+  const lastDraftSid = useRef(sessionId);
+  useLayoutEffect(() => {
+    if (lastDraftSid.current === sessionId) return;
+    lastDraftSid.current = sessionId;
+    setInput(draft ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  // 输入变化回写给 App：按会话记忆草稿，只写 ref 不触发重渲染
+  const draftCb = useRef(onDraftChange);
+  draftCb.current = onDraftChange;
+  useEffect(() => {
+    draftCb.current?.(input);
+  }, [input]);
 
   // 本次会话里刚发出的长消息默认展开（自己能看到刚发的内容）；历史回放保持折叠
   useEffect(() => {
@@ -1238,6 +1266,7 @@ export default function Chat({
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
+    onScrollTop?.(el.scrollTop);
     // 用户手动上翻 → 暂停自动跟随；滚回底部附近 → 恢复
     stick.current = atBottom(el);
     const far = el.scrollHeight - el.scrollTop - el.clientHeight > JUMP_THRESHOLD;
@@ -1259,6 +1288,24 @@ export default function Chat({
     if (tailRef.current) tailRef.current.style.height = "0px";
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   };
+
+  // 切回会话时恢复上次的滚动位置（保活与 history 两条路径都走这里）
+  const lastScrollSid = useRef(sessionId);
+  useLayoutEffect(() => {
+    if (lastScrollSid.current === sessionId) return;
+    lastScrollSid.current = sessionId;
+    const top = initialScrollTop ?? 0;
+    // 等这一帧的消息与高度就绪后再定位，避免被贴底逻辑覆盖
+    requestAnimationFrame(() => {
+      const el = scrollRef.current;
+      if (!el) return;
+      el.scrollTop = Math.min(Math.max(0, top), Math.max(0, el.scrollHeight - el.clientHeight));
+      stick.current = atBottom(el);
+      const far = el.scrollHeight - el.scrollTop - el.clientHeight > JUMP_THRESHOLD;
+      setShowJump((prev) => (prev === far ? prev : far));
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
 
   // 模型子菜单：按服务商分组，组名用服务商展示名；组内条目用模型显示名称
   const modelGroups: { name: string; children: { key: string; label: React.ReactNode }[] }[] = [];

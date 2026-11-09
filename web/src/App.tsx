@@ -32,18 +32,15 @@ import type {
   ApprovalMode,
   Artifact,
   ChatItem,
-  ConfirmInfo,
   HistoryMessage,
   Mode,
   ModelProvider,
-  PendingAsk,
   ReasoningLevel,
   RunAction,
   RunInfo,
   SessionItem,
   SSEEvent,
   SkillItem,
-  TraceEvent,
   User,
   WorkspaceItem,
 } from "./types";
@@ -58,6 +55,7 @@ import type { SettingsTab } from "./components/SettingsModal";
 import AccountSettingsModal from "./components/AccountSettingsModal";
 import ChangePasswordModal from "./components/ChangePasswordModal";
 import Workbench from "./components/Workbench";
+import { useSessionRuntime } from "./useSessionRuntime";
 import { useTheme, type ThemeMode } from "./theme";
 import Trajectory from "./components/Trajectory";
 import SkillManager from "./components/SkillManager";
@@ -179,21 +177,36 @@ export default function App({
     return v === "auto" || v === "full" ? v : "ask";
   });
   const [state, setState] = useState<AgentState | null>(null);
-  const [items, setItems] = useState<ChatItem[]>([]);
-  // 本页正在「看」的会话（发送或接入）。同一面板一次只消费一条流：
-  // 切走会断开这条流（后端任务照常跑），回来时再接入快照。
-  // 用它按会话推导 busy —— A 会话在跑不会把 B 的发送按钮也锁成停止态。
-  const [activeSid, setActiveSid] = useState<string | null>(null);
-  const busy = activeSid === session;
+  // 会话保活：每个会话一份运行时，切走运行中的会话不销毁，切回直接渲染
+  const rtApi = useSessionRuntime(session);
+  const rt = rtApi.ensure(session);
+  const { items, confirm, ask, traces } = rt;
+  // 「正在看」的会话有活跃 SSE 才算 busy：后台保活的会话不锁当前发送按钮
+  const busy = rt.streaming;
+  /** 当前会话的 items 写入器（沿用原来的 setItems 调用口径） */
+  const setItems = (
+    next: ChatItem[] | ((prev: ChatItem[]) => ChatItem[])
+  ) =>
+    rtApi.update(session, (r) => {
+      r.items = typeof next === "function" ? next(r.items) : next;
+      r.loaded = true;
+    });
+  /** 按消息 id 打补丁：后台会话的流也写到自己那份运行时里 */
+  const patchAssistant = (
+    sid: string,
+    id: string,
+    patch: (it: ChatItem) => ChatItem
+  ) =>
+    rtApi.update(sid, (r) => {
+      r.items = r.items.map((it) => (it.id === id ? patch(it) : it));
+      r.loaded = true;
+    });
+  // 后台会话正在等确认/回答：侧栏红点 + 顶部横幅的提示数据源
+  const attentionRts = rtApi.attention;
+  const attentionIds = new Set(attentionRts.map((r) => r.sid));
   // 「编辑重发」的目标消息 id：点击编辑只进入编辑态、不删任何内容，
-  // 真正替换旧轮次发生在用户再次发送时（见 send）。
+  // 真正替换旧轮次发生在用户再次发送时（见 send）；切会话时重置。
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [confirm, setConfirm] = useState<ConfirmInfo | null>(null);
-  // 内联提问卡片：正在等用户作答的 ask_user 提问（回答/失效后折叠进助手气泡）
-  const [ask, setAsk] = useState<PendingAsk | null>(null);
-  const askRef = useRef<PendingAsk | null>(null);
-  /** 当前正在流式的助手消息 id：问答卡片要折回它所在的这条气泡 */
-  const curAsstRef = useRef<string | null>(null);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceItem[]>([]);
   // 模型单选菜单的数据源（/api/models）；模型 chip 已迁到输入框工具栏
@@ -272,8 +285,6 @@ export default function App({
   const [tjFocusTurn, setTjFocusTurn] = useState<number | null>(null);
   // 每次点击「查看运行轨迹」都自增：同一轮重复点击也能强制重新展开并滚动
   const [tjFocusNonce, setTjFocusNonce] = useState(0);
-  // 当前 run 的实时镜像事件（trace 帧），打开抽屉时并入时间线
-  const [traces, setTraces] = useState<TraceEvent[]>([]);
   // 每次运行结束自增，通知 Trajectory 做一次磁盘全量兜底拉取
   const [tjReload, setTjReload] = useState(0);
   const [statsOpen, setStatsOpen] = useState(false);
@@ -283,14 +294,11 @@ export default function App({
   // 搜索命中后要定位闪烁的消息 id
   const [focus, setFocus] = useState<{ id: string; nonce: number } | null>(null);
   const pendingHit = useRef<number | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
   // 正在执行的会话 id 集合（侧栏「运行中」指示器数据源）；
   // 发消息时本地乐观加一个，之后以 /api/running 轮询结果为准
   const [runningIds, setRunningIds] = useState<Set<string>>(() => new Set());
-  /** 正在「接入」后台任务的流（与发起新消息的 abortRef 相互独立） */
-  const attachedRef = useRef<AbortController | null>(null);
-  /** 刚在本页收到终态的会话：避免轮询还没清掉 running 时又自动接入一遍 */
-  const finishedSidRef = useRef<string | null>(null);
+  /** 上一个会话 id：切走时保存滚动/草稿并决定是否释放运行时 */
+  const prevSidRef = useRef(session);
 
   // 开关状态持久化（逐消息生效：send 时读取当前 state，不依赖这里的时序）
   useEffect(() => {
@@ -395,28 +403,70 @@ export default function App({
     };
   }, []);
 
-  // 切换会话时重新加载历史
+  // 切换会话：运行中的会话保活（SSE 不断），非运行的释放数据、只留滚动与草稿
   useEffect(() => {
     localStorage.setItem(SESSION_KEY, session);
-    // 换会话就断开旧的「接入」流：后台任务不受影响，只是这边不看了
-    attachedRef.current?.abort();
-    attachedRef.current = null;
-    setItems([]);
-    setEditingId(null);   // 切换会话时退出编辑态，避免把编辑目标带到别的会话
+    const prev = prevSidRef.current;
+    if (prev !== session) {
+      prevSidRef.current = session;
+      setEditingId(null);   // 切换会话时退出编辑态，避免把编辑目标带到别的会话
+      const leaving = rtApi.ensure(prev);
+      if (!leaving.streaming) rtApi.release(prev);
+    }
+    rtApi.prune(session);
+    const cur = rtApi.ensure(session);
+    // 已有数据（保活中的运行会话 / 刚加载过）：直接渲染，不重新拉历史
+    if (cur.loaded || cur.streaming) {
+      const hit = pendingHit.current;
+      pendingHit.current = null;
+      if (hit != null && hit >= 0 && hit < cur.items.length) jumpToHit(hit);
+      return;
+    }
     fetchHistory(session)
       .then((h) => {
+        // 切走后又切回来了才有必要写入；流已抢先建立时交给 snapshot
+        if (prevSidRef.current !== session || rtApi.isStreaming(session)) return;
         syncServerNow(h.server_now);
-        setItems(toItems(h.messages, h.runs));
         // 若本次是从搜索结果点进来的，定位到命中那条消息并闪烁
         const hit = pendingHit.current;
         pendingHit.current = null;
+        const base = toItems(h.messages, h.runs);
+        if (h.running && h.run) {
+          // 后台还在跑这一轮：先用 history 里的草稿把已生成内容补出来，
+          // 再接入 SSE 续播增量 —— 不必等 3s 一次的 /api/running 轮询
+          const asstId = `r-${Date.now()}`;
+          const run: RunInfo = h.run;
+          rtApi.update(session, (r) => {
+            r.items = [
+              ...base,
+              {
+                id: asstId,
+                role: "assistant",
+                content: h.live?.content || "",
+                reasoning: h.live?.reasoning || undefined,
+                status: "streaming",
+                mode,
+                ts: Date.now() / 1000,
+                run,
+              },
+            ];
+            r.loaded = true;
+            r.curAsstId = asstId;
+          }, true);
+          attachRun(session);
+        } else {
+          rtApi.update(session, (r) => {
+            r.items = base;
+            r.loaded = true;
+            r.curAsstId = null;
+          }, true);
+        }
         if (hit != null && hit >= 0 && hit < h.messages.length) {
           jumpToHit(hit);
         }
       })
       .catch(() => {});
   }, [session]);
-  useEffect(() => () => abortRef.current?.abort(), []);
 
   // 快捷键
   useEffect(() => {
@@ -471,9 +521,6 @@ export default function App({
     }
   }, [draftWs, session, sessions]);
 
-  const patchAssistant = (id: string, patch: (it: ChatItem) => ChatItem) =>
-    setItems((prev) => prev.map((it) => (it.id === id ? patch(it) : it)));
-
   /** 追加工具产出的图片：同一路径只保留一次（多个工具可能重复报告同一个文件） */
   const addArtifacts = (it: ChatItem, items: Artifact[]): ChatItem => {
     const known = new Set((it.artifacts || []).map((a) => a.path));
@@ -490,12 +537,13 @@ export default function App({
   });
 
   /** 把待答卡片折叠进它所在的助手气泡；无答案（停止/断连）标记为失效 */
-  const foldAsk = (asstId: string, answer?: string) => {
-    const cur = askRef.current;
+  const foldAsk = (sid: string, asstId: string, answer?: string) => {
+    const cur = rtApi.ensure(sid).ask;
     if (!cur) return;
-    askRef.current = null;
-    setAsk(null);
-    patchAssistant(asstId, (it) => ({
+    rtApi.update(sid, (r) => {
+      r.ask = null;
+    }, true);
+    patchAssistant(sid, asstId, (it) => ({
       ...it,
       ask: {
         question: cur.question,
@@ -513,11 +561,10 @@ export default function App({
    * 场景：刷新页面 / 换标签页 / 断线回来 —— 执行一直在后端跑，这里只是重新「看」。
    */
   const attachRun = (sid: string) => {
-    attachedRef.current?.abort();
-    const ac = new AbortController();
-    attachedRef.current = ac;
+    const ac = rtApi.beginStream(sid);
     const asstId = `r-${Date.now()}`;
-    setActiveSid(sid);
+    // 是否收到本轮终态：没收到就断流（网络中断等）时先不自动重连，避免死循环
+    let gotTerminal = false;
     setRunningIds((prev) => new Set(prev).add(sid));
     reconnectStream(
       sid,
@@ -526,28 +573,31 @@ export default function App({
           case "snapshot": {
             syncServerNow(ev.server_now);
             const base = toItems(ev.messages, ev.runs);
-            if (ev.running) {
-              // 本轮还没结束：快照之后再挂一条流式气泡接收后续帧（带上已有时间线）
-              setItems([
-                ...base,
-                {
-                  id: asstId,
-                  role: "assistant",
-                  content: "",
-                  status: "streaming",
-                  mode,
-                  ts: Date.now() / 1000,
-                  run: ev.run || undefined,
-                },
-              ]);
-              curAsstRef.current = asstId;
-            } else {
-              setItems(base);
-            }
+            rtApi.update(sid, (r) => {
+              r.items = ev.running
+                ? [
+                    ...base,
+                    {
+                      id: asstId,
+                      role: "assistant",
+                      // 本轮还没结束：先补上已生成但未定稿的正文/思考，再接收后续帧
+                      content: ev.live?.content || "",
+                      reasoning: ev.live?.reasoning || undefined,
+                      status: "streaming",
+                      mode,
+                      ts: Date.now() / 1000,
+                      run: ev.run || undefined,
+                    },
+                  ]
+                : base;
+              r.loaded = true;
+              r.curAsstId = ev.running ? asstId : null;
+              if (!ev.running) r.finished = true;
+            }, true);
             break;
           }
           case "delta":
-            patchAssistant(asstId, (it) =>
+            patchAssistant(sid, asstId, (it) =>
               ev.kind === "reasoning"
                 ? { ...it, reasoning: (it.reasoning || "") + ev.text }
                 : { ...it, content: it.content + ev.text }
@@ -555,7 +605,7 @@ export default function App({
             break;
           case "run_start":
             syncServerNow(ev.server_now);
-            patchAssistant(asstId, (it) => ({
+            patchAssistant(sid, asstId, (it) => ({
               ...it,
               run: {
                 turn: ev.turn,
@@ -568,7 +618,7 @@ export default function App({
             }));
             break;
           case "tool_start":
-            patchAssistant(asstId, (it) =>
+            patchAssistant(sid, asstId, (it) =>
               pushAction(
                 { ...it, tools: [...(it.tools || []), { id: ev.id, name: ev.name, args: ev.args }] },
                 {
@@ -584,7 +634,7 @@ export default function App({
             );
             break;
           case "tool_end":
-            patchAssistant(asstId, (it) =>
+            patchAssistant(sid, asstId, (it) =>
               updateAction(
                 {
                   ...it,
@@ -599,24 +649,28 @@ export default function App({
             break;
           case "artifact":
             // 工具把图片写进了工作区：气泡下方直接给缩略图，不用等模型自己引用
-            patchAssistant(asstId, (it) => addArtifacts(it, ev.items));
+            patchAssistant(sid, asstId, (it) => addArtifacts(it, ev.items));
             break;
           case "confirm_request":
-            setConfirm({ id: ev.id, tool: ev.tool, args: ev.args });
+            rtApi.update(sid, (r) => {
+              r.confirm = { id: ev.id, tool: ev.tool, args: ev.args };
+            }, true);
             break;
           case "ask_request":
-            askRef.current = {
-              id: ev.id,
-              question: ev.question,
-              options: ev.options,
-              allowFreeText: ev.allow_free_text,
-              multi: ev.multi,
-            };
-            setAsk(askRef.current);
+            // 内联提问：卡片渲染在当前流式的助手气泡里，等用户点选/输入
+            rtApi.update(sid, (r) => {
+              r.ask = {
+                id: ev.id,
+                question: ev.question,
+                options: ev.options,
+                allowFreeText: ev.allow_free_text,
+                multi: ev.multi,
+              };
+            }, true);
             break;
           case "notice":
             // 降级/重试提示进本轮时间线，不再单独占一条对话气泡
-            patchAssistant(asstId, (it) =>
+            patchAssistant(sid, asstId, (it) =>
               pushAction(it, {
                 ts: ev.ts ?? 0,
                 kind: "notice",
@@ -630,7 +684,8 @@ export default function App({
           case "done":
             // 与本页主动发送的 done 同口径：必须 endRun 定稿 run 状态，
             // 否则「接入」视角的时间线会永远停在「执行中」走表（另一浏览器发起的回合）
-            patchAssistant(asstId, (it) =>
+            gotTerminal = true;
+            patchAssistant(sid, asstId, (it) =>
               endRun(
                 {
                   ...it,
@@ -643,29 +698,37 @@ export default function App({
                 ev.elapsed_ms
               )
             );
-            foldAsk(asstId);
-            finishedSidRef.current = sid;
+            foldAsk(sid, asstId);
+            rtApi.update(sid, (r) => {
+              r.finished = true;
+            });
             if (ev.title_pending) window.setTimeout(() => refreshSessions(), 5000);
             break;
           case "error":
-            patchAssistant(asstId, (it) =>
+            gotTerminal = true;
+            patchAssistant(sid, asstId, (it) =>
               endRun(
                 finalizeTools({ ...it, status: "error", error: ev.message, usage: ev.usage }),
                 "error",
                 ev.elapsed_ms
               )
             );
-            foldAsk(asstId);
-            setConfirm(null);
-            finishedSidRef.current = sid;
+            foldAsk(sid, asstId);
+            rtApi.update(sid, (r) => {
+              r.confirm = null;
+              r.finished = true;
+            }, true);
             break;
           case "cancelled":
-            patchAssistant(asstId, (it) =>
+            gotTerminal = true;
+            patchAssistant(sid, asstId, (it) =>
               finalizeTools({ ...it, status: "cancelled", reason: ev.reason, usage: ev.usage })
             );
-            foldAsk(asstId);
-            setConfirm(null);
-            finishedSidRef.current = sid;
+            foldAsk(sid, asstId);
+            rtApi.update(sid, (r) => {
+              r.confirm = null;
+              r.finished = true;
+            }, true);
             break;
           default:
             break;
@@ -678,58 +741,44 @@ export default function App({
         message.warning(err instanceof Error ? err.message : "接入运行失败");
       })
       .finally(() => {
-        if (attachedRef.current === ac) attachedRef.current = null;
-        setActiveSid((cur) => (cur === sid ? null : cur));
+        // 没收到终态就断流：先挡住自动重连（等 /api/running 清零后再允许接入下一轮），
+        // 否则 effect 会在 busy 回落时立刻反复重连
+        if (!gotTerminal && !ac.signal.aborted) {
+          rtApi.update(sid, (r) => {
+            r.finished = true;
+          });
+        }
+        rtApi.endStream(sid, ac);
         refreshAll();
         setTjReload((n) => n + 1);
       });
   };
 
-  // 切换会话：断开上一条「看」的流，后端任务不受影响（仍由 /api/running 指示）。
-  // 必须放在自动接入之前：先清掉 attachedRef，切过去的会话才能立即接入。
-  const prevSidRef = useRef(session);
+  // 打开一个正在后台跑的会话（刷新 / 换标签页 / 断线回来 / 超出保活上限被降级）→ 自动接入
   useEffect(() => {
-    if (prevSidRef.current === session) return;
-    prevSidRef.current = session;
-    abortRef.current?.abort();
-    abortRef.current = null;
-    attachedRef.current?.abort();
-    attachedRef.current = null;
-    setActiveSid(null);
-    // 上一条流遗留的确认/提问卡片属于旧会话，不能带到新会话的界面里
-    setConfirm(null);
-    askRef.current = null;
-    setAsk(null);
-    curAsstRef.current = null;
-    setTraces([]);
-  }, [session]);
-
-  // 打开一个正在后台跑的会话（刷新 / 换标签页 / 断线回来）→ 自动接入实时输出
-  useEffect(() => {
-    if (busy || attachedRef.current) return;
-    // 轮询确认已空闲：清掉「本页刚收过终态」标记，之后该会话再有后台任务才允许接入；
-    // 必须放在 finishedSid 挡板之前，否则标记永远清不掉，后续真任务也接不上
+    if (busy || rtApi.isStreaming(session)) return;
+    const cur = rtApi.ensure(session);
+    // 轮询确认已空闲：清掉「本页刚收过终态」标记，之后该会话再有后台任务才允许接入
     if (!runningIds.has(session)) {
-      if (finishedSidRef.current === session) finishedSidRef.current = null;
+      if (cur.finished) rtApi.update(session, (r) => { r.finished = false; });
       return;
     }
     // 本页刚收到终态、轮询还没把 running 清掉：不要把刚跑完的这轮再接入一遍
-    if (finishedSidRef.current === session) return;
+    if (cur.finished) return;
     attachRun(session);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, runningIds, busy]);
 
   /** 用户在内联卡片上作答：回传服务端并折叠卡片 */
   const handleAnswerAsk = (answer: string) => {
-    const cur = askRef.current;
+    const cur = ask;
     if (!cur) return;
     postAnswer(cur.id, answer, session).catch(() => {});
-    const asstId = curAsstRef.current;
+    const asstId = rt.curAsstId;
     if (asstId) {
-      foldAsk(asstId, answer);
+      foldAsk(session, asstId, answer);
     } else {
-      askRef.current = null;
-      setAsk(null);
+      rtApi.update(session, (r) => { r.ask = null; }, true);
     }
   };
 
@@ -737,7 +786,7 @@ export default function App({
   const handleAnswerConfirm = (approve: boolean) => {
     if (!confirm) return;
     postConfirm(confirm.id, approve, session).catch(() => {});
-    setConfirm(null);
+    rtApi.update(session, (r) => { r.confirm = null; }, true);
   };
 
   /** 发送一条消息：乐观插入两条气泡，然后消费 SSE 事件流增量更新 */
@@ -749,8 +798,11 @@ export default function App({
     const msg = text.trim();
     if (!msg && !(attachments && attachments.length)) return;
     if (busy) return;
+    const sid = session;
     const asstId = `a-${Date.now()}`;
-    curAsstRef.current = asstId;
+    rtApi.update(sid, (r) => {
+      r.curAsstId = asstId;
+    });
     const sentAt = Date.now() / 1000;
     // 技能在消息里用不可见字符包裹：气泡只显示名字
     const display = stripSkillMarks(msg).trim();
@@ -794,14 +846,15 @@ export default function App({
     } else {
       setItems((prev) => [...prev, userItem, asstItem]);
     }
-    setActiveSid(session);
-    // 乐观点亮侧栏指示器：不必等下一轮轮询，发出去这一刻就显示「运行中」
     setRunningIds((prev) => new Set(prev).add(session));
-    setTraces([]); // 新一轮 run：清掉上一轮的实时镜像
-    const ac = new AbortController();
-    abortRef.current = ac;
+    rtApi.update(sid, (r) => {
+      r.traces = []; // 新一轮 run：清掉上一轮的实时镜像
+    });
+    const ac = rtApi.beginStream(sid);
     // 409 分支把收尾交给「接入」流，避免 finally 又把 busy 打回空闲
     let handedToAttach = false;
+    // 是否收到本轮终态：没收到就断流时不自动重连（同 attachRun）
+    let gotTerminal = false;
 
     chatStream(
       {
@@ -815,7 +868,7 @@ export default function App({
       (ev: SSEEvent) => {
         switch (ev.type) {
           case "delta":
-            patchAssistant(asstId, (it) =>
+            patchAssistant(sid, asstId, (it) =>
               ev.kind === "reasoning"
                 ? { ...it, reasoning: (it.reasoning || "") + ev.text }
                 : { ...it, content: it.content + ev.text }
@@ -823,7 +876,7 @@ export default function App({
             break;
           case "run_start":
             syncServerNow(ev.server_now);
-            patchAssistant(asstId, (it) => ({
+            patchAssistant(sid, asstId, (it) => ({
               ...it,
               run: {
                 turn: ev.turn,
@@ -836,7 +889,7 @@ export default function App({
             }));
             break;
           case "tool_start":
-            patchAssistant(asstId, (it) =>
+            patchAssistant(sid, asstId, (it) =>
               pushAction(
                 { ...it, tools: [...(it.tools || []), { id: ev.id, name: ev.name, args: ev.args }] },
                 {
@@ -852,7 +905,7 @@ export default function App({
             );
             break;
           case "tool_end":
-            patchAssistant(asstId, (it) =>
+            patchAssistant(sid, asstId, (it) =>
               updateAction(
                 {
                   ...it,
@@ -867,25 +920,29 @@ export default function App({
             break;
           case "artifact":
             // 工具把图片写进了工作区：气泡下方直接给缩略图，不用等模型自己引用
-            patchAssistant(asstId, (it) => addArtifacts(it, ev.items));
+            patchAssistant(sid, asstId, (it) => addArtifacts(it, ev.items));
             break;
           case "confirm_request":
-            setConfirm({ id: ev.id, tool: ev.tool, args: ev.args });
+            rtApi.update(sid, (r) => {
+              r.confirm = { id: ev.id, tool: ev.tool, args: ev.args };
+            }, true);
             break;
           case "ask_request":
             // 内联提问：卡片渲染在当前流式的助手气泡里，等用户点选/输入
-            askRef.current = {
-              id: ev.id,
-              question: ev.question,
-              options: ev.options,
-              allowFreeText: ev.allow_free_text,
-              multi: ev.multi,
-            };
-            setAsk(askRef.current);
+            // 内联提问：卡片渲染在当前流式的助手气泡里，等用户点选/输入
+            rtApi.update(sid, (r) => {
+              r.ask = {
+                id: ev.id,
+                question: ev.question,
+                options: ev.options,
+                allowFreeText: ev.allow_free_text,
+                multi: ev.multi,
+              };
+            }, true);
             break;
           case "notice":
             // 降级/重试提示进本轮时间线，不再单独占一条对话气泡
-            patchAssistant(asstId, (it) =>
+            patchAssistant(sid, asstId, (it) =>
               pushAction(it, {
                 ts: ev.ts ?? 0,
                 kind: "notice",
@@ -906,7 +963,8 @@ export default function App({
             break;
           case "done":
             // answer 是服务端合并后的最终回答，比逐帧拼接更可靠
-            patchAssistant(asstId, (it) =>
+            gotTerminal = true;
+            patchAssistant(sid, asstId, (it) =>
               endRun(
                 {
                   ...it,
@@ -919,42 +977,52 @@ export default function App({
                 ev.elapsed_ms
               )
             );
-            foldAsk(asstId); // 若有未答的卡片，随本轮结束标记失效
+            foldAsk(sid, asstId); // 若有未答的卡片，随本轮结束标记失效
             // 本页刚收到终态：挡住自动接入 effect 在轮询还没清掉 running 时
             // 把这轮再 attach 一遍（snapshot 会整份重建 items，滚动锚点随之失效）
-            finishedSidRef.current = session;
+            rtApi.update(sid, (r) => {
+              r.finished = true;
+            });
             // 标题没被用户命名过：记忆提炼会在后台再补一个模型标题，但它晚于
             // done 才落盘（那时这条 SSE 连接已经关了），所以稍后自己再拉一次列表
             if (ev.title_pending) window.setTimeout(() => refreshSessions(), 5000);
             break;
           case "error":
-            patchAssistant(asstId, (it) =>
+            gotTerminal = true;
+            patchAssistant(sid, asstId, (it) =>
               endRun(
                 finalizeTools({ ...it, status: "error", error: ev.message, usage: ev.usage }),
                 "error",
                 ev.elapsed_ms
               )
             );
-            foldAsk(asstId);
-            setConfirm(null);
-            finishedSidRef.current = session;
+            foldAsk(sid, asstId);
+            rtApi.update(sid, (r) => {
+              r.confirm = null;
+              r.finished = true;
+            }, true);
             break;
           case "cancelled":
             // 串行路径取消时 agent 不发 tool_end：这里把挂着的 pending 节点收尾，避免永远转圈
-            patchAssistant(asstId, (it) =>
+            gotTerminal = true;
+            patchAssistant(sid, asstId, (it) =>
               endRun(
                 finalizeTools({ ...it, status: "cancelled", reason: ev.reason, usage: ev.usage }),
                 "cancelled",
                 ev.elapsed_ms
               )
             );
-            foldAsk(asstId);
-            setConfirm(null);
-            finishedSidRef.current = session;
+            foldAsk(sid, asstId);
+            rtApi.update(sid, (r) => {
+              r.confirm = null;
+              r.finished = true;
+            }, true);
             break;
           case "trace":
             // 事件流的实时镜像（可选）：累积给轨迹抽屉并排展示，落盘全量仍以兜底拉取为准
-            setTraces((prev) => (prev.length >= 4000 ? prev : [...prev, ev.event]));
+            rtApi.update(sid, (r) => {
+              if (r.traces.length < 4000) r.traces = [...r.traces, ev.event];
+            });
             break;
           default:
             break; // turn / llm_done：前端无需单独处理
@@ -968,21 +1036,31 @@ export default function App({
         if (/已有任务在执行/.test(msg)) {
           // 这个会话其实还在后台跑（多半是另一个标签页发起的）：
           // 撤回乐观插入的气泡，改为接入那条运行的实时输出
-          setItems((prev) =>
-            prev.filter((it) => it.id !== asstId && it.id !== userItem.id)
-          );
+          rtApi.update(sid, (r) => {
+            r.items = r.items.filter(
+              (it) => it.id !== asstId && it.id !== userItem.id
+            );
+          }, true);
           handedToAttach = true;
-          finishedSidRef.current = null;
+          rtApi.update(sid, (r) => {
+            r.finished = false;
+          });
           message.info("该对话正在后台执行，已接入实时输出");
-          attachRun(session);
+          attachRun(sid);
           return;
         }
-        patchAssistant(asstId, (it) => ({ ...it, status: "error", error: msg }));
-        foldAsk(asstId);
+        patchAssistant(sid, asstId, (it) => ({ ...it, status: "error", error: msg }));
+        foldAsk(sid, asstId);
       })
       .finally(() => {
         if (handedToAttach) return;
-        setActiveSid((cur) => (cur === session ? null : cur));
+        if (!gotTerminal && !ac.signal.aborted) {
+          // 流意外中断：先挡住自动重连，等 /api/running 清零后再允许接入下一轮
+          rtApi.update(sid, (r) => {
+            r.finished = true;
+          });
+        }
+        rtApi.endStream(sid, ac);
         refreshAll(); // 对话结束后刷新列表（标题/时间/计数可能变了）
         setTjReload((n) => n + 1); // 运行结束：让轨迹抽屉拉一次磁盘全量兜底
       });
@@ -1507,6 +1585,7 @@ export default function App({
           collapsed={collapsed}
           remote={!!state?.remote}
           runningIds={runningIds}
+          attentionIds={attentionIds}
           onToggleCollapse={() => setCollapsed((c) => !c)}
           onSelect={handleSelectSession}
           onCreateSession={handleNewSession}
@@ -1640,6 +1719,25 @@ export default function App({
           </div>
         </header>
 
+        {/* 后台会话在等确认/回答：顶部横幅提示，点击切过去处理 */}
+        {attentionRts.length > 0 && (
+          <div
+            className="session-attention-banner"
+            onClick={() => handleSelectSession(attentionRts[0].sid)}
+          >
+            <span className="session-attention-dot" />
+            <span className="session-attention-text">
+              {attentionRts.length === 1
+                ? `「${
+                    sessions.find((s) => s.id === attentionRts[0].sid)?.title ||
+                    "另一个对话"
+                  }」正在等待你的确认/回答`
+                : `${attentionRts.length} 个对话正在等待你的确认/回答`}
+            </span>
+            <span className="session-attention-action">去处理</span>
+          </div>
+        )}
+
         <Chat
           sessionId={session}
           items={items}
@@ -1687,6 +1785,10 @@ export default function App({
           connectors={isDraft ? draftConnectors : (currentSession?.connectors ?? null)}
           connectorsDraft={isDraft}
           onConnectorsChange={handleConnectorsChange}
+          initialScrollTop={rtApi.scrollOf(session)}
+          onScrollTop={(top) => rtApi.saveScroll(session, top)}
+          draft={rtApi.draftOf(session)}
+          onDraftChange={(text) => rtApi.saveDraft(session, text)}
         />
 
         <WorkspaceModal

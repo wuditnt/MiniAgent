@@ -303,6 +303,11 @@ class _Session:
         self.run: dict | None = None         # 正在执行的这一轮（begin_run 创建）
         self.runs: list[dict] = []           # 已结束的各轮（供历史回放）
         self.run_meta_lock = threading.Lock()
+        # 本轮正在流式生成、尚未落进 messages 的草稿（正文 / 思考）。
+        # turn_start 清空、llm_delta 追加、llm_done 清空 —— 切走再切回时
+        # 靠它把「已经吐出来但还没定稿」的内容补回气泡，而不是只看到后续增量。
+        self.live = {"content": "", "reasoning": ""}
+        self.live_lock = threading.Lock()
 
     def ensure_agent(self):
         if self.agent is None:
@@ -497,8 +502,22 @@ class _Session:
 
     MAX_ACTIONS = 100        # 单轮最多记 100 个动作，超出直接丢弃（防止异常循环撑爆文件）
 
+    def live_reset(self) -> None:
+        """清空实时草稿（新一轮开始 / 本轮文本已定稿）。"""
+        with self.live_lock:
+            self.live = {"content": "", "reasoning": ""}
+
+    def live_append(self, kind: str, text: str) -> None:
+        with self.live_lock:
+            self.live[kind] = self.live.get(kind, "") + text
+
+    def live_snapshot(self) -> dict:
+        with self.live_lock:
+            return dict(self.live)
+
     def begin_run(self, turn: int) -> dict:
         """开始一轮执行：创建时间线并把 running_since 置为同一时刻。"""
+        self.live_reset()
         now = time.time()
         run = {
             "turn": turn,            # 第几个用户轮次（前端据此把 run 挂到对应气泡）
@@ -560,6 +579,7 @@ class _Session:
             self.runs = self.runs[-50:]
             self.run = None
             self.running_since = None
+            self.live_reset()
             return run["elapsed_ms"]
 
     def answer_confirm(self, cid: str, approve: bool) -> bool:
@@ -684,16 +704,21 @@ class WebUI:
             _log.warning("session.title.save_failed session=%s", s.id, exc_info=True)
 
     def turn_start(self, turn: int) -> None:
+        # 新一次模型调用开始：上一段文本已经/即将落进 messages，草稿清空
+        self.session.live_reset()
         self._push({"type": "turn", "turn": turn, "mode": self.session.mode})
 
     def llm_delta(self, _turn: int, text: str, kind: str = "content") -> bool:
         if not text:
             return False
+        self.session.live_append(kind, text)
         self._push({"type": "delta", "text": text, "kind": kind})
         # 返回 True 仅限正文：agent 靠它判断「回答已经上屏过」，网页上确实上屏了
         return kind == "content"
 
     def llm_done(self, _turn: int, latency: float, streamed: bool = False) -> None:
+        # 本段文本马上就要 append 进 messages：草稿到此为止，避免重连时重复显示
+        self.session.live_reset()
         self._push({"type": "llm_done", "sec": round(latency, 2), "streamed": streamed})
 
     def tools_start(self, turn: int, items: list) -> None:
@@ -2725,9 +2750,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
             {k: v for k, v in it.items() if k not in ("_end", "_start")}
             for it in _display_items(src)
         ]
+        run = session.run
+        running = session.running_since is not None
         self._json({"session": sid, "messages": messages,
                     "runs": runs[-50:], "server_now": time.time(),
-                    "running": session.running_since is not None})
+                    "running": running,
+                    # 切回运行中的会话时，前端不必等轮询就能恢复进度与已生成内容
+                    "run": ({**run, "actions": [dict(a) for a in run["actions"]]}
+                            if run else None),
+                    "live": session.live_snapshot() if running
+                    else {"content": "", "reasoning": ""}})
 
     def _handle_trajectory(self, params: dict) -> None:
         """只读：回放会话事件流（P0 事实层），供前端 Trajectory 视图使用。
@@ -2826,6 +2858,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
                         if run else None),
                 "server_now": time.time(),
                 "running": session.running_since is not None,
+                # 已经流式生成、但还没定稿的正文/思考：重连后接着往气泡里补
+                "live": session.live_snapshot(),
             }):
                 return
             if session.running_since is None:

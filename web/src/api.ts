@@ -83,6 +83,12 @@ export async function fetchHistory(
   messages: HistoryMessage[];
   runs?: RunInfo[];
   server_now?: number;
+  /** 该会话是否还有后台任务在跑（切回时据此立即接入，不必等轮询） */
+  running?: boolean;
+  /** 正在跑的这一轮时间线 */
+  run?: RunInfo | null;
+  /** 已生成但未定稿的正文/思考 */
+  live?: { content: string; reasoning: string };
 }> {
   const res = await req(`/api/history?session=${encodeURIComponent(session)}`);
   if (!res.ok) throw new Error(await readError(res));

@@ -661,6 +661,13 @@ def scenario_running_indicator() -> None:
             assert item.get("running") is True, f"/api/sessions 应标 running：{item}"
             _s, hist = api("GET", f"/api/history?session={sid}")
             assert hist.get("running") is True, f"/api/history 应标 running：{hist.keys()}"
+            # 切回运行中的会话时，history 要能直接给出「本轮时间线 + 已生成草稿」
+            run = hist.get("run")
+            assert run and run.get("status") == "running", \
+                f"/api/history 应带本轮时间线：{run}"
+            live = hist.get("live")
+            assert isinstance(live, dict) and "content" in live, \
+                f"/api/history 应带实时草稿：{live}"
             seen = True
     assert seen, "应在工具执行期间抓到运行状态"
 
@@ -721,6 +728,8 @@ def scenario_reconnect() -> None:
     types = [e["type"] for e in events]
     assert types and types[0] == "snapshot", f"重连第一帧应是 snapshot：{types[:3]}"
     assert events[0]["running"] is True, f"重连时应仍在运行：{events[0]}"
+    assert isinstance(events[0].get("live"), dict), \
+        f"快照应带实时草稿（切回时补上已生成内容）：{events[0].keys()}"
     assert any(m.get("role") == "user" for m in events[0]["messages"]), "快照应含已发生的消息"
     assert "done" in types, f"重连后应收到终态：{types}"
 
@@ -733,6 +742,36 @@ def scenario_reconnect() -> None:
     assert len(idle) == 1 and idle[0]["type"] == "snapshot", f"空闲会话只该有快照：{idle}"
     assert idle[0]["running"] is False, f"结束后 running 应为 false：{idle[0]}"
     print("  [8] 接入后台任务通过（快照 + 实时广播到终态）")
+
+
+def scenario_live_draft() -> None:
+    """⑲ 实时草稿：模型正在吐字时切走再切回，已生成的部分不能丢。
+
+    草稿的语义是「还没落进 messages 的这一段」：turn_start 清空、
+    llm_delta 追加、llm_done 清空（文本已定稿）、end_run 兜底清空。
+    """
+    from core.webui import WebUI, _Session
+
+    s = _Session("t-live-draft", None)   # 仅用内存态，不需要 WebServer
+    ui = WebUI(s)
+    s.begin_run(1)
+    ui.turn_start(1)
+    ui.llm_delta(1, "想一想", kind="reasoning")
+    ui.llm_delta(1, "你好", kind="content")
+    ui.llm_delta(1, "，世界")
+    assert s.live_snapshot() == {"content": "你好，世界", "reasoning": "想一想"}, \
+        s.live_snapshot()
+
+    ui.llm_done(1, 0.1, streamed=True)   # 这段文本已落盘：草稿清空，避免重连时重复
+    assert s.live_snapshot() == {"content": "", "reasoning": ""}, s.live_snapshot()
+
+    # 工具调用之后模型又开始新的输出：只保留最新的这一段
+    ui.llm_delta(1, "继续")
+    assert s.live_snapshot()["content"] == "继续", s.live_snapshot()
+
+    s.end_run("done")                    # 整轮结束：草稿必须归零
+    assert s.live_snapshot() == {"content": "", "reasoning": ""}, s.live_snapshot()
+    print("  [9] 实时草稿通过（定稿/新一轮/结束三处清空）")
 
 
 def _ws_root() -> str:
@@ -1384,6 +1423,7 @@ def main() -> int:
         ("页面断开不取消", scenario_detach_keeps_running),
         ("运行中指示器", scenario_running_indicator),
         ("接入后台任务", scenario_reconnect),
+        ("实时草稿", scenario_live_draft),
         ("危险确认-拒绝", lambda: scenario_confirm(deny=True)),
         ("危险确认-允许", lambda: scenario_confirm(deny=False)),
         ("同会话并发 409", scenario_409),
