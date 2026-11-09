@@ -172,14 +172,18 @@ async function svgToPng(svgText: string): Promise<Blob> {
   }
 }
 
-/** 图形视口：按住拖动平移，右下角三个按钮依次是复位 / 放大 / 缩小。
- *  只用 pointer 事件（鼠标 / 触控 / 触控笔一套逻辑），拖动时不选中文字。
- *  「复位」和首次显示都是「缩放到完整可见并居中」：图再高也不会被视口裁掉。 */
+/** 图形视口：默认静态展示，只做「缩放到完整可见并居中」；
+ *  全屏预览时传 interactive，才启用拖动平移与右下角复位 / 放大 / 缩小。
+ *  只在 interactive 模式用 pointer 事件（鼠标 / 触控 / 触控笔一套逻辑）并拦截滚轮 ——
+ *  会话卡片内若也拦截滚轮，用户在图块上滚动页面就会失效。 */
 function DiagramViewport({
   children,
+  interactive = false,
   allowUpscale = false,
 }: {
   children: ReactNode;
+  /** 是否启用拖动 / 滚轮缩放 / 缩放按钮；会话卡片内保持静态 */
+  interactive?: boolean;
   /** 全屏预览时允许放大填满视口；卡片内保持 1:1，不把小图撑大 */
   allowUpscale?: boolean;
 }) {
@@ -240,10 +244,10 @@ function DiagramViewport({
     zoomAt(factor, (boxRef.current?.clientWidth ?? 0) / 2, (boxRef.current?.clientHeight ?? 0) / 2);
 
   // 滚轮缩放：必须用原生非 passive 监听才能 preventDefault（React 的 onWheel 是 passive 的，
-  // 拦不住页面滚动），否则滚轮一动整页跟着滚。
+  // 拦不住页面滚动），否则滚轮一动整页跟着滚。仅 interactive 模式启用。
   useEffect(() => {
     const box = boxRef.current;
-    if (!box) return;
+    if (!box || !interactive) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const rect = box.getBoundingClientRect();
@@ -260,7 +264,7 @@ function DiagramViewport({
     };
     box.addEventListener("wheel", onWheel, { passive: false });
     return () => box.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [interactive]);
 
   const endDrag = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (!dragRef.current) return;
@@ -274,22 +278,30 @@ function DiagramViewport({
   return (
     <div
       ref={boxRef}
-      className={`md-viewport${dragging ? " dragging" : ""}`}
-      onPointerDown={(e) => {
-        if (e.button !== 0) return;
-        // 点在右下角的按钮上时不要开始拖拽
-        if ((e.target as HTMLElement).closest(".md-viewport-tools")) return;
-        dragRef.current = { sx: e.clientX, sy: e.clientY, ox: view.x, oy: view.y };
-        setDragging(true);
-        e.currentTarget.setPointerCapture(e.pointerId);
-      }}
-      onPointerMove={(e) => {
-        const d = dragRef.current;
-        if (!d) return;
-        setView((v) => ({ ...v, x: d.ox + (e.clientX - d.sx), y: d.oy + (e.clientY - d.sy) }));
-      }}
-      onPointerUp={endDrag}
-      onPointerCancel={endDrag}
+      className={`md-viewport${interactive ? " interactive" : ""}${dragging ? " dragging" : ""}`}
+      onPointerDown={
+        interactive
+          ? (e) => {
+              if (e.button !== 0) return;
+              // 点在右下角的按钮上时不要开始拖拽
+              if ((e.target as HTMLElement).closest(".md-viewport-tools")) return;
+              dragRef.current = { sx: e.clientX, sy: e.clientY, ox: view.x, oy: view.y };
+              setDragging(true);
+              e.currentTarget.setPointerCapture(e.pointerId);
+            }
+          : undefined
+      }
+      onPointerMove={
+        interactive
+          ? (e) => {
+              const d = dragRef.current;
+              if (!d) return;
+              setView((v) => ({ ...v, x: d.ox + (e.clientX - d.sx), y: d.oy + (e.clientY - d.sy) }));
+            }
+          : undefined
+      }
+      onPointerUp={interactive ? endDrag : undefined}
+      onPointerCancel={interactive ? endDrag : undefined}
     >
       <div
         ref={stageRef}
@@ -298,23 +310,25 @@ function DiagramViewport({
       >
         {children}
       </div>
-      <div className="md-viewport-tools">
-        <Tooltip title="复位">
-          <button type="button" aria-label="复位" onClick={fit}>
-            <ReloadOutlined />
-          </button>
-        </Tooltip>
-        <Tooltip title="放大">
-          <button type="button" aria-label="放大" onClick={() => zoom(1.2)}>
-            <PlusOutlined />
-          </button>
-        </Tooltip>
-        <Tooltip title="缩小">
-          <button type="button" aria-label="缩小" onClick={() => zoom(1 / 1.2)}>
-            <MinusOutlined />
-          </button>
-        </Tooltip>
-      </div>
+      {interactive && (
+        <div className="md-viewport-tools">
+          <Tooltip title="复位">
+            <button type="button" aria-label="复位" onClick={fit}>
+              <ReloadOutlined />
+            </button>
+          </Tooltip>
+          <Tooltip title="放大">
+            <button type="button" aria-label="放大" onClick={() => zoom(1.2)}>
+              <PlusOutlined />
+            </button>
+          </Tooltip>
+          <Tooltip title="缩小">
+            <button type="button" aria-label="缩小" onClick={() => zoom(1 / 1.2)}>
+              <MinusOutlined />
+            </button>
+          </Tooltip>
+        </div>
+      )}
     </div>
   );
 }
@@ -527,7 +541,9 @@ function DiagramCard({
                 </Tooltip>
               </div>
               <div className="md-fs-body">
-                <DiagramViewport allowUpscale>{view}</DiagramViewport>
+                <DiagramViewport interactive allowUpscale>
+                  {view}
+                </DiagramViewport>
               </div>
             </div>
           </div>,

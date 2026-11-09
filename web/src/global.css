@@ -644,17 +644,21 @@ body.sidebar-resizing .sidebar-resizer::after {
   overflow: auto;
 }
 
-/* mermaid 视图：可拖动平移，右下角复位 / 放大 / 缩小 */
+/* 图形视口：默认静态展示（只做缩放适配），不拦截滚轮 / 不响应拖拽；
+   全屏预览时加 .interactive 才启用拖动平移与复位 / 放大 / 缩小 */
 .md-viewport {
   position: relative;
   overflow: hidden;
   max-height: 520px;
+}
+
+.md-viewport.interactive {
   cursor: grab;
   user-select: none;
   touch-action: none;
 }
 
-.md-viewport.dragging {
+.md-viewport.interactive.dragging {
   cursor: grabbing;
 }
 
