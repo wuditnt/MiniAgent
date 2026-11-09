@@ -1,19 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <!-- MiniAgent 图标源文件：终端提示符 >_ 气泡，深底蓝紫渐变。
+  <!-- MiniAgent 图标源文件：终端提示符 >_ 气泡，蓝色风格。
        位图由同一套几何参数生成（Pillow 超采样），改这里后需同步重出 PNG/ICO。 -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0B1220"/>
-      <stop offset="1" stop-color="#1B2452"/>
+      <stop offset="0" stop-color="#4F9BFF"/>
+      <stop offset="1" stop-color="#2563EB"/>
     </linearGradient>
-    <radialGradient id="glow" cx="0.5" cy="0.44" r="0.62">
-      <stop offset="0" stop-color="#7C4DFF" stop-opacity="0.20"/>
-      <stop offset="1" stop-color="#7C4DFF" stop-opacity="0"/>
+    <radialGradient id="glow" cx="0.42" cy="0.36" r="0.60">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
     </radialGradient>
-    <linearGradient id="fg" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#4F7BFF"/>
-      <stop offset="1" stop-color="#9B6BFF"/>
-    </linearGradient>
     <clipPath id="tile">
       <rect x="64" y="64" width="896" height="896" rx="210"/>
     </clipPath>
@@ -22,10 +18,10 @@
     <rect x="64" y="64" width="896" height="896" fill="url(#bg)"/>
     <rect x="64" y="64" width="896" height="896" fill="url(#glow)"/>
     <!-- 气泡主体 + 左下尾巴 -->
-    <rect x="176" y="312" width="672" height="400" rx="104" fill="#1C2748" stroke="#3A487A" stroke-width="5"/>
-    <polygon points="232,700 232,806 372,700" fill="#1C2748" stroke="#1C2748" stroke-width="28" stroke-linejoin="round"/>
+    <rect x="176" y="312" width="672" height="400" rx="104" fill="#FFFFFF" fill-opacity="0.10" stroke="#FFFFFF" stroke-opacity="0.25" stroke-width="5"/>
+    <polygon points="232,700 232,806 372,700" fill="#FFFFFF" fill-opacity="0.10" stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="28" stroke-linejoin="round"/>
     <!-- >_ -->
-    <path d="M360 436 L468 514 L360 592" fill="none" stroke="url(#fg)" stroke-width="68" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M534 592 L664 592" fill="none" stroke="url(#fg)" stroke-width="62" stroke-linecap="round"/>
+    <path d="M360 436 L468 514 L360 592" fill="none" stroke="#FFFFFF" stroke-width="68" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M534 592 L664 592" fill="none" stroke="#FFFFFF" stroke-width="62" stroke-linecap="round"/>
   </g>
 </svg>
