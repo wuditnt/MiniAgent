@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 import bootstrap  # noqa: F401  —— 必须最先导入：铺 sys.path + 定工作区
 from bootstrap import PACKAGE_ROOT as HERE
@@ -123,8 +124,13 @@ def test_topics_and_prune():
         assert "合并后的新摘要" in memory.load_topic("s1", ws)
 
         # 裁剪：超过 TOPICS_KEEP 只留最近的
+        # 文件时间戳粒度有限，同一 tick 内连写会让 mtime 撞车；显式拉开时间，避免顺序依赖时钟精度
+        base = time.time() - 60
+        os.utime(memory.topic_path("s1", ws), (base - 1, base - 1))
         for i in range(memory.TOPICS_KEEP + 5):
             memory.save_topic(f"bulk{i}", f"topic {i}", ws)
+            stamp = base + i
+            os.utime(memory.topic_path(f"bulk{i}", ws), (stamp, stamp))
         items = memory.list_topics(ws)
         assert len(items) == memory.TOPICS_KEEP, len(items)
         # 最新的在最前

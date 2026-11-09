@@ -258,11 +258,13 @@ def list_topics(workspace: str | None = None) -> list[dict]:
             out.append({
                 "session": name[:-3],
                 "mtime": st.st_mtime,
+                "mtime_ns": st.st_mtime_ns,
                 "size": st.st_size,
             })
     except OSError:
         return []
-    out.sort(key=lambda x: x["mtime"], reverse=True)
+    # 同一时钟粒度内写入的多个 topic 可能 mtime 完全相同；用会话名兜底，保证顺序稳定
+    out.sort(key=lambda x: (x["mtime_ns"], x["session"]), reverse=True)
     return out
 
 

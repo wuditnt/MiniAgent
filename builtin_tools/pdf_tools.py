@@ -726,11 +726,13 @@ def pdf_watermark(path: str, out: str, text: str, opacity: float = 0.15,
     if not os.path.isfile(ap):
         return f"[error] 文件不存在：{ap}"
     try:
-        reader = PdfReader(ap)
+        # pypdf 7 起页面必须挂到 writer 上才能改内容流（merge_page 内部会调 replace_contents）；
+        # clone_from 直接把源文件页读进 writer，页面天然已挂载。
+        writer = PdfWriter(clone_from=ap)
     except Exception as e:  # noqa: BLE001
         return f"[error] 解析 PDF 失败（{type(e).__name__}: {e}）"
 
-    total = len(reader.pages)
+    total = len(writer.pages)
     idxs = _parse_pages(pages, total, total)
     opacity = max(0.02, min(float(opacity), 1.0))
     angle = float(angle)
@@ -743,26 +745,23 @@ def pdf_watermark(path: str, out: str, text: str, opacity: float = 0.15,
 
     ap_out = safe_path(out)
     os.makedirs(os.path.dirname(ap_out) or workspace(), exist_ok=True)
-    writer = PdfWriter()
     try:
-        for i in range(total):
-            page = reader.pages[i]
-            if i in idxs:
-                w = float(page.mediabox.width)
-                h = float(page.mediabox.height)
-                buf = io.BytesIO()
-                c = canvas.Canvas(buf, pagesize=(w, h))
-                c.saveState()
-                c.setFillAlpha(opacity)
-                c.setFont(font, max(10.0, min(w, h) * 0.06))
-                c.translate(w / 2, h / 2)
-                c.rotate(angle)
-                c.drawCentredString(0, 0, text)
-                c.restoreState()
-                c.save()
-                buf.seek(0)
-                page.merge_page(PdfReader(buf).pages[0])
-            writer.add_page(page)
+        for i in idxs:
+            page = writer.pages[i]
+            w = float(page.mediabox.width)
+            h = float(page.mediabox.height)
+            buf = io.BytesIO()
+            c = canvas.Canvas(buf, pagesize=(w, h))
+            c.saveState()
+            c.setFillAlpha(opacity)
+            c.setFont(font, max(10.0, min(w, h) * 0.06))
+            c.translate(w / 2, h / 2)
+            c.rotate(angle)
+            c.drawCentredString(0, 0, text)
+            c.restoreState()
+            c.save()
+            buf.seek(0)
+            page.merge_page(PdfReader(buf).pages[0])
         _write_pdf(writer, ap_out, ap)
     except Exception as e:  # noqa: BLE001
         return f"[error] 添加水印失败（{type(e).__name__}: {e}）"
