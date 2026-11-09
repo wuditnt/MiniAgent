@@ -260,6 +260,22 @@ def scenario_health() -> None:
     for key in ("ready", "version", "pid", "port", "login_enabled", "data_dir", "uptime"):
         assert key in body, f"health 缺少字段 {key}：{body}"
     assert body["ready"] is True
+
+    # 版本号单一真源：VERSION 文件 → core.__version__ → /api/health → 安装包版本
+    from core import __version__ as core_version
+    with open(os.path.join(HERE, "VERSION"), encoding="utf-8") as f:
+        file_version = f.read().strip()
+    assert core_version == file_version, (
+        f"core.__version__={core_version} 与 VERSION={file_version} 不一致"
+    )
+    assert body["version"] == core_version, (
+        f"health 返回 {body['version']} 与 core.__version__={core_version} 不一致"
+    )
+    with open(os.path.join(HERE, "desktop", "package.json"), encoding="utf-8") as f:
+        pkg_version = json.load(f)["version"]
+    assert pkg_version == file_version, (
+        f"desktop/package.json={pkg_version} 未同步 VERSION={file_version}"
+    )
     print("  [0] 健康检查通过")
 
 

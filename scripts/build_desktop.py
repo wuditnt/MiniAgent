@@ -22,7 +22,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,6 +37,9 @@ OUT = ROOT / "build" / "desktop-resources"
 APP_OUT = OUT / "app"
 PY_OUT = OUT / "python"
 PACK_OUT = OUT / "ocr-pack.zip"
+#: 版本号唯一真源：仓库根目录的纯文本文件（应用运行与安装包都从它派生）
+VER_FILE = ROOT / "VERSION"
+SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 
 #: 应用目录内容：后端源码、工具目录、技能、MCP 配置、内置文档、前端产物
 APP_ITEMS = (
@@ -46,6 +51,7 @@ APP_ITEMS = (
     "mcp",
     "docs",
     "web/dist",
+    "VERSION",
     "README.md",
     "pyproject.toml",
     "requirements.txt",
@@ -108,6 +114,30 @@ def _copy_entry(src: Path, dst: Path) -> None:
         _copytree(src, dst)
     else:
         shutil.copy2(src, dst)
+
+
+def read_version() -> str:
+    """读 VERSION 并校验 semver —— electron-builder 只接受三段式版本号。"""
+    try:
+        version = VER_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        raise SystemExit(f"错误：找不到版本文件 {VER_FILE}")
+    if not SEMVER.match(version):
+        raise SystemExit(f"错误：VERSION 内容不是合法 semver：{version!r}")
+    return version
+
+
+def sync_desktop_version(version: str) -> None:
+    """把版本写进 desktop/package.json —— 安装包与 exe 属性从这里取版本。"""
+    pkg = ROOT / "desktop" / "package.json"
+    data = json.loads(pkg.read_text(encoding="utf-8"))
+    if data.get("version") == version:
+        return
+    data["version"] = version
+    pkg.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    print(f"  · desktop/package.json version → {version}")
 
 
 def build_web() -> None:
@@ -312,6 +342,9 @@ def main() -> int:
     args = ap.parse_args()
 
     os.chdir(ROOT)
+    version = read_version()
+    print(f"版本号：{version}（来源 VERSION）")
+    sync_desktop_version(version)
     if not args.skip_web:
         build_web()
     if not (ROOT / "web" / "dist" / "index.html").exists():

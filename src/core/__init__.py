@@ -30,13 +30,31 @@ core —— mini-agent 唯一的包：应用层与核心库都平铺在这里。
 
 from __future__ import annotations
 
+from pathlib import Path
+
 # 必须在任何子模块被导入之前执行 —— 它负责把 sys.path 铺好，
 # 这样下面的相对导入和之后的裸模块名导入（import tools 等）都成立。
 from ._paths import ROOT, install_import_paths  # noqa: E402
 
 install_import_paths()
 
-__version__ = "1.0.0"
+
+def _read_version() -> str:
+    """版本号唯一真源：仓库根目录的 VERSION 文件（打包时原样复制进应用目录）。"""
+    try:
+        return (Path(ROOT) / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    # 正常安装进 site-packages 时源码树不在，退回包元数据（同样来自 VERSION）
+    try:
+        from importlib.metadata import version
+
+        return version("mini-agent")
+    except Exception:
+        return "0.0.0"
+
+
+__version__ = _read_version()
 
 # ---- 核心 API 导出（工具作者只需要 import 这一个包）----
 from .cancel import (  # noqa: E402,F401

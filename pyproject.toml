@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-agent"
-version = "1.0.0"
+# 版本号唯一真源是根目录 VERSION 文件，这里动态读取，避免多处手写导致漂移
+dynamic = ["version"]
 description = "一个可扩展的本地智能体 Web 应用：工具目录 + 连接（MCP）双通道"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -97,6 +98,9 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["core*"]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
 
 # ---------------------------------------------------------------------------
 # 静态检查配置
