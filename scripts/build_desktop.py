@@ -70,16 +70,17 @@ SITE_SKIP = (
 SITE_SKIP_FILES = {"py.py"}
 
 #: OCR 依赖的顶层条目前缀：移入 ocr-pack，不铺进 site-packages。
-#: 前缀同时匹配包目录与 dist-info（如 numpy-2.x.dist-info）。
+#: 前缀同时匹配包目录与 dist-info（如 opencv_python-*.dist-info）。
+#: numpy 不在此列：OCR 之外的能力也要用它，所以留在基础包里。
 OCR_PREFIXES = (
-    "cv2", "opencv", "onnxruntime", "sympy", "mpmath", "numpy", "rapidocr",
+    "cv2", "opencv", "onnxruntime", "sympy", "mpmath", "rapidocr",
     "pyclipper", "shapely", "yaml", "coloredlogs", "humanfriendly",
     "flatbuffers", "protobuf", "google", "tqdm",
 )
 
 #: 基础依赖自检：启动与常用工具必须能导入（不含 OCR 组件包里的库）
 BASE_MODS = [
-    "openai", "docx", "openpyxl", "PIL", "pypdf", "tkinter",
+    "openai", "docx", "openpyxl", "PIL", "pypdf", "tkinter", "numpy",
     "pdfplumber", "polars", "reportlab", "pypdfium2", "pptx",
 ]
 #: OCR 组件包自检：解压后（PYTHONPATH 指向暂存目录）必须能导入
@@ -231,8 +232,15 @@ def _check_imports(py: Path, mods: list[str], extra_env: dict | None = None) -> 
     if extra_env:
         env.update(extra_env)
     # -S 跳过 site 初始化会丢依赖；这里用普通模式，验证的正是打包后真实启动方式
+    # -X utf8 强制子解释器输出 UTF-8：默认它按系统区域编码（中文 Windows 是 GBK），
+    # 直接按 UTF-8 解码会在部分机器上抛 UnicodeDecodeError
     r = subprocess.run(
-        [str(py), "-c", code], capture_output=True, text=True, encoding="utf-8", env=env
+        [str(py), "-X", "utf8", "-c", code],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
     )
     print((r.stdout or "").strip() or (r.stderr or "").strip())
     if r.returncode != 0:
@@ -244,14 +252,18 @@ def verify_python(py: Path) -> None:
     _check_imports(py, BASE_MODS)
     code = (
         "import importlib.util as u\n"
-        "left = [m for m in ('cv2', 'onnxruntime', 'numpy', 'sympy') if u.find_spec(m)]\n"
+        "left = [m for m in ('cv2', 'onnxruntime', 'sympy') if u.find_spec(m)]\n"
         "if left:\n"
         "    print('STILL_PACKED', ','.join(left))\n"
         "    raise SystemExit(1)\n"
         "print('ok: OCR 组件已移出基础依赖')\n"
     )
     r = subprocess.run(
-        [str(py), "-c", code], capture_output=True, text=True, encoding="utf-8"
+        [str(py), "-X", "utf8", "-c", code],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     print((r.stdout or "").strip() or (r.stderr or "").strip())
     if r.returncode != 0:

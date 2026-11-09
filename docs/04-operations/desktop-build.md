@@ -37,15 +37,16 @@ web/dist                   ├─ build_desktop.py ─▶ build/desktop-resource
 | 基础依赖 | 优先 `<仓库>/.venv/Lib/site-packages` | venv 本身不可迁移，只搬它的包 |
 | 裁剪 | `Lib/test`、`Lib/idlelib`、`Lib/turtledemo`、`Lib/lib2to3`、`Doc`、`Tools`、`Scripts`、`_polars_runtime_32` | 纯瘦身，不影响运行 |
 | 开发工具剔除 | `pipreqs`、`IPython`、`jedi`、`pygments`、`tornado`、`prompt_toolkit`、`pytest` 等 | 运行时无人 import，却占 7 千个文件（见 `SITE_SKIP`） |
-| OCR 依赖外置 | `cv2`、`onnxruntime`、`sympy`、`numpy`、`shapely`、`pyclipper`、`PyYAML` 等 | 打进 `ocr-pack.zip`，首次使用 OCR 才解压（见 2.3） |
+| OCR 依赖外置 | `cv2`、`onnxruntime`、`sympy`、`shapely`、`pyclipper`、`PyYAML` 等 | 打进 `ocr-pack.zip`，首次使用 OCR 才解压（见 2.3）；`numpy` 因非 OCR 能力也要用，留在基础包 |
 
 `tcl/` 必须保留：后端「选择文件夹」用的 tkinter 依赖它。
 
 ### 2.3 按需 OCR 组件包
 
-OCR 依赖约 230MB、近 3 千个文件，但只有 `ocr_image` / `ocr_pdf` 用得到。安装耗时主要花在逐个小文件写盘上，所以这部分不进 `site-packages`：
+OCR 依赖约 196MB、近 2.5 千个文件，但只有 `ocr_image` / `ocr_pdf` 用得到。安装耗时主要花在逐个小文件写盘上，所以这部分不进 `site-packages`：
 
-- 构建时把相关条目（`OCR_PREFIXES`）摊到暂存目录，压成 `resources\ocr-pack.zip`（约 90MB）
+- 构建时把相关条目（`OCR_PREFIXES`）摊到暂存目录，压成 `resources\ocr-pack.zip`（约 77MB）
+- `numpy` 不在外置之列：OCR 之外的能力也要用它，因此留在基础 `site-packages`
 - 安装阶段只写这 1 个文件，OCR 库不参与解压铺开
 - 首次调用 OCR：`core/extra_libs.py` 把包解压到 `%APPDATA%\mini-agent\pylibs\ocr`（约 2–4 秒），注入 `sys.path`，并同步 `PYTHONPATH` 供 `run_python` 等子进程继承
 - 之后按「zip 大小 + mtime」判定缓存，命中时开销约 1ms
@@ -108,9 +109,9 @@ cd ..
 
 脚本最后会做三段校验，任一失败直接非 0 退出：
 
-1. 用打包后的 `python.exe` 真实 import 基础依赖（`openai / docx / openpyxl / PIL / pypdf / tkinter / pdfplumber / polars / reportlab / pypdfium2 / pptx`）
-2. 反向确认 OCR 库已不在基础依赖里（`find_spec` 应为 None）
-3. 用暂存目录冒充已解压状态，验证 OCR 组件包自身完整（`cv2 / numpy / shapely / pyclipper / yaml / google.protobuf / onnxruntime / rapidocr_onnxruntime`）
+1. 用打包后的 `python.exe` 真实 import 基础依赖（`openai / docx / openpyxl / PIL / pypdf / tkinter / numpy / pdfplumber / polars / reportlab / pypdfium2 / pptx`）
+2. 反向确认 OCR 库已不在基础依赖里（`cv2 / onnxruntime / sympy` 的 `find_spec` 应为 None）
+3. 用暂存目录冒充已解压状态，验证 OCR 依赖可用（`cv2 / numpy / shapely / pyclipper / yaml / google.protobuf / onnxruntime / rapidocr_onnxruntime`，其中 numpy 来自基础包）
 
 ### 3.4 安装 Electron 依赖（首次）
 
@@ -215,13 +216,13 @@ $env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
 
 | 项 | 体积 | 文件数 |
 |---|---|---|
-| `resources/app` | 9.8 MB | 244 |
-| `resources/python` | 175.9 MB | 9,522 |
-| `resources/ocr-pack.zip` | 89.2 MB | 1 |
-| 安装前 payload 合计 | 274.9 MB | 9,767 |
-| NSIS 安装包 | 223.7 MB | — |
+| `resources/app` | 10.8 MB | 253 |
+| `resources/python` | 217.9 MB | 10,554 |
+| `resources/ocr-pack.zip` | 76.5 MB | 1 |
+| 安装前 payload 合计 | 305.2 MB | 10,808 |
+| NSIS 安装包 | 221.7 MB | — |
 
-对比优化前：payload 720MB / 19,933 文件、安装包 210.6MB。安装包体积略增（zip 已压缩，NSIS 无法再压缩），但安装时写盘量和文件数分别下降 62% 和 51%，这才是安装耗时的决定因素。
+对比优化前：payload 720MB / 19,933 文件、安装包 210.6MB。安装包体积略增（zip 已压缩，NSIS 无法再压缩），但安装时写盘量和文件数分别下降 58% 和 46%，这才是安装耗时的决定因素。
 
 - 继续瘦身：在 `build_desktop.py` 的 `PY_SKIP_LIB` / `PY_SKIP_EXTRA` 增加目录，或把更多包加进 `OCR_PREFIXES`，但必须保证 `verify_python()` 全绿
 - 不要裁剪 `tcl/`：会丢掉原生「选择文件夹」对话框
