@@ -2,7 +2,7 @@
  * 会话侧边栏：自上而下五个区块 ——
  *  ① 品牌区：程序 logo + 标题 + 抽屉折叠图标
  *  ② 大号「新会话」按钮
- *  ③ 功能菜单区：连接 / 自动化任务（暂为占位，点击仅提示）
+ *  ③ 功能菜单区：连接 / 自动化（暂为占位，点击仅提示）
  *  ④ 工作区：按工作区分组的会话列表（搜索 / 新建 / 改名 / 删除）
  *  ⑤ 底部工具区：人员菜单 + 系统配置（纯图标，靠右下角）
  */
@@ -280,9 +280,9 @@ export default function Sidebar({
             <AppstoreOutlined className="menu-item-icon" />
             <span>连接</span>
           </div>
-          <div className="menu-item" onClick={() => message.info("「自动化任务」功能开发中")}>
+          <div className="menu-item" onClick={() => message.info("「自动化」功能开发中")}>
             <ThunderboltOutlined className="menu-item-icon" />
-            <span>自动化任务</span>
+            <span>自动化</span>
           </div>
         </div>
 
