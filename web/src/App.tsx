@@ -1667,6 +1667,7 @@ export default function App({
           }
           currentId={session}
           collapsed={collapsed}
+          version={state?.version}
           remote={!!state?.remote}
           runningIds={runningIds}
           attentionIds={attentionIds}

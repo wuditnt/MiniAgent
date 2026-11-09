@@ -1228,7 +1228,7 @@ def scenario_settings() -> None:
     assert status == 200, body
     vals, defs = body["values"], body["defaults"]
     assert vals == defs, f"没改过时应等于内置默认：{vals} vs {defs}"
-    assert vals["max_turns"] == 10 and vals["stream"] is True and vals["max_workers"] == 4
+    assert vals["max_turns"] == 15 and vals["stream"] is True and vals["max_workers"] == 4
 
     # 越界、类型错误、未知键都必须被拦下
     for bad in ({"max_turns": 0}, {"max_turns": 999}, {"temperature": "hot"},

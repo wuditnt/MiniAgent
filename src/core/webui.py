@@ -2776,6 +2776,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             "max_context_chars": settings.get("max_context_chars") or 200000,
             "sessions": sessions,
             "remote": self._is_remote(),
+            "version": _core_version(),
         })
 
     @staticmethod

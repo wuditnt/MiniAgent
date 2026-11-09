@@ -207,6 +207,8 @@ export interface AgentState {
   sessions: { id: string; busy: boolean }[];
   /** true = 当前客户端是远程访问（非回环地址），主机配置类操作被后端禁用 */
   remote?: boolean;
+  /** 后端版本号（唯一真源：src/core/__init__.py 的 __version__） */
+  version: string;
 }
 
 /** GET /api/history 返回的单条消息 */

@@ -58,6 +58,8 @@ interface Props {
   onOpenSkills: () => void;
   /** 打开连接器（MCP 外部能力）页 */
   onOpenConnectors: () => void;
+  /** 从后端 /api/state 取回的版本号，显示在品牌名右侧 */
+  version?: string;
   /** 当前主区视图：用于高亮左栏导航 */
   activeView?: "chat" | "skills" | "connectors";
   /** 底部人员菜单节点（由 App 构造，未登录时为 null） */
@@ -157,6 +159,7 @@ export default function Sidebar({
   onOpenSettings,
   onOpenSkills,
   onOpenConnectors,
+  version,
   activeView,
   accountMenu,
   runningIds,
@@ -231,9 +234,12 @@ export default function Sidebar({
 
   return (
     <div className="sidebar">
-      {/* ① 品牌区：项目名称 + 折叠图标 */}
+      {/* ① 品牌区：项目名称 + 版本号 + 折叠图标 */}
       <div className="sidebar-brand">
-        <span className="brand-name">MiniAgent</span>
+        <span className="brand-title">
+          <span className="brand-name">MiniAgent</span>
+          {version && <span className="brand-version">v{version}</span>}
+        </span>
         <Tooltip title={collapsed ? "展开侧栏" : "收起侧栏"}>
           <MenuOutlined className="sidebar-toggle" onClick={onToggleCollapse} />
         </Tooltip>

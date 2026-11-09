@@ -2870,12 +2870,28 @@ body.sidebar-resizing .sidebar-resizer::after {
   padding: 14px 14px 10px;
 }
 
-.brand-name {
+.brand-title {
   flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.brand-name {
+  flex: none;
   font-size: 19px;
   font-weight: 700;
   letter-spacing: 0.2px;
   color: var(--tx-ink-088);
+}
+
+.brand-version {
+  flex: none;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  color: var(--tx-ink-045);
 }
 
 .sidebar-toggle {
