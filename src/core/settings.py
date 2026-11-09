@@ -24,7 +24,7 @@ _SETTINGS_FILE = os.path.join(data_dir(), "settings.json")
 
 #: 内置默认值
 DEFAULTS: dict = {
-    "max_turns": 10,               # 单次任务最多跑几轮（1 轮 = 一次模型调用 + 工具执行）
+    "max_turns": 15,               # 单次任务最多跑几轮（1 轮 = 一次模型调用 + 工具执行）
     "max_context_chars": 120_000,  # 上下文超过这个字符数就触发三级收敛
     "keep_recent_turns": 8,        # 滑动窗口至少保留最近几轮原文
     "max_output_chars": 8_000,     # 单个工具结果的字符上限
@@ -82,7 +82,7 @@ DEFAULTS: dict = {
     # 开启后 delegate 工具进会话工具表：模型可把一个自包含的只读子任务交给
     # 子代理执行，只把结论带回主对话（中间过程不占主上下文）。
     "subagent_enabled": True,
-    "subagent_max_turns": 10,      # 单个子任务最多几轮（实测 6 轮偏紧，简单统计也会撞上限）
+    "subagent_max_turns": 15,      # 单个子任务最多几轮（实测 6 轮偏紧，简单统计也会撞上限）
     "subagent_timeout": 600,       # 单个子任务墙钟超时（秒），到点中断；给别人用时不至于被慢工具卡死
 }
 

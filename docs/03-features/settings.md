@@ -68,7 +68,7 @@
 | `MINI_AGENT_MAX_OUTPUT` | 单次工具输出上限 | 8000 |
 | `MINI_AGENT_STREAM` / `MINI_AGENT_PARALLEL` | 流式 / 并行 | 1 / 1 |
 | `MINI_AGENT_MAX_WORKERS` | 并行线程数 | 4 |
-| `MINI_AGENT_MAX_TURNS` | 最大轮数 | 10 |
+| `MINI_AGENT_MAX_TURNS` | 最大轮数 | 15 |
 | `MINI_AGENT_ALLOWED_HOSTS` | 追加允许的 Host | 空 |
 | `MINI_AGENT_ALLOW_DANGEROUS` | 放开危险命令拦截 | 0 |
 

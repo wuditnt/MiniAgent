@@ -35,7 +35,7 @@ MAX_RESULT_CHARS = 2000
 #: 子代理默认轮次上限：只做一件事，不需要主代理那么多轮；
 #: 但也不能太紧 —— 实测 6 轮时，一个「统计文件数」的子任务会撞上限、
 #: 只交出「未完成」的收尾摘要，父代理还得自己复核一遍。
-DEFAULT_MAX_TURNS = 10
+DEFAULT_MAX_TURNS = 15
 
 #: 默认墙钟超时（秒）。超时由 watchdog 调 interrupt() 中断，不依赖工具自己配合。
 DEFAULT_TIMEOUT = 180.0

@@ -465,7 +465,7 @@ class Agent:
         # 不写进消息历史，避免污染用户可见的对话内容。
         self._extra_system = ""
         # 显式参数 > 通用配置（Web UI 可改）> 内置默认
-        self.max_turns = int(_pick(max_turns, "max_turns", 10))
+        self.max_turns = int(_pick(max_turns, "max_turns", 15))
         self.temperature = float(_pick(temperature, "temperature", 0.0))
         self.verbose = verbose
         self.max_context_chars = int(_pick(max_context_chars, "max_context_chars", 120_000))
