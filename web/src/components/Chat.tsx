@@ -576,6 +576,9 @@ const LEVEL_LABEL: Record<ReasoningLevel, string> = {
 const INITIAL_VISIBLE = 30;
 const LOAD_STEP = 30;
 
+/** 距底超过这么多像素才显示「回到底部」，避免贴底时抖动出没 */
+const JUMP_THRESHOLD = 200;
+
 /** 用户气泡折叠后保留的行数 */
 const BUBBLE_CLAMP_LINES = 5;
 
@@ -937,6 +940,8 @@ export default function Chat({
   const prevLen = useRef(0);
   // 是否处于「跟随底部」状态：用户手动往上翻历史时置 false，滚回底部自动恢复
   const stick = useRef(true);
+  // 距底超过 JUMP_THRESHOLD 时显示「回到底部」浮标
+  const [showJump, setShowJump] = useState(false);
   // 「发送后顶到最上面」的锚点消息 id + 它下面的动态留白
   const anchorId = useRef<string | null>(null);
   const tailRef = useRef<HTMLDivElement>(null);
@@ -1209,6 +1214,14 @@ export default function Chat({
     setScrollable((prev) => (prev === can ? prev : can));
   }, [items.length, visibleCount, hiddenCount]);
 
+  // 会话切换或消息增删后同步浮标：内容变短时浏览器会夹紧 scrollTop，这里兜底
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const far = el.scrollHeight - el.scrollTop - el.clientHeight > JUMP_THRESHOLD;
+    setShowJump((prev) => (prev === far ? prev : far));
+  }, [items.length, sessionId]);
+
   /** 往前加载一批历史消息 */
   const loadEarlier = () => {
     const el = scrollRef.current;
@@ -1227,10 +1240,24 @@ export default function Chat({
     if (!el) return;
     // 用户手动上翻 → 暂停自动跟随；滚回底部附近 → 恢复
     stick.current = atBottom(el);
+    const far = el.scrollHeight - el.scrollTop - el.clientHeight > JUMP_THRESHOLD;
+    setShowJump((prev) => (prev === far ? prev : far));
     if (hiddenCount <= 0) return;
     if (el.scrollTop > 60) return;
     if (el.scrollHeight <= el.clientHeight + 200) return;
     loadEarlier();
+  };
+
+  /** 回到底部：必须同步回「贴底跟随」，否则会被钉顶留白/锚点逻辑拉回 */
+  const jumpToBottom = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    stick.current = true;
+    viewMode.current = "follow";
+    roundFollow.current = false;
+    anchorId.current = null;
+    if (tailRef.current) tailRef.current.style.height = "0px";
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   };
 
   // 模型子菜单：按服务商分组，组名用服务商展示名；组内条目用模型显示名称
@@ -1709,6 +1736,19 @@ export default function Chat({
             )}
             {/* 「发送后顶到最上面」所需的动态留白，高度由跟随滚动 effect 直接写入 */}
             <div className="chat-tail-space" ref={tailRef} aria-hidden="true" />
+          </div>
+        )}
+        {showJump && !selectMode && items.length > 0 && (
+          <div className="chat-jump">
+            <Tooltip title="回到底部">
+              <Button
+                className="chat-jump-btn"
+                shape="circle"
+                aria-label="回到底部"
+                icon={<DownOutlined />}
+                onClick={jumpToBottom}
+              />
+            </Tooltip>
           </div>
         )}
       </div>

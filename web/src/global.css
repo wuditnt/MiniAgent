@@ -223,6 +223,34 @@ body.sidebar-resizing .sidebar-resizer::after {
   background: var(--bg-ffffff);
 }
 
+/* 上翻历史后出现的「回到底部」浮标：sticky 吸在消息区底沿，
+   height:0 + translateY(-100%) 保证不占布局高度、不改变 scrollHeight */
+.chat-jump {
+  position: sticky;
+  bottom: 20px;
+  z-index: 20;
+  height: 0;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.chat-jump .chat-jump-btn {
+  pointer-events: auto;
+  width: 36px;
+  height: 36px;
+  transform: translateY(-100%);
+  background: var(--bg-ffffff);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+  color: var(--tx-ink-065);
+}
+
+.chat-jump .chat-jump-btn:hover {
+  color: #1677ff;
+  border-color: #1677ff;
+}
+
 /* 我发送的内容：淡蓝底气泡包裹（右对齐）
    antd-x 默认给 .ant-bubble-content 的 max-width 是 100%，长文本会把整行撑满；
    这里按需求收到消息区的 70%，短消息仍按内容自适应宽度 */
