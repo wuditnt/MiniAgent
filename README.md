@@ -82,6 +82,13 @@ npm start
 ```
 
 ```bat
+:: 一键打包（前端构建 + 打包资源 + NSIS，版本号取自根目录 VERSION）
+package.bat
+```
+
+手动分步执行：
+
+```bat
 :: 打包安装包（NSIS，产物在 desktop\release\）
 python scripts\build_desktop.py
 cd desktop
@@ -133,6 +140,8 @@ def now() -> str:
 
 ```text
 mini-agent/
+├── VERSION                   版本号唯一真源（运行时 / pyproject / 安装包共用）
+├── package.bat               Windows 一键打包（前端 + 资源 + NSIS）
 ├── src/core/                 包本体
 │   ├── agent.py              核心循环：messages → LLM(流式) → tool_calls → 并行 → 回填
 │   ├── registry.py           Tool / ToolRegistry / @tool

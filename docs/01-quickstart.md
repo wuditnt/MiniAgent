@@ -60,12 +60,13 @@ cd web; npm run dev                   # 终端 2：Vite :5173，/api 自动代�
 
 三种启动方式等价：`python -m core`（推荐）、`python src/core/main.py`、`mini-agent`（装了 console script 后）。项目只提供 Web UI，没有命令行对话。
 
-Windows 另有两个双击即用的脚本（会自动清理本项目残留进程、读 `.env` 里的解释器、等端口真正就绪后再打开浏览器）：
+Windows 另有三个双击即用的脚本（会自动清理本项目残留进程、读 `.env` 里的解释器、等端口真正就绪后再打开浏览器）：
 
 | 脚本 | 用途 |
 |---|---|
 | `startup.bat` | 生产模式：后端 `:8000`，托管已构建的前端 |
 | `startup_dev.bat` | 开发模式：后端 `:8123` + Vite `:5173`（前端热更新） |
+| `package.bat` | 桌面端一键打包：前端构建 + 资源打包 + NSIS 安装包 |
 
 常用开关：
 

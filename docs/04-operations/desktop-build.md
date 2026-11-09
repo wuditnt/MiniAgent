@@ -8,7 +8,7 @@
 - 能力：安装包内置**真实的 Python 解释器**和全部依赖（OCR 依赖打包为独立的 `ocr-pack.zip`，首次使用时自动解压）
 - 工具：`run_python` / MCP server / `run_shell` 里的 `python` 全部指向内置解释器，不是冻结后的假解释器
 
-产物是一个 NSIS 安装包（约 224MB），以及一份解压即用的 `win-unpacked` 目录。
+产物是一个 NSIS 安装包（约 221MB），以及一份解压即用的 `win-unpacked` 目录。
 
 ## 2. 概念
 
@@ -68,11 +68,26 @@ OCR 依赖约 196MB、近 2.5 千个文件，但只有 `ocr_image` / `ocr_pdf` �
 | 安装包 / exe / 快捷方式 / 任务栏 | `desktop/build/icon.ico` | electron-builder 的 `win.icon`，含 16/24/32/48/64/128/256 |
 | 浏览器 favicon / PWA / 侧栏 logo | `web/public/icon-192.png`、`icon-512.png` | 192 / 512 透明底 PNG |
 | iOS 主屏 | `web/public/apple-touch-icon.png` | 180×180，深色底（iOS 不支持透明） |
-| 设计源图 | `docs/assets/logo-helmet.png` | 1024 透明底，改图标时从这里重新导出 |
+| 设计源图 | `desktop/build/icon.svg` | 1024 矢量源，改图标后据此重出 PNG / ICO |
 
-- 图标主体是深色拉丝金属机器人头盔 + 蓝紫渐变面罩，四周留 6% 透明安全区。
+- 图标主体是亮蓝渐变圆角方块上的白色终端提示符气泡（`>_`），四周留约 6% 透明安全区，16px 下仍可辨识。
 - 侧栏 logo 与 favicon 共用同一个 `icon-192.png`，不再单独维护副本。
-- 更换流程：替换 `docs/assets/logo-helmet.png` → 导出上述 PNG → 用多尺寸 ico 工具生成 `desktop/build/icon.ico` → 重新打包。
+- 更换流程：改 `desktop/build/icon.svg` → 重新导出 `icon-192.png` / `icon-512.png` / `apple-touch-icon.png` → 生成多尺寸 `desktop/build/icon.ico` → 重新打包。
+
+### 2.6 版本号
+
+根目录 `VERSION`（纯文本，如 `1.0.0`）是唯一真源：
+
+| 消费方 | 读取方式 |
+|---|---|
+| 运行时 / 界面 | `core.__version__` 启动时读 `VERSION`（装进 site-packages 时退回 `importlib.metadata`），经 `/api/state` 显示在侧栏标题右侧 |
+| Python 包元数据 | `pyproject.toml` 的 `dynamic = ["version"]` 指向 `VERSION` |
+| 安装包 / exe | `build_desktop.py` 校验 semver 后同步 `desktop/package.json`，electron-builder 据此生成文件名与版本资源 |
+
+- 发版只改 `VERSION` 一处
+- `VERSION` 随 `APP_ITEMS` 复制进 `app\VERSION`，打包态与源码态读到同一个值
+- `tests/test_webui.py` 有一致性断言（`VERSION` = `core.__version__` = `/api/health` = `desktop/package.json`）
+- electron-builder 只接受 3 段 semver；需要递增构建号时用 `buildVersion` 字段，不要写成 `1.0.0.1`
 
 ## 3. 使用方式
 
@@ -87,7 +102,20 @@ OCR 依赖约 196MB、近 2.5 千个文件，但只有 `ocr_image` / `ocr_pdf` �
 cd web; npm install; cd ..
 ```
 
-### 3.2 构建前端
+### 3.2 一键打包（推荐）
+
+根目录 `package.bat` 串起了下面 3.3–3.6 的全部步骤：
+
+```bat
+package.bat             :: 双击运行，结束时暂停并显示结果
+package.bat --no-pause  :: 自动化调用，不暂停
+```
+
+依次执行：校验 `.venv` / node / npm → 关闭本项目正在运行的 `mini-agent.exe`（避免文件占用导致覆盖失败）→ 缺依赖时补 `npm install` → 构建前端 → `build_desktop.py --skip-web` → `npm run dist` → 校验安装包并打印路径与体积。任一步失败立即中止。
+
+版本号只改根目录 `VERSION`（见 2.6）。需要排查单个环节时，再走下面的分步流程。
+
+### 3.3 构建前端
 
 ```powershell
 cd web
@@ -97,7 +125,7 @@ cd ..
 
 `build_desktop.py` 发现 `web\dist\index.html` 不存在时会自动调用 `npm run build`；已有产物则跳过。
 
-### 3.3 准备打包资源
+### 3.4 准备打包资源
 
 ```powershell
 .venv\Scripts\python.exe scripts\build_desktop.py
@@ -113,14 +141,14 @@ cd ..
 2. 反向确认 OCR 库已不在基础依赖里（`cv2 / onnxruntime / sympy` 的 `find_spec` 应为 None）
 3. 用暂存目录冒充已解压状态，验证 OCR 依赖可用（`cv2 / numpy / shapely / pyclipper / yaml / google.protobuf / onnxruntime / rapidocr_onnxruntime`，其中 numpy 来自基础包）
 
-### 3.4 安装 Electron 依赖（首次）
+### 3.5 安装 Electron 依赖（首次）
 
 ```powershell
 cd desktop
 npm install            # 会下载约 115MB 的 Electron
 ```
 
-### 3.5 打包
+### 3.6 打包
 
 ```powershell
 npm run dist
@@ -133,20 +161,22 @@ npm run dist
 | `desktop/release/mini-agent Setup 1.0.0.exe` | NSIS 安装版，可选安装目录、创建桌面快捷方式 |
 | `desktop/release/win-unpacked/` | 未压缩目录，调试首选 |
 
+安装 / 卸载向导默认展开明细面板：`desktop/build/installer.nsh` 在 `customHeader` 里把 electron-builder 模板的 `ShowInstDetails nevershow` 覆盖为 `show`。应用负载是整包 `app-64.7z` 一次性解压，明细里只会出现阶段日志，不会逐文件滚动。
+
 只要未压缩目录：
 
 ```powershell
 npx electron-builder --win --dir
 ```
 
-### 3.6 开发运行（不打包）
+### 3.7 开发运行（不打包）
 
 ```powershell
 cd desktop
 npm start              # tsc 编译后用 electron . 启动，复用仓库 .venv
 ```
 
-### 3.7 改完代码重新打包
+### 3.8 改完代码重新打包
 
 改了后端 / 工具 / 技能 / 前端：
 
@@ -161,7 +191,10 @@ cd desktop; npm run dist
 
 | 位置 | 作用 |
 |---|---|
+| `VERSION` | 版本号唯一真源；`core.__version__`、`pyproject.toml` 与 `desktop/package.json` 均由它派生 |
+| `package.bat` | 一键打包：前端构建 → 资源打包 → NSIS 安装包 |
 | `scripts/build_desktop.py` | 准备 `app/`、`python/` 与 `ocr-pack.zip`；`APP_ITEMS` 控制随包内容，`PY_SKIP_*` / `SITE_SKIP` 控制裁剪，`OCR_PREFIXES` 决定哪些包移入组件包 |
+| `desktop/build/installer.nsh` | 覆盖 NSIS 模板默认设置，打开安装 / 卸载明细面板 |
 | `desktop/package.json` | electron-builder 配置：`extraResources` 把 `build/desktop-resources/{app,python,ocr-pack.zip}` 映射到安装目录 `resources/` |
 | `desktop/src/main.ts` | 生命周期、单实例、读配置、启动失败诊断框、退出时关后端 |
 | `desktop/src/backend.ts` | spawn 内置 Python、解析 READY/ERROR、`/api/shutdown` + `taskkill` 回收进程树 |
@@ -216,11 +249,11 @@ $env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
 
 | 项 | 体积 | 文件数 |
 |---|---|---|
-| `resources/app` | 10.8 MB | 253 |
+| `resources/app` | 10.7 MB | 254 |
 | `resources/python` | 217.9 MB | 10,554 |
 | `resources/ocr-pack.zip` | 76.5 MB | 1 |
-| 安装前 payload 合计 | 305.2 MB | 10,808 |
-| NSIS 安装包 | 221.7 MB | — |
+| 安装前 payload 合计 | 305.1 MB | 10,809 |
+| NSIS 安装包 | 221.4 MB | — |
 
 对比优化前：payload 720MB / 19,933 文件、安装包 210.6MB。安装包体积略增（zip 已压缩，NSIS 无法再压缩），但安装时写盘量和文件数分别下降 58% 和 46%，这才是安装耗时的决定因素。
 
@@ -234,7 +267,7 @@ $env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
 
 ### 5.5 其他已知限制
 
-- 安装包未签名（首次运行有 SmartScreen 提示）、暂用 Electron 默认图标
+- 安装包未签名（首次运行有 SmartScreen 提示）
 - 桌面版仍要求登录（沿用 `auth.db`），与浏览器版共享同一套账号体系，但数据目录不同（`%APPDATA%\mini-agent` vs `~/.mini-agent`），首次启动是空库
 - 端口 `8317` 被占用时启动失败并给排查命令（`netstat -ano | findstr :8317`），这是刻意设计，不做随机端口回退
 - 首次使用 OCR 会解压组件包（约 2–4 秒）；解压目录在 `%APPDATA%\mini-agent\pylibs\ocr`，可直接删除以强制重建
