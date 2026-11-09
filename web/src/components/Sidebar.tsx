@@ -231,10 +231,9 @@ export default function Sidebar({
 
   return (
     <div className="sidebar">
-      {/* ① 品牌区：logo + 标题 + 折叠图标 */}
+      {/* ① 品牌区：项目名称 + 折叠图标 */}
       <div className="sidebar-brand">
-        <img src="/icon-192.png" className="brand-logo" alt="mini-agent" />
-        <span className="brand-name">mini-agent</span>
+        <span className="brand-name">MiniAgent</span>
         <Tooltip title={collapsed ? "展开侧栏" : "收起侧栏"}>
           <MenuOutlined className="sidebar-toggle" onClick={onToggleCollapse} />
         </Tooltip>

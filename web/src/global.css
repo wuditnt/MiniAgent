@@ -2861,7 +2861,7 @@ body.sidebar-resizing .sidebar-resizer::after {
   align-items: center !important;
 }
 
-/* ---- 侧栏：品牌区（logo + 标题 + 折叠图标） ---- */
+/* ---- 侧栏：品牌区（项目名称 + 折叠图标） ---- */
 .sidebar-brand {
   flex: none;
   display: flex;
@@ -2870,17 +2870,11 @@ body.sidebar-resizing .sidebar-resizer::after {
   padding: 14px 14px 10px;
 }
 
-.brand-logo {
-  flex: none;
-  width: 28px;
-  height: 28px;
-  object-fit: contain;
-}
-
 .brand-name {
   flex: 1;
-  font-size: 16px;
-  font-weight: 600;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
   color: var(--tx-ink-088);
 }
 
