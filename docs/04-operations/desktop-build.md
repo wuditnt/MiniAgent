@@ -89,6 +89,21 @@ OCR 依赖约 196MB、近 2.5 千个文件，但只有 `ocr_image` / `ocr_pdf` �
 - `tests/test_webui.py` 有一致性断言（`VERSION` = `core.__version__` = `/api/health` = `desktop/package.json`）
 - electron-builder 只接受 3 段 semver；需要递增构建号时用 `buildVersion` 字段，不要写成 `1.0.0.1`
 
+### 2.7 关闭行为与托盘
+
+关窗行为存在 `desktop-config.json` 的 `close_action`，取值 `ask`（默认）/ `tray` / `quit`：
+
+| 取值 | 点标题栏关闭时 |
+|---|---|
+| `ask` | 首次弹窗询问「最小化到托盘 / 退出程序」，选择结果**立即写回配置**，之后按选定的方式执行，不再询问 |
+| `tray` | 窗口隐藏到托盘，后端与调度器继续运行，自动化任务照常触发 |
+| `quit` | 走正常退出：先停后端再退出进程 |
+
+- 托盘图标常驻：**左键**恢复主窗口；**右键**菜单「打开主界面」/「退出」，「退出」同样先停后端
+- 窗口真正销毁时一并销毁托盘图标，不会留下幽灵图标
+- 用户可在「系统配置 → 桌面」页签随时改回三种模式之一，切换即时生效、无需重启
+- 相关代码：`desktop/src/main.ts`（`win.on('close')`、`Tray`）、`desktop/src/config.ts`（`close_action`）、`desktop/src/preload.ts`（`desktop:set-close-action`）、`web/src/components/DesktopPanel.tsx`
+
 ## 3. 使用方式
 
 ### 3.1 前置条件
@@ -196,10 +211,10 @@ cd desktop; npm run dist
 | `scripts/build_desktop.py` | 准备 `app/`、`python/` 与 `ocr-pack.zip`；`APP_ITEMS` 控制随包内容，`PY_SKIP_*` / `SITE_SKIP` 控制裁剪，`OCR_PREFIXES` 决定哪些包移入组件包 |
 | `desktop/build/installer.nsh` | 覆盖 NSIS 模板默认设置，打开安装 / 卸载明细面板 |
 | `desktop/package.json` | electron-builder 配置：`extraResources` 把 `build/desktop-resources/{app,python,ocr-pack.zip}` 映射到安装目录 `resources/` |
-| `desktop/src/main.ts` | 生命周期、单实例、读配置、启动失败诊断框、退出时关后端 |
+| `desktop/src/main.ts` | 生命周期、单实例、读配置、启动失败诊断框、关窗拦截与托盘、退出时关后端 |
 | `desktop/src/backend.ts` | spawn 内置 Python、解析 READY/ERROR、`/api/shutdown` + `taskkill` 回收进程树 |
-| `desktop/src/config.ts` | `%APPDATA%\mini-agent\desktop-config.json` 读写、数据/日志目录 |
-| `desktop/src/preload.ts` | `window.__DESKTOP__` 白名单桥（前端据此显示桌面专属 UI） |
+| `desktop/src/config.ts` | `%APPDATA%\mini-agent\desktop-config.json` 读写（含 `lan_enabled`、`close_action`）、数据/日志目录 |
+| `desktop/src/preload.ts` | `window.__DESKTOP__` 白名单桥（前端据此显示桌面专属 UI），含 `setCloseAction` |
 | `src/core/main.py` | `--desktop`、固定端口与 `--host` 校验 |
 | `src/core/extra_libs.py` | 解压 `ocr-pack.zip` 到数据目录并注入 `sys.path` / `PYTHONPATH`（`MINI_AGENT_EXTRA_PACK` / `MINI_AGENT_EXTRA_LIBS`） |
 | `src/core/webui.py` | `MINI_AGENT_READY / MINI_AGENT_ERROR` 握手、`/api/health` 的 `mode / host / lan_urls` |

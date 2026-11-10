@@ -12,10 +12,11 @@
 - **时间规则**：四种形态——`once`（单次）、`daily`（每天 HH:MM）、`weekly`（每周某几天 HH:MM）、`interval`（每 N 分钟，最小 5 分钟）。全部按本机时区计算。
 - **无人值守**：自动化触发的运行没有人在屏幕前，确认请求一律自动拒绝，`ask_user` 返回「当前为自动执行，无人应答」并继续跑。
 - **未读**：自动化跑完而你没有正在看那个会话时，会话被标记未读；侧栏「自动化」入口与对应会话项显示红点，打开会话即清除。
+- **实时呈现**：前端常驻一条全局事件流（`GET /api/events`），只广播 `session_created` / `run_started` / `run_finished` 三个控制信号，不含正文。点「立即执行」时会话立刻出现在侧栏、运行中状态立刻点亮、跑完立刻补拉终稿；正文仍由 `/api/chat/stream` 的多会话快照 + 增量推送。`/api/running` 轮询降级为兜底。
 
 ## 使用方式
 
-- **入口**：侧栏「自动化」。空状态给出 8 个内置模板（AI 新闻简报、品牌舆情周报、竞品追踪、股价预警、安全漏洞扫描、提交 Bug 扫描、补充测试覆盖、每日变更摘要），点模板即预填创建表单。
+- **入口**：侧栏「自动化」。空状态给出 7 个内置模板（每日 AI 新闻简报、品牌舆情监控周报、每周竞品动态追踪、股价监控与预警（A 股）、安全漏洞扫描、提交后缺陷检查与修复、每日变更摘要），点模板即预填创建表单；已有任务后模板入口收进标题栏的「从模板新建」下拉。
 - **新建 / 编辑**：填写名称与执行内容，选工作区、模型、是否联网；选重复方式并设置时间，表单下方实时预览「接下来 3 次」。任务一旦产生会话，工作区不可再改。
 - **列表操作**：启停开关、立即执行（不改排期）、查看会话、编辑、删除。删除只清任务与执行历史，会话保留。
 - **AI 助手**：编辑已有任务时可展开右侧助手，用自然语言说「改成工作日早上八点半」「提示词里加上只列重点」，模型返回结构化 patch，面板逐字段展示「旧值 → 新值」，确认后才写入表单，**保存仍需点保存**；对话历史保留最近 40 条，可清空。
@@ -36,9 +37,11 @@
   - `WebServer.start_run()`（会话运行链路统一入口，`/api/chat` 与自动化共用）
   - `create_automation_session()`、`run_automation_task()`
   - 无人值守短路：`WebUI` 内的 `ask_confirm` / `ask_approval` / `ask_user`
+  - 全局事件流：`_emit_global()`、`_GLOBAL_SUBS`、`_handle_events()`（`GET /api/events`）
+  - 本轮用户消息补齐：`_Session.pending_turn`、`_with_pending_user()`——消息真正写入 `agent.messages` 之前，快照 / 历史也能带上这一轮的用户气泡
   - 路由：`GET /api/automations`、`POST /api/automations`、`PUT|DELETE /api/automations/<id>`、`POST /api/automations/<id>/run`、`POST /api/automations/<id>/assist`、`GET|DELETE /api/automations/<id>/chat`、`POST /api/sessions/<id>/read`
   - 处理器：`_handle_automations_list()`、`_handle_automation_create/update/delete/run()`、`_handle_automation_assist()`、`_clean_automation_patch()`、`_parse_json_object()`
-- 前端：`web/src/components/AutomationsPage.tsx`、`AutomationEditor.tsx`、`AutomationAssistant.tsx`、`automationTemplates.ts`；样式在 `web/src/global.css`
+- 前端：`web/src/components/AutomationsPage.tsx`、`AutomationEditor.tsx`、`AutomationAssistant.tsx`、`automationTemplates.ts`；事件流在 `web/src/eventStream.ts`（全局控制信号）与 `web/src/sessionStream.ts`（多会话正文）；样式在 `web/src/global.css`
 - 测试：`tests/test_automation.py`（14 项：规则边界 / 校验 / CRUD / 原子领取 / 收口 / 崩溃恢复 / 错过排期 / 对话裁剪 / 无人值守 / 未读）
 
 ## 注意事项

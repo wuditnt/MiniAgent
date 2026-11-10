@@ -91,8 +91,9 @@ HTTP（远程服务）：
 
 `mcp/presets.json` 提供 8 个模板：filesystem、fetch、memory、git、sqlite、time、puppeteer、sequential-thinking。界面「从模板添加」读取 `GET /api/connectors/presets`，自动生成不重名的标识；路径类参数保留 `D:\path\to\folder` 占位，并在抽屉顶部提示替换。
 
-## 失败可见与重试
+## 启停与失败重试
 
+- 每张卡片底部是一个开关（开 = 启用，关 = 禁用），旁边显示状态文字（已连接 / 连接失败 / 未启动 / 已禁用）；切换即热加载，无需重启后端。远程只读、MCP 未启用或该连接有任务执行中时开关置灰。
 - 启动失败会记录 `started_ms`（启动耗时）、`attempts`（尝试次数）、`stderr_tail`（stderr 末尾若干行）与完整错误；
 - 第一次启动/握手失败会**自动重试一次**（间隔 0.3s），错误信息追加「已自动重试 N 次」；
 - 界面失败卡片展示原因、耗时、尝试次数与 stderr，并提供「重试」按钮（`POST /api/connectors/retry`）。
