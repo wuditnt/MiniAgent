@@ -305,6 +305,8 @@ export default function App({
   const [runningIds, setRunningIds] = useState<Set<string>>(() => new Set());
   // 运行状态由「空闲 → 运行」时自增：驱动当前会话重新拉一次历史（拿到本轮用户消息与草稿）
   const [runReload, setRunReload] = useState(0);
+  // 刚触发过自动化执行的会话：下次打开时即使已跑完也要重拉历史，避免命中旧缓存
+  const pendingReloadRef = useRef<Set<string>>(new Set());
   const prevRunningRef = useRef<Set<string>>(new Set());
   /** 上一个会话 id：切走时保存滚动/草稿并决定是否释放运行时 */
   const prevSidRef = useRef(session);
@@ -458,13 +460,17 @@ export default function App({
       if (hit != null && hit >= 0 && hit < cur.items.length) jumpToHit(hit);
       return;
     }
-    // 已有缓存且当前空闲：直接渲染；运行中的会话必须重拉，才能看到本轮消息与草稿
-    if (cur.loaded && !runningIds.has(session)) {
+    // 已有缓存且当前空闲、且不是刚触发过自动化的会话：直接渲染；
+    // 运行中或刚执行完的会话必须重拉，否则看到的是上一轮的旧内容
+    const pendingReload = pendingReloadRef.current.has(session);
+    if (cur.loaded && !runningIds.has(session) && !pendingReload) {
       const hit = pendingHit.current;
       pendingHit.current = null;
       if (hit != null && hit >= 0 && hit < cur.items.length) jumpToHit(hit);
       return;
     }
+    // 这次重拉已兑现，标记消费掉，避免每次切回都网络请求
+    if (pendingReload) pendingReloadRef.current.delete(session);
     fetchHistory(session)
       .then((h) => {
         // 切走后又切回来了才有必要写入；流已抢先建立时交给 snapshot
@@ -510,9 +516,10 @@ export default function App({
         }
       })
       .catch(() => {});
-    // runReload：运行开始信号，触发重拉；不监听 runningIds 本身，避免每次轮询都重拉
+    // runReload：运行开始信号，触发重拉；view：回到对话页时补齐待刷新的会话
+    // 不监听 runningIds 本身，避免每次轮询都重拉
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, runReload]);
+  }, [session, runReload, view]);
 
   // 快捷键
   useEffect(() => {
@@ -2059,7 +2066,8 @@ export default function App({
               models={models}
               workspaceId={ws}
               remote={!!state?.remote}
-              onSessionCreated={() => {
+              onSessionCreated={(sid) => {
+                if (sid) pendingReloadRef.current.add(sid);
                 refreshSessions();
                 syncRunning();
               }}
