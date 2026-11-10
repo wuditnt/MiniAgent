@@ -24,7 +24,9 @@ export function setEventStreamHandler(fn: (ev: GlobalEvent) => void): void {
 
 /** 启动全局事件流（幂等：已有连接时直接返回） */
 export function startEventStream(): void {
-  if (closed) return;
+  // 必须复位：StrictMode 会「挂载→清理→再挂载」把 closed 置真，
+  // 登录/登出导致 App 重挂载同理；不复位就再也连不上了
+  closed = false;
   if (ctrl) return;
   restart();
 }

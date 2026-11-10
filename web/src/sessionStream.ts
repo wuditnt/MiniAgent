@@ -29,6 +29,9 @@ export function setStreamHandler(fn: (ev: SSEEvent) => void): void {
 /** 设置本页关心的会话集合；只有新增会话才会触发重连 */
 export function setInterest(next: string[]): void {
   const uniq = [...new Set(next.filter(Boolean))].sort();
+  // 有订阅需求就复位 closed：StrictMode 的「挂载→清理→再挂载」会把 closed 置真，
+  // 登录/登出重挂载同理；不复位则共享流永久失效（只剩轮询出来的运行点）
+  if (uniq.length) closed = false;
   const added = uniq.filter((sid) => !prevDesired.includes(sid));
   const same = uniq.length === prevDesired.length &&
     uniq.every((sid, i) => sid === prevDesired[i]);
