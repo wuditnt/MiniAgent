@@ -9,6 +9,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import {
+  AppstoreOutlined,
   DeleteOutlined,
   EditOutlined,
   PlayCircleOutlined,
@@ -17,7 +18,7 @@ import {
   RobotOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
-import { Button, Empty, Popconfirm, Switch, Tag, Tooltip, message } from "antd";
+import { Button, Dropdown, Empty, Popconfirm, Switch, Tag, Tooltip, message } from "antd";
 import type { AutomationTask, ModelProvider, WorkspaceItem } from "../types";
 import { deleteAutomation, fetchAutomations, runAutomation, updateAutomation } from "../api";
 import AutomationEditor from "./AutomationEditor";
@@ -143,6 +144,36 @@ export default function AutomationsPage({
           <Tooltip title="刷新">
             <Button icon={<ReloadOutlined />} onClick={() => load()} loading={loading} />
           </Tooltip>
+          {!remote && (
+            <Dropdown
+              trigger={["click"]}
+              overlayClassName="template-menu"
+              menu={{
+                items: AUTOMATION_TEMPLATES.map((tpl) => ({
+                  key: tpl.key,
+                  label: (
+                    <div className="template-menu-item">
+                      <span className="template-menu-name">{tpl.name}</span>
+                      <span className="template-menu-meta">{describeSchedule(tpl.schedule)}</span>
+                    </div>
+                  ),
+                })),
+                onClick: ({ key }) => {
+                  const tpl = AUTOMATION_TEMPLATES.find((x) => x.key === key);
+                  if (!tpl) return;
+                  openCreate({
+                    name: tpl.name,
+                    prompt: tpl.prompt,
+                    schedule: tpl.schedule,
+                    web: tpl.web,
+                    workspace_id: workspaceId,
+                  });
+                },
+              }}
+            >
+              <Button icon={<AppstoreOutlined />}>从模板新建</Button>
+            </Dropdown>
+          )}
           {!remote && (
             <Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate()}>
               新建任务

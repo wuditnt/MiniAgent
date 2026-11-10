@@ -5199,6 +5199,28 @@ body.sidebar-resizing .sidebar-resizer::after {
   margin-top: 12px;
 }
 
+/* 标题栏「从模板新建」下拉：每项两行（模板名 + 排期） */
+.template-menu .ant-dropdown-menu {
+  min-width: 240px;
+}
+
+.template-menu-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+}
+
+.template-menu-name {
+  font-size: 13px;
+  color: var(--tx-1f1f1f);
+}
+
+.template-menu-meta {
+  font-size: 12px;
+  color: var(--tx-999999);
+}
+
 .template-card {
   display: flex;
   flex-direction: column;
