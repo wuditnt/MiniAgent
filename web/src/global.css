@@ -4809,53 +4809,9 @@ body.sidebar-resizing .sidebar-resizer::after {
   padding: 22px 24px 48px;
 }
 
-.skill-page {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-fafbfc);
-}
-
-.skill-page-head {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 10px 24px;
-  background: var(--bg-ffffff);
-  border-bottom: 1px solid var(--bd-f0f0f0);
-}
-
-.skill-page-head-left {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-
-.skill-page-title {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--tx-1f1f1f);
-}
-
-.skill-page-count {
-  font-size: 12px;
-  color: var(--tx-999999);
-}
-
 .skill-page-note {
   font-size: 12px;
   color: var(--tx-bfbfbf);
-}
-
-.skill-page-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 22px 24px 48px;
 }
 
 .skill-page-loading {
@@ -5220,57 +5176,6 @@ body.sidebar-resizing .sidebar-resizer::after {
 .run-detail-tools { margin-top: 8px; }
 
 /* ================================================================ 自动化任务 */
-
-.automations-page {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 24px 28px 56px;
-  background: var(--bg-fafbfc);
-}
-
-.automation-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  max-width: 980px;
-  margin: 0 auto 18px;
-}
-
-.automation-head-left {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  min-width: 0;
-}
-
-.automation-head-icon {
-  font-size: 20px;
-  color: #1677ff;
-  margin-top: 3px;
-}
-
-.automation-head h2 {
-  margin: 0 0 4px;
-  font-size: 18px;
-  font-weight: 600;
-  color: var(--tx-1f1f1f);
-}
-
-.automation-head p {
-  margin: 0;
-  font-size: 12.5px;
-  line-height: 1.7;
-  color: var(--tx-999999);
-}
-
-.automation-head-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: none;
-}
 
 .automation-remote-tip {
   max-width: 980px;

@@ -2009,7 +2009,6 @@ export default function App({
           {view === "skills" && (
             <SkillManager
               workspaceId={ws}
-              onClose={() => setView("chat")}
               onTrial={(skill: SkillItem) => {
                 setView("chat");
                 setMode("agent");     // 试用技能必须处于智能体模式
@@ -2018,7 +2017,7 @@ export default function App({
             />
           )}
           {view === "connectors" && (
-            <ConnectorsPage onClose={() => setView("chat")} remote={!!state?.remote} />
+            <ConnectorsPage remote={!!state?.remote} />
           )}
           {view === "automations" && (
             <AutomationsPage
@@ -2026,7 +2025,6 @@ export default function App({
               models={models}
               workspaceId={ws}
               remote={!!state?.remote}
-              onClose={() => setView("chat")}
               onOpenSession={(sid) => handleSelectSession(sid)}
             />
           )}

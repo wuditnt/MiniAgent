@@ -9,7 +9,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 import {
   ApiOutlined,
-  ArrowLeftOutlined,
   CheckCircleFilled,
   CloseCircleFilled,
   DeleteOutlined,
@@ -62,8 +61,6 @@ import type {
 import "./connectors.css";
 
 interface Props {
-  /** 返回对话页 */
-  onClose: () => void;
   /** 远程访问：只读，隐藏所有写操作 */
   remote?: boolean;
 }
@@ -157,7 +154,7 @@ function statusOf(c: ConnectorInfo): { label: string; cls: string; icon: ReactNo
   return { label: "未启动", cls: "idle", icon: <MinusCircleFilled /> };
 }
 
-export default function ConnectorsPage({ onClose, remote }: Props) {
+export default function ConnectorsPage({ remote }: Props) {
   const [loading, setLoading] = useState(false);
   const [runtime, setRuntime] = useState<ConnectorRuntime | null>(null);
   const [mcpEnabled, setMcpEnabled] = useState(true);
@@ -423,9 +420,6 @@ export default function ConnectorsPage({ onClose, remote }: Props) {
     <div className="page connectors-page">
       <header className="page-head">
         <div className="page-head-left">
-          <Tooltip title="返回对话">
-            <Button type="text" icon={<ArrowLeftOutlined />} onClick={onClose} />
-          </Tooltip>
           <ApiOutlined className="page-title-icon" />
           <span className="page-title">连接</span>
           <span className="page-sub">把外部 MCP 能力接入 mini-agent，连接一次，所有会话可用</span>

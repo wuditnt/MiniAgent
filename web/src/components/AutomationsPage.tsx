@@ -35,7 +35,6 @@ interface Props {
   /** 当前工作区：模板创建时的默认归属 */
   workspaceId: string;
   remote?: boolean;
-  onClose: () => void;
   /** 打开任务产生的会话（跳回对话页） */
   onOpenSession: (sid: string) => void;
 }
@@ -58,7 +57,6 @@ export default function AutomationsPage({
   models,
   workspaceId,
   remote,
-  onClose,
   onOpenSession,
 }: Props) {
   const [tasks, setTasks] = useState<AutomationTask[]>([]);
@@ -134,16 +132,14 @@ export default function AutomationsPage({
   };
 
   return (
-    <div className="automations-page">
-      <header className="automation-head">
-        <div className="automation-head-left">
-          <ThunderboltOutlined className="automation-head-icon" />
-          <div>
-            <h2>自动化任务</h2>
-            <p>到点自动执行一次任务，结果写入同一条会话；应用关闭期间错过的排期不会补跑。</p>
-          </div>
+    <div className="page automations-page">
+      <header className="page-head">
+        <div className="page-head-left">
+          <ThunderboltOutlined className="page-title-icon" />
+          <span className="page-title">自动化</span>
+          <span className="page-sub">到点自动执行一次任务，结果写入同一条会话；应用关闭期间错过的排期不会补跑</span>
         </div>
-        <div className="automation-head-actions">
+        <div className="page-head-right">
           <Tooltip title="刷新">
             <Button icon={<ReloadOutlined />} onClick={() => load()} loading={loading} />
           </Tooltip>
@@ -152,11 +148,11 @@ export default function AutomationsPage({
               新建任务
             </Button>
           )}
-          <Button onClick={onClose}>返回对话</Button>
         </div>
       </header>
 
-      {remote && <div className="automation-remote-tip">远程访问为只读模式，只能查看任务与结果。</div>}
+      <div className="page-body">
+        {remote && <div className="automation-remote-tip">远程访问为只读模式，只能查看任务与结果。</div>}
 
       {!loading && tasks.length === 0 && (
         <div className="automation-empty">
@@ -314,6 +310,7 @@ export default function AutomationsPage({
         onClose={() => setEditor({ open: false, task: null, initial: null })}
         onSaved={handleSaved}
       />
+      </div>
     </div>
   );
 }
