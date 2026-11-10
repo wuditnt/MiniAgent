@@ -268,7 +268,9 @@ export async function deleteAutomation(id: string): Promise<void> {
 }
 
 /** 立即执行一次（不改排期）；会话忙碌时后端返回 409 */
-export async function runAutomation(id: string): Promise<{ run_id: number; task: AutomationTask }> {
+export async function runAutomation(
+  id: string
+): Promise<{ run_id: number; session_id: string; task: AutomationTask }> {
   const res = await req(`/api/automations/${encodeURIComponent(id)}/run`, { method: "POST" });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();

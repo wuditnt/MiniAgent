@@ -2338,16 +2338,25 @@ class WebServer:
         session.automation_id = str(task.get("id") or "")
         return sid
 
+    def ensure_automation_session(self, task: dict) -> str:
+        """确保任务已有可用会话：复用 task.session_id，文件丢失则重建并写回。
+
+        立即执行会在启动执行线程前同步调用，保证接口返回时会话已出现在会话列表。
+        """
+        sid = str(task.get("session_id") or "")
+        if sid and events.valid_sid(sid) and _load_session_file(sid) is not None:
+            return sid
+        sid = self.create_automation_session(task)
+        automation.set_session_id(task["id"], sid)
+        return sid
+
     def run_automation_task(self, task: dict, run_id: int, on_done=None) -> _Session:
         """执行一次自动化任务：复用/创建会话 → start_run（无订阅、无人值守）。
 
         会话文件被用户删掉时自动重建主题，并把新的 session_id 写回任务行。
         """
-        sid = str(task.get("session_id") or "")
-        if not sid or not events.valid_sid(sid) or _load_session_file(sid) is None:
-            sid = self.create_automation_session(task)
-            automation.set_session_id(task["id"], sid)
-            task = {**task, "session_id": sid}
+        sid = self.ensure_automation_session(task)
+        task = {**task, "session_id": sid}
         session = self.session(sid)
         payload = {
             "message": task.get("prompt") or "",
@@ -3264,7 +3273,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
             else:
                 self._fail(409, e.message)
             return
-        self._json({"ok": True, "run_id": run_id, "task": self._automation_payload(task)})
+        self._json({
+            "ok": True,
+            "run_id": run_id,
+            "session_id": str(task.get("session_id") or ""),
+            "task": self._automation_payload(task),
+        })
 
     def _handle_automation_chat_list(self, task_id: str) -> None:
         if automation.get_task(task_id) is None:

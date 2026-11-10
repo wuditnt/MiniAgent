@@ -103,6 +103,11 @@ class AutomationScheduler:
         task = automation.get_task(task_id)
         if task is None:
             raise automation.AutomationError("任务不存在")
+        # 起线程前先把会话落盘：前端收到响应即可刷新出该会话
+        try:
+            task = {**task, "session_id": self._server.ensure_automation_session(task)}
+        except Exception:  # noqa: BLE001 —— 建会话失败不阻断执行，交给执行线程兜底
+            _log.exception("automation.prepare_session_failed task=%s", task_id)
         threading.Thread(
             target=self._execute,
             args=(task, run_id),

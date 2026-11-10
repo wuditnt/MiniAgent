@@ -2025,6 +2025,7 @@ export default function App({
               models={models}
               workspaceId={ws}
               remote={!!state?.remote}
+              onSessionCreated={() => refreshSessions()}
               onOpenSession={(sid) => handleSelectSession(sid)}
             />
           )}

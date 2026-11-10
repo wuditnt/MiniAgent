@@ -36,6 +36,8 @@ interface Props {
   /** 当前工作区：模板创建时的默认归属 */
   workspaceId: string;
   remote?: boolean;
+  /** 任务会话刚创建：通知外层刷新左侧会话列表 */
+  onSessionCreated?: (sid: string) => void;
   /** 打开任务产生的会话（跳回对话页） */
   onOpenSession: (sid: string) => void;
 }
@@ -58,6 +60,7 @@ export default function AutomationsPage({
   models,
   workspaceId,
   remote,
+  onSessionCreated,
   onOpenSession,
 }: Props) {
   const [tasks, setTasks] = useState<AutomationTask[]>([]);
@@ -104,8 +107,9 @@ export default function AutomationsPage({
   const handleRun = async (task: AutomationTask) => {
     setBusyId(task.id);
     try {
-      await runAutomation(task.id);
-      message.success("已开始执行，稍后可在任务生成的会话中查看结果");
+      const res = await runAutomation(task.id);
+      if (res.session_id) onSessionCreated?.(res.session_id);
+      message.success("已开始执行，会话已出现在左侧工作区");
       await load(true);
     } catch (e) {
       message.error((e as Error).message);
