@@ -2,7 +2,7 @@
  * 应用编排：模式/联网开关、消息流、SSE 消费、危险确认都在这里。
  * Chat / WelcomePane / ConfirmPanel / ToolChain 是纯展示组件。
  */
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, MoreOutlined, TeamOutlined, LockOutlined, LogoutOutlined, UserOutlined, BgColorsOutlined, CheckOutlined } from "@ant-design/icons";
 import { Dropdown, Input, message, Modal, Tooltip } from "antd";
 import {
@@ -303,6 +303,9 @@ export default function App({
   // 正在执行的会话 id 集合（侧栏「运行中」指示器数据源）；
   // 发消息时本地乐观加一个，之后以 /api/running 轮询结果为准
   const [runningIds, setRunningIds] = useState<Set<string>>(() => new Set());
+  // 运行状态由「空闲 → 运行」时自增：驱动当前会话重新拉一次历史（拿到本轮用户消息与草稿）
+  const [runReload, setRunReload] = useState(0);
+  const prevRunningRef = useRef<Set<string>>(new Set());
   /** 上一个会话 id：切走时保存滚动/草稿并决定是否释放运行时 */
   const prevSidRef = useRef(session);
 
@@ -374,6 +377,21 @@ export default function App({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * 立刻同步一次「运行中会话」：自动化任务开始后调用，避免等 3s 轮询。
+   * 运行集合变化会驱动订阅集合更新，进而收到带本轮消息与草稿的 snapshot。
+   */
+  const syncRunning = useCallback(() => {
+    if (document.visibilityState !== "visible") return Promise.resolve();
+    return fetchRunning()
+      .then((map) => {
+        const ids = new Set(Object.keys(map));
+        setRunningIds(ids);
+        rtApiRef.current.clearFinished(ids);
+      })
+      .catch(() => {});
+  }, []);
+
   // 侧栏「运行中」指示器：3s 轮询后端内存状态（只读、不碰磁盘）。
   // 页面切到后台时暂停轮询，回到前台立即补拉一次 —— 用户看不到时没必要请求。
   useEffect(() => {
@@ -414,6 +432,13 @@ export default function App({
     };
   }, []);
 
+  // 当前会话从「空闲」变「运行」：补拉一次历史，拿到本轮用户消息与已生成草稿
+  useEffect(() => {
+    const was = prevRunningRef.current.has(session);
+    prevRunningRef.current = runningIds;
+    if (runningIds.has(session) && !was) setRunReload((n) => n + 1);
+  }, [runningIds, session]);
+
   // 切换会话：运行中的会话保活（SSE 不断），非运行的释放数据、只留滚动与草稿
   useEffect(() => {
     localStorage.setItem(SESSION_KEY, session);
@@ -426,8 +451,15 @@ export default function App({
     }
     rtApi.prune(session);
     const cur = rtApi.ensure(session);
-    // 已有数据（保活中的运行会话 / 刚加载过）：直接渲染，不重新拉历史
-    if (cur.loaded || cur.streaming) {
+    // 流已建立：交给实时帧，不重复拉历史
+    if (cur.streaming) {
+      const hit = pendingHit.current;
+      pendingHit.current = null;
+      if (hit != null && hit >= 0 && hit < cur.items.length) jumpToHit(hit);
+      return;
+    }
+    // 已有缓存且当前空闲：直接渲染；运行中的会话必须重拉，才能看到本轮消息与草稿
+    if (cur.loaded && !runningIds.has(session)) {
       const hit = pendingHit.current;
       pendingHit.current = null;
       if (hit != null && hit >= 0 && hit < cur.items.length) jumpToHit(hit);
@@ -478,7 +510,9 @@ export default function App({
         }
       })
       .catch(() => {});
-  }, [session]);
+    // runReload：运行开始信号，触发重拉；不监听 runningIds 本身，避免每次轮询都重拉
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, runReload]);
 
   // 快捷键
   useEffect(() => {
@@ -2025,7 +2059,10 @@ export default function App({
               models={models}
               workspaceId={ws}
               remote={!!state?.remote}
-              onSessionCreated={() => refreshSessions()}
+              onSessionCreated={() => {
+                refreshSessions();
+                syncRunning();
+              }}
               onOpenSession={(sid) => handleSelectSession(sid)}
             />
           )}
