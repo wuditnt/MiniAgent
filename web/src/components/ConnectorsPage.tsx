@@ -172,6 +172,7 @@ export default function ConnectorsPage({ remote }: Props) {
   const [presets, setPresets] = useState<ConnectorPreset[]>([]);
   const [presetHint, setPresetHint] = useState("");
   const [retrying, setRetrying] = useState("");
+  const [toggling, setToggling] = useState("");
   const [importing, setImporting] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -372,11 +373,14 @@ export default function ConnectorsPage({ remote }: Props) {
   }
 
   async function onToggle(c: ConnectorInfo, enabled: boolean) {
+    setToggling(c.name);
     try {
       await toggleConnector(c.name, enabled);
       await reload();
     } catch (e) {
       message.error((e as Error).message);
+    } finally {
+      setToggling("");
     }
   }
 
@@ -396,18 +400,12 @@ export default function ConnectorsPage({ remote }: Props) {
     return {
       items: [
         { key: "edit", icon: <EditOutlined />, label: "编辑" },
-        {
-          key: "toggle",
-          icon: c.enabled ? <MinusCircleFilled /> : <ThunderboltOutlined />,
-          label: c.enabled ? "禁用" : "启用",
-        },
         { type: "divider" },
         { key: "delete", icon: <DeleteOutlined />, label: "删除", danger: true },
       ],
       onClick: ({ key, domEvent }) => {
         domEvent.stopPropagation();
         if (key === "edit") openEdit(c);
-        if (key === "toggle") void onToggle(c, !c.enabled);
         if (key === "delete") setDeleting(c);
       },
     };
@@ -586,9 +584,21 @@ export default function ConnectorsPage({ remote }: Props) {
                       {c.description || c.command}
                     </div>
                     <div className="connector-meta">
-                      <span className={`connector-state ${st.cls}`}>
-                        {st.icon}
-                        {st.label}
+                      <span
+                        className="connector-toggle"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <Switch
+                          size="small"
+                          checked={c.enabled}
+                          loading={toggling === c.name}
+                          disabled={locked}
+                          onChange={(v) => void onToggle(c, v)}
+                        />
+                        <span className={`connector-state ${st.cls}`}>
+                          {st.icon}
+                          {st.label}
+                        </span>
                       </span>
                       <Tooltip title={`已启用 ${c.tool_count} / 共 ${c.tool_total} 个工具`}>
                         <span className="connector-tools">
