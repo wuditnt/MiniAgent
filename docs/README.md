@@ -30,6 +30,7 @@
 | 改模型接入 / 推理等级 | [模型与推理等级](03-features/models-and-reasoning.md) |
 | 改确认、提问、取消 | [确认与授权](03-features/approval.md)、[内联提问](03-features/ask-user.md)、[取消机制](03-features/chat-and-agent.md#取消) |
 | 改记忆 / 事件流 / 登录 | [记忆](03-features/memory.md)、[运行轨迹](03-features/trajectory.md)、[登录与账号](03-features/auth-and-access.md) |
+| 加定时 / 后台任务 | [自动化任务](03-features/automation.md) |
 | 打包 Windows 桌面端 | [桌面端打包](04-operations/desktop-build.md) |
 
 ## 文档约定
@@ -65,6 +66,7 @@ docs/
 │   ├── sandbox.md                沙箱与安全边界
 │   ├── workbench.md              工作区文件抽屉（预览）
 │   ├── trajectory.md             事件流与运行轨迹
+│   ├── automation.md             自动化任务（定时执行）
 │   ├── auth-and-access.md        登录、账号与权限
 │   └── settings.md               通用配置、外观主题与运行日志
 └── 04-operations/

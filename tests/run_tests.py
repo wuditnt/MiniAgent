@@ -76,6 +76,7 @@ SUITES: list[tuple[str, str, bool]] = [
     ("test_model_config.py", "模型配置 10 项：厂家 spec（low/high/max）/ 三种参数风格与 values 重映射 / 迁移 / 会话解析 / 地址协议校验 / 密钥文件权限", False),
     ("test_web_search.py", "联网搜索 3 项：后端选择 / DeepSeek Key 复用 / 请求与解析", False),
     ("test_auth.py", "登录与账号 10 项：建库 / 默认超管 / 哈希 / 会话 / 限流 / 保护规则 / 已禁用超管降级 / 改密 / 写入节流", False),
+    ("test_automation.py", "自动化任务 14 项：规则计算 / 校验 / CRUD / 原子领取 / 收口 / 崩溃恢复 / 错过排期 / 对话裁剪 / 无人值守 / 未读", False),
     ("test_net_tools.py", "网络工具 4 项：云端/本地分派 / 失败回退 / 协议校验 / Fetch 请求解析", False),
     ("test_ask.py", "内联提问 16 项：返回协议 / 选项规范化 / 工具契约 / 等待桥 / 关闭 UI 不阻塞", False),
     ("test_approval.py", "审批默认值 4 项：无通道默认拒绝 / 显式 opt-in / 批准拒绝 / 桥故障", False),

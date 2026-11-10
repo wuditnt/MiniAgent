@@ -11,8 +11,11 @@ const api = {
   platform: process.platform,
   /** 后端连接信息：{ port, version, lanEnabled, dataDir, logFile } */
   backend: () => ipcRenderer.invoke('desktop:backend'),
-  /** 桌面端配置：{ lan_enabled, window } */
+  /** 桌面端配置：{ lan_enabled, close_action, window } */
   getConfig: () => ipcRenderer.invoke('desktop:get-config'),
+  /** 设置点击关闭按钮的行为：ask 每次询问 / tray 最小化到托盘 / quit 退出程序 */
+  setCloseAction: (action: 'ask' | 'tray' | 'quit') =>
+    ipcRenderer.invoke('desktop:set-close-action', action),
   /** 保存局域网开关（重启后生效） */
   setLanEnabled: (enabled: boolean) => ipcRenderer.invoke('desktop:set-lan', enabled),
   /** 重启应用（局域网开关生效） */

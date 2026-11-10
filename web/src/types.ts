@@ -111,6 +111,12 @@ export type SSEEvent = { session?: string; seq?: number } & (
     }
 );
 
+/** 全局事件流（/api/events）广播的控制信号：不含正文，只驱动列表刷新/历史重拉 */
+export type GlobalEvent =
+  | { type: "session_created"; session: string; workspace_id?: string; source?: string }
+  | { type: "run_started"; session: string; source?: string }
+  | { type: "run_finished"; session: string; status: string };
+
 /** 轨迹事件的来源（决定 Trajectory 视图的着色） */
 export type TraceSource =
   | "system"
@@ -248,8 +254,95 @@ export interface SessionItem {
   connectors?: string[] | null;
   /** 本会话的模式：chat=快速对话 / agent=智能体（随每轮消息落盘） */
   mode?: Mode;
+  /** 来源："" = 用户会话；automation = 自动化任务创建 */
+  source?: string;
+  /** 归属的自动化任务 id（用户会话为空） */
+  automation_id?: string;
+  /** 自动化跑完且尚未查看（进入会话即清除） */
+  unread?: boolean;
   /** 是否正在执行（来自后端内存状态，侧栏据此显示运行指示器） */
   running?: boolean;
+}
+
+// ---------------------------------------------------------------- 自动化任务
+
+/** 执行规则（与后端 schedule_json 同构） */
+export type AutomationSchedule =
+  | { kind: "once"; at: number }
+  | { kind: "daily"; time: string }
+  | { kind: "weekly"; weekdays: number[]; time: string }
+  | { kind: "interval"; every_minutes: number };
+
+export type AutomationScheduleKind = AutomationSchedule["kind"];
+
+/** GET/POST/PUT /api/automations 返回的任务 */
+export interface AutomationTask {
+  id: string;
+  name: string;
+  prompt: string;
+  workspace_id: string;
+  session_id: string;
+  schedule: AutomationSchedule;
+  enabled: boolean;
+  web: boolean;
+  model_id: string;
+  created_at: number;
+  updated_at: number;
+  next_run_at: number;
+  last_run_at: number | null;
+  last_status: string;
+  last_error: string;
+  run_count: number;
+  missed: number;
+  /** 规则的中文摘要（后端生成） */
+  schedule_text: string;
+  /** 接下来三次执行时间（epoch 秒） */
+  next_runs: number[];
+}
+
+export interface AutomationsData {
+  tasks: AutomationTask[];
+  running: Record<string, number>;
+  server_now: number;
+}
+
+/** AI 助手允许修改的字段白名单 */
+export interface AutomationPatch {
+  name?: string;
+  prompt?: string;
+  workspace_id?: string;
+  schedule?: AutomationSchedule;
+  web?: boolean;
+  model_id?: string;
+  enabled?: boolean;
+}
+
+/** 编辑器表单草稿（AI 助手以它作为「眼前所见」的基准） */
+export interface AutomationDraft {
+  name: string;
+  prompt: string;
+  workspace_id: string;
+  schedule: AutomationSchedule;
+  web: boolean;
+  model_id: string;
+  enabled: boolean;
+}
+
+export interface AutomationChatMessage {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+  patch?: AutomationPatch | null;
+  created_at: number;
+}
+
+export interface AutomationAssistResult {
+  reply: string;
+  patch: AutomationPatch;
+  warnings: string[];
+  questions: string[];
+  preview: number[];
+  server_now: number;
 }
 
 /** 工作区（GET /api/workspaces 返回） */
@@ -512,9 +605,13 @@ export interface DesktopBackendInfo {
   logFile: string;
 }
 
+/** 点击窗口关闭按钮时的行为：ask 每次询问 / tray 最小化到托盘 / quit 退出程序 */
+export type DesktopCloseAction = "ask" | "tray" | "quit";
+
 /** desktop-config.json 的可见部分 */
 export interface DesktopConfig {
   lan_enabled: boolean;
+  close_action: DesktopCloseAction;
   window: { width: number; height: number };
 }
 
@@ -527,6 +624,7 @@ export interface DesktopBridge {
   platform: string;
   backend(): Promise<DesktopBackendInfo>;
   getConfig(): Promise<DesktopConfig>;
+  setCloseAction(action: DesktopCloseAction): Promise<DesktopConfig>;
   setLanEnabled(
     enabled: boolean
   ): Promise<DesktopConfig & { restart_required: boolean }>;

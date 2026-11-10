@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   ArrowLeftOutlined,
+  BookOutlined,
   DeleteOutlined,
   MoreOutlined,
   ThunderboltOutlined,
@@ -32,12 +33,11 @@ import SkillIcon from "./skillIcons";
 interface Props {
   /** Markdown 里的相对资源按当前工作区解析 */
   workspaceId: string;
-  onClose: () => void;
   /** 「在对话框中试用」：交给 App 切回对话并插入技能块 */
   onTrial: (skill: SkillItem) => void;
 }
 
-export default function SkillManager({ workspaceId, onClose, onTrial }: Props) {
+export default function SkillManager({ workspaceId, onTrial }: Props) {
   const [skills, setSkills] = useState<SkillItem[] | null>(null);
   const [detail, setDetail] = useState<SkillDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -212,19 +212,19 @@ export default function SkillManager({ workspaceId, onClose, onTrial }: Props) {
   );
 
   return (
-    <div className="skill-page">
-      <div className="skill-page-head">
-        <div className="skill-page-head-left">
-          <Button type="text" icon={<ArrowLeftOutlined />} onClick={onClose}>
-            返回对话
-          </Button>
-          <span className="skill-page-title">技能</span>
-          {skills && <span className="skill-page-count">共 {skills.length} 个</span>}
+    <div className="page">
+      <header className="page-head">
+        <div className="page-head-left">
+          <BookOutlined className="page-title-icon" />
+          <span className="page-title">技能</span>
+          <span className="page-sub">内置与自定义技能，可在对话中按需使用</span>
         </div>
-        <span className="skill-page-note">仅本机可管理</span>
-      </div>
+        <div className="page-head-right">
+          <span className="skill-page-note">仅本机可管理</span>
+        </div>
+      </header>
 
-      <div className="skill-page-body">
+      <div className="page-body">
         {detailLoading && (
           <div className="skill-page-loading">
             <Spin />

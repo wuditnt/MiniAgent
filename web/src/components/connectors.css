@@ -150,6 +150,13 @@
   gap: 4px;
 }
 
+/* 卡片底部的启用开关 + 状态文字：整块可点区域随开关一起响应 */
+.connector-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .connector-state.ok {
   color: #389e0d;
 }

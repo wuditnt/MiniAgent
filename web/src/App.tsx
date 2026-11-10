@@ -2,7 +2,7 @@
  * 应用编排：模式/联网开关、消息流、SSE 消费、危险确认都在这里。
  * Chat / WelcomePane / ConfirmPanel / ToolChain 是纯展示组件。
  */
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { DeleteOutlined, ExportOutlined, BarChartOutlined, LayoutOutlined, MenuOutlined, MoreOutlined, TeamOutlined, LockOutlined, LogoutOutlined, UserOutlined, BgColorsOutlined, CheckOutlined } from "@ant-design/icons";
 import { Dropdown, Input, message, Modal, Tooltip } from "antd";
 import {
@@ -17,6 +17,7 @@ import {
   fetchSessions,
   fetchState,
   fetchWorkspaces,
+  markSessionRead,
   pickFolder,
   postAnswer,
   postConfirm,
@@ -31,6 +32,7 @@ import type {
   ApprovalMode,
   Artifact,
   ChatItem,
+  GlobalEvent,
   HistoryMessage,
   Mode,
   ModelProvider,
@@ -56,17 +58,19 @@ import ChangePasswordModal from "./components/ChangePasswordModal";
 import Workbench from "./components/Workbench";
 import { MAX_BACKGROUND, useSessionRuntime } from "./useSessionRuntime";
 import { closeSessionStream, setInterest, setStreamHandler } from "./sessionStream";
+import { closeEventStream, setEventStreamHandler, startEventStream } from "./eventStream";
 import { useTheme, type ThemeMode } from "./theme";
 import Trajectory from "./components/Trajectory";
 import SkillManager from "./components/SkillManager";
 import ConnectorsPage from "./components/ConnectorsPage";
+import AutomationsPage from "./components/AutomationsPage";
 
 const SESSION_KEY = "miniagent.session";
 const MODE_KEY = "miniagent.mode";
 const WS_KEY = "miniagent.workspace";
 
 /** 主区视图：左栏导航与之一一对应；新增页面只需在这里加一项 */
-type MainView = "chat" | "skills" | "connectors";
+type MainView = "chat" | "skills" | "connectors" | "automations";
 const APPROVAL_KEY = "miniagent.approval";
 const SIDEBAR_W_KEY = "miniagent.sidebar-width";
 const SIDEBAR_W_MIN = 220;
@@ -301,6 +305,11 @@ export default function App({
   // 正在执行的会话 id 集合（侧栏「运行中」指示器数据源）；
   // 发消息时本地乐观加一个，之后以 /api/running 轮询结果为准
   const [runningIds, setRunningIds] = useState<Set<string>>(() => new Set());
+  // 运行状态由「空闲 → 运行」时自增：驱动当前会话重新拉一次历史（拿到本轮用户消息与草稿）
+  const [runReload, setRunReload] = useState(0);
+  // 刚触发过自动化执行的会话：下次打开时即使已跑完也要重拉历史，避免命中旧缓存
+  const pendingReloadRef = useRef<Set<string>>(new Set());
+  const prevRunningRef = useRef<Set<string>>(new Set());
   /** 上一个会话 id：切走时保存滚动/草稿并决定是否释放运行时 */
   const prevSidRef = useRef(session);
 
@@ -372,6 +381,21 @@ export default function App({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * 立刻同步一次「运行中会话」：自动化任务开始后调用，避免等 3s 轮询。
+   * 运行集合变化会驱动订阅集合更新，进而收到带本轮消息与草稿的 snapshot。
+   */
+  const syncRunning = useCallback(() => {
+    if (document.visibilityState !== "visible") return Promise.resolve();
+    return fetchRunning()
+      .then((map) => {
+        const ids = new Set(Object.keys(map));
+        setRunningIds(ids);
+        rtApiRef.current.clearFinished(ids);
+      })
+      .catch(() => {});
+  }, []);
+
   // 侧栏「运行中」指示器：3s 轮询后端内存状态（只读、不碰磁盘）。
   // 页面切到后台时暂停轮询，回到前台立即补拉一次 —— 用户看不到时没必要请求。
   useEffect(() => {
@@ -412,6 +436,13 @@ export default function App({
     };
   }, []);
 
+  // 当前会话从「空闲」变「运行」：补拉一次历史，拿到本轮用户消息与已生成草稿
+  useEffect(() => {
+    const was = prevRunningRef.current.has(session);
+    prevRunningRef.current = runningIds;
+    if (runningIds.has(session) && !was) setRunReload((n) => n + 1);
+  }, [runningIds, session]);
+
   // 切换会话：运行中的会话保活（SSE 不断），非运行的释放数据、只留滚动与草稿
   useEffect(() => {
     localStorage.setItem(SESSION_KEY, session);
@@ -424,13 +455,24 @@ export default function App({
     }
     rtApi.prune(session);
     const cur = rtApi.ensure(session);
-    // 已有数据（保活中的运行会话 / 刚加载过）：直接渲染，不重新拉历史
-    if (cur.loaded || cur.streaming) {
+    // 流已建立：交给实时帧，不重复拉历史
+    if (cur.streaming) {
       const hit = pendingHit.current;
       pendingHit.current = null;
       if (hit != null && hit >= 0 && hit < cur.items.length) jumpToHit(hit);
       return;
     }
+    // 已有缓存且当前空闲、且不是刚触发过自动化的会话：直接渲染；
+    // 运行中或刚执行完的会话必须重拉，否则看到的是上一轮的旧内容
+    const pendingReload = pendingReloadRef.current.has(session);
+    if (cur.loaded && !runningIds.has(session) && !pendingReload) {
+      const hit = pendingHit.current;
+      pendingHit.current = null;
+      if (hit != null && hit >= 0 && hit < cur.items.length) jumpToHit(hit);
+      return;
+    }
+    // 这次重拉已兑现，标记消费掉，避免每次切回都网络请求
+    if (pendingReload) pendingReloadRef.current.delete(session);
     fetchHistory(session)
       .then((h) => {
         // 切走后又切回来了才有必要写入；流已抢先建立时交给 snapshot
@@ -476,7 +518,10 @@ export default function App({
         }
       })
       .catch(() => {});
-  }, [session]);
+    // runReload：运行开始信号，触发重拉；view：回到对话页时补齐待刷新的会话
+    // 不监听 runningIds 本身，避免每次轮询都重拉
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, runReload, view]);
 
   // 快捷键
   useEffect(() => {
@@ -802,9 +847,37 @@ export default function App({
   const rtApiRef = useRef(rtApi);
   rtApiRef.current = rtApi;
 
+  // 全局事件流（/api/events）：会话创建 / 运行开始 / 运行结束的控制信号。
+  // 事件不含正文，只驱动列表刷新与「该会话历史需重拉」的判断。
+  const globalEventRef = useRef<(ev: GlobalEvent) => void>(() => {});
+  globalEventRef.current = (ev: GlobalEvent) => {
+    if (!ev.session) return;
+    if (ev.type === "session_created") {
+      refreshSessions();
+    } else if (ev.type === "run_started") {
+      // 加入运行集合：侧栏显示运行点；若正显示该会话，由「空闲→运行」effect 触发重拉
+      setRunningIds((prev) => new Set(prev).add(ev.session));
+    } else if (ev.type === "run_finished") {
+      // 跑完了：标记「下次打开必须重拉」，从运行集合移除；正显示该会话则立即补拉终稿
+      pendingReloadRef.current.add(ev.session);
+      setRunningIds((prev) => {
+        const s = new Set(prev);
+        s.delete(ev.session);
+        return s;
+      });
+      if (ev.session === session) setRunReload((n) => n + 1);
+      refreshSessions();
+    }
+  };
+
   useEffect(() => {
     setStreamHandler((ev) => frameRef.current(ev));
-    return () => closeSessionStream();
+    setEventStreamHandler((ev) => globalEventRef.current(ev));
+    startEventStream();
+    return () => {
+      closeSessionStream();
+      closeEventStream();
+    };
   }, []);
 
   // 订阅集合：当前会话优先；其余后台运行会话按「已在保活」优先，最多 MAX_BACKGROUND 个
@@ -1250,6 +1323,12 @@ export default function App({
   const handleSelectSession = (sid: string, hitIndex?: number) => {
     setView("chat"); // 会话属于导航：在任何功能页点会话都回到对话
     const hasHit = typeof hitIndex === "number" && hitIndex >= 0;
+    const target = sessions.find((s) => s.id === sid);
+    // 自动化会话：进入即清未读（红点只提醒「有新结果」，看过就消失）
+    if (target?.unread) {
+      markSessionRead(sid).catch(() => {});
+      setSessions((list) => list.map((s) => (s.id === sid ? { ...s, unread: false } : s)));
+    }
     if (sid === session) {
       // 已停在该会话：历史就在屏上，直接定位即可
       if (hasHit) jumpToHit(hitIndex as number);
@@ -1258,7 +1337,6 @@ export default function App({
     setDraftWs(null); // 离开草稿占位：新会话还没聊天就被切走 → 占位消失
     setDraftModel(null);
     // 还原该会话保存的模式（老会话没有该字段时保持当前模式）
-    const target = sessions.find((s) => s.id === sid);
     if (target?.mode) setMode(target.mode);
     pendingHit.current = hasHit ? (hitIndex as number) : null;
     setSession(sid);
@@ -1694,6 +1772,13 @@ export default function App({
             setView("connectors");
             setTrajectoryOpen(false);
           }}
+          onOpenAutomations={() => {
+            setView("automations");
+            setTrajectoryOpen(false);
+          }}
+          automationsUnread={
+            sessions.filter((s) => s.source === "automation" && s.unread).length
+          }
           activeView={view}
           accountMenu={accountMenu}
         />
@@ -1995,7 +2080,6 @@ export default function App({
           {view === "skills" && (
             <SkillManager
               workspaceId={ws}
-              onClose={() => setView("chat")}
               onTrial={(skill: SkillItem) => {
                 setView("chat");
                 setMode("agent");     // 试用技能必须处于智能体模式
@@ -2004,7 +2088,21 @@ export default function App({
             />
           )}
           {view === "connectors" && (
-            <ConnectorsPage onClose={() => setView("chat")} remote={!!state?.remote} />
+            <ConnectorsPage remote={!!state?.remote} />
+          )}
+          {view === "automations" && (
+            <AutomationsPage
+              workspaces={workspaces}
+              models={models}
+              workspaceId={ws}
+              remote={!!state?.remote}
+              onSessionCreated={(sid) => {
+                if (sid) pendingReloadRef.current.add(sid);
+                refreshSessions();
+                syncRunning();
+              }}
+              onOpenSession={(sid) => handleSelectSession(sid)}
+            />
           )}
         </div>
       )}

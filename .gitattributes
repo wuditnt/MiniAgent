@@ -1,3 +1,6 @@
+# 仓库统一 LF：避免 Windows（autocrlf=true）与 Linux/macOS 混用时的假改动。
+* text=auto eol=lf
+
 # Windows 批处理必须是 CRLF：LF 行尾会让 cmd.exe 的 goto/call 标签解析出错
 # （"The system cannot find the batch label specified"），文本也不要用非 ASCII
 # 字符，否则在某些代码页下解析会错行。

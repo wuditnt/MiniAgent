@@ -8,12 +8,18 @@ import type {
   AgentState,
   ApprovalMode,
   Attachment,
+  AutomationAssistResult,
+  AutomationChatMessage,
+  AutomationDraft,
+  AutomationTask,
+  AutomationsData,
   ConnectorImportResult,
   ConnectorPreset,
   ConnectorSpec,
   ConnectorTestResult,
   ConnectorsData,
   GeneralSettings,
+  GlobalEvent,
   HealthInfo,
   HistoryMessage,
   MemoryData,
@@ -218,6 +224,83 @@ export async function createSession(
 export async function deleteSession(sid: string): Promise<void> {
   const res = await req(`/api/sessions/${encodeURIComponent(sid)}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await readError(res));
+}
+
+/** 进入会话即清未读（自动化任务产生的红点） */
+export async function markSessionRead(sid: string): Promise<void> {
+  const res = await req(`/api/sessions/${encodeURIComponent(sid)}/read`, { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+// ---------------------------------------------------------------- 自动化任务
+
+export async function fetchAutomations(): Promise<AutomationsData> {
+  const res = await req("/api/automations");
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function createAutomation(data: AutomationDraft): Promise<AutomationTask> {
+  const res = await req("/api/automations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()).task;
+}
+
+export async function updateAutomation(
+  id: string,
+  patch: Partial<AutomationDraft>
+): Promise<AutomationTask> {
+  const res = await req(`/api/automations/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()).task;
+}
+
+export async function deleteAutomation(id: string): Promise<void> {
+  const res = await req(`/api/automations/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+/** 立即执行一次（不改排期）；会话忙碌时后端返回 409 */
+export async function runAutomation(
+  id: string
+): Promise<{ run_id: number; session_id: string; task: AutomationTask }> {
+  const res = await req(`/api/automations/${encodeURIComponent(id)}/run`, { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function fetchAutomationChat(id: string): Promise<AutomationChatMessage[]> {
+  const res = await req(`/api/automations/${encodeURIComponent(id)}/chat`);
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()).messages;
+}
+
+export async function clearAutomationChat(id: string): Promise<void> {
+  const res = await req(`/api/automations/${encodeURIComponent(id)}/chat`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+/** AI 助手：自然语言 → patch（只返回，不落库；保存仍走 updateAutomation） */
+export async function assistAutomation(
+  id: string,
+  message: string,
+  draft: AutomationDraft
+): Promise<AutomationAssistResult> {
+  const res = await req(`/api/automations/${encodeURIComponent(id)}/assist`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, draft }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
 }
 
 /** 设置本会话勾选的连接器；null = 跟全局默认。返回同步后的全局默认值。 */
@@ -495,6 +578,16 @@ export async function updateModel(
 
 export async function deleteModel(id: string): Promise<void> {
   const res = await req(`/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+/** 设为全局默认模型（新会话与未指定模型的自动化任务使用） */
+export async function activateModel(id: string): Promise<void> {
+  const res = await req(`/api/models/${encodeURIComponent(id)}/activate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
   if (!res.ok) throw new Error(await readError(res));
 }
 
@@ -851,4 +944,14 @@ async function readSSE(res: Response, onEvent: (ev: SSEEvent) => void): Promise<
       }
     }
   }
+}
+
+/** 全局事件流：订阅 /api/events 广播的会话创建 / 运行开始 / 运行结束控制信号 */
+export async function eventsStream(
+  onEvent: (ev: GlobalEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const res = await req("/api/events", { signal });
+  if (!res.ok || !res.body) throw new Error(await readError(res));
+  await readSSE(res, onEvent as unknown as (ev: SSEEvent) => void);
 }

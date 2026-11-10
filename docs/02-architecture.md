@@ -139,6 +139,17 @@ Agent 核心循环  src/core/agent.py      ← 消息 → LLM(流式) → tool_c
 
 任务执行在服务端 worker 线程：关闭页面只停止推送，不中断执行；重新打开可看到完整结果。同一会话后台运行时发新消息返回 409。
 
+### 两条流的分工
+
+| 流 | 端点 | 内容 |
+|---|---|---|
+| 会话正文流 | `GET /api/chat/stream?sessions=a,b` | 多会话共用一条连接，首帧是 `snapshot`，之后按 `seq` 增量推送；带 `Last-Event-ID` 可续传 |
+| 全局事件流 | `GET /api/events` | 常驻一条，只广播控制信号 `session_created` / `run_started` / `run_finished`，不含正文 |
+
+全局事件流解决「后台自动化跑完 / 新建会话，别的页面不知道」的问题：前端据此刷新会话列表、点亮运行中状态、跑完补拉终稿，`/api/running` 轮询退化为兜底。事件产生点统一走 `webui.py` 的 `_emit_global()`，没有订阅者时直接丢弃。
+
+前端模块：`web/src/eventStream.ts`（全局信号，常驻不退避关闭）、`web/src/sessionStream.ts`（会话正文，多会话兴趣集 + 续传）。两者都需要在 React StrictMode 二次挂载时能重新连接，`close*` 之后必须复位内部 `closed` 标记。
+
 ## 关键代码位置
 
 - 循环：`agent.py` 的 `Agent.run()` → `_run_loop()` → `_request()` / `_consume_stream()` / `_run_tools()`
