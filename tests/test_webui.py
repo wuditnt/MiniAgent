@@ -760,6 +760,44 @@ def scenario_reconnect() -> None:
     print("  [8] 接入后台任务通过（快照 + 实时广播到终态）")
 
 
+def scenario_pending_user() -> None:
+    """⑨b 本轮用户消息还没写进 messages 时，快照/历史要能补上这一条。
+
+    自动化任务点「立即执行」后，前端在 run_started 广播时就接入了，而用户消息
+    要等 agent.run() 内部才 append —— 这段空窗期若不补，前端只能看到助手在流式
+    输出，用户自己发的那条永远不出现。
+    """
+    from core.webui import _Session, _with_pending_user
+
+    s = _Session("t-pending-user", None)
+    s.begin_run(1)
+    s.pending_turn = {"turn": 1, "message": "自动化任务提示词",
+                      "attachments": [{"name": "a.txt", "path": ".attachments/a.txt",
+                                       "mime": "text/plain", "size": 3}],
+                      "ts": 123.0}
+    src = _with_pending_user(s, [])
+    assert len(src) == 1 and src[0]["role"] == "user", src
+    assert src[0]["content"] == "自动化任务提示词", src
+    assert src[0]["_attachments"][0]["name"] == "a.txt", src
+    assert src[0]["_ts"] == 123.0, src
+
+    # 第二轮：messages 里已有上一轮用户消息，本轮这条仍要补；已写入后不重复补
+    s2 = _Session("t-pending-user-2", None)
+    s2.begin_run(2)
+    s2.pending_turn = {"turn": 2, "message": "自动化任务提示词",
+                       "attachments": [], "ts": 123.0}
+    src2 = _with_pending_user(s2, [{"role": "user", "content": "前一轮"}])
+    assert len(src2) == 2, src2
+    src3 = _with_pending_user(s2, [{"role": "user", "content": "前一轮"},
+                                   {"role": "user", "content": "自动化任务提示词"}])
+    assert len(src3) == 2, src3
+
+    # 收尾清空后不再补
+    s.pending_turn = None
+    assert _with_pending_user(s, []) == []
+    print("  [9b] 待写入的用户消息通过（补齐 + 按轮次去重 + 收尾清空）")
+
+
 def scenario_live_draft() -> None:
     """⑲ 实时草稿：模型正在吐字时切走再切回，已生成的部分不能丢。
 
@@ -1597,6 +1635,7 @@ def main() -> int:
         ("运行中指示器", scenario_running_indicator),
         ("接入后台任务", scenario_reconnect),
         ("实时草稿", scenario_live_draft),
+        ("待写入的用户消息", scenario_pending_user),
         ("共享流多会话", scenario_multi_stream),
         ("全局事件流", scenario_global_events),
         ("危险确认-拒绝", lambda: scenario_confirm(deny=True)),

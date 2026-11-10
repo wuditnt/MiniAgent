@@ -355,6 +355,9 @@ class _Session:
         # 本轮开始执行的时刻（None = 空闲）。与 busy 同步维护：
         # 侧栏「运行中」指示器靠它判断，不依赖前端是否还连着这条 SSE。
         self.running_since: float | None = None
+        # 本轮用户消息：agent.run() 内部才写进 messages，这段时间接入的客户端
+        # 只能看到助手流式草稿，所以先记一份，供快照/历史补齐（收尾时清空）
+        self.pending_turn: dict | None = None
         # 这次运行的 SSE 订阅者。发起 /api/chat 的连接 + 之后「接入查看」
         # 打开的 /api/chat/stream 连接都在这里；事件由 emit 广播给所有人。
         self.subscribers: set[queue.Queue] = set()
@@ -1755,6 +1758,28 @@ def _is_injected(m: dict) -> bool:
     return _user_text(m.get("content")).startswith(ATTACH_NOTE)
 
 
+def _with_pending_user(session: "_Session", src: list[dict]) -> list[dict]:
+    """补上「已提交但还没写进 messages」的本轮用户消息。
+
+    agent.run() 内部才把用户消息 append 进 messages，而 run_started 广播早于
+    它 —— 这期间接入的客户端（自动化任务最常见）拿到的快照/历史里只有助手
+    流式草稿，看起来就像用户消息丢了。按轮次判断是否已写入，避免重复。
+    """
+    pending = session.pending_turn
+    if not pending:
+        return src
+    turn = int(pending.get("turn") or 0)
+    seen = sum(1 for m in src if m.get("role") == "user" and not _is_injected(m))
+    if turn and seen >= turn:
+        return src
+    item: dict = {"role": "user", "content": pending.get("message") or ""}
+    if pending.get("attachments"):
+        item["_attachments"] = list(pending["attachments"])
+    if pending.get("ts"):
+        item["_ts"] = pending["ts"]
+    return [*src, item]
+
+
 # ---------------------------------------------------------------- 会话标题
 
 _TITLE_MAX = 20
@@ -2274,6 +2299,12 @@ class WebServer:
                 if m.get("role") == "user" and not _is_injected(m)
             ) + 1
             run = session.begin_run(turn)
+            # 用户消息要等 agent.run() 里才进 messages：先记一份，
+            # 让这期间接入的客户端（自动化任务尤其常见）也能看到这一条
+            session.pending_turn = {
+                "turn": run["turn"], "message": message,
+                "attachments": attachments, "ts": run["started_at"],
+            }
             session.record_action("step", "开始本轮任务", "读取会话上下文，注入工具表", status="ok")
             q = session.subscribe() if subscribe else None
             session.queue = q
@@ -3135,7 +3166,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             return
         session = self.web.session(sid)
         if session.agent is not None:
-            src = session.agent.messages[1:]          # [0] 是 system
+            src = _with_pending_user(session, session.agent.messages[1:])   # [0] 是 system
             runs = session.runs
         else:
             data = _load_session_file(sid) or {}
@@ -3547,7 +3578,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         """一个会话的整份快照（消息 + 本轮时间线 + 未定稿草稿）。"""
         sid = session.id
         if session.agent is not None:
-            src = session.agent.messages[1:]
+            src = _with_pending_user(session, session.agent.messages[1:])
             runs = session.runs
         else:
             data = _load_session_file(sid) or {}
@@ -5440,6 +5471,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 session.end_run("error")
             session.queue = None
             session.unattended = False
+            session.pending_turn = None
             # 全局广播运行结束：前端据此补拉该会话终稿（无需轮询 running 去猜）
             _emit_global({"type": "run_finished", "session": session.id,
                           "status": outcome["status"]})
