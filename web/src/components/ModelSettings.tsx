@@ -1,7 +1,8 @@
 /**
  * 「模型配置」面板：维护「有哪些模型」（多服务商 / 多模型配置），内置国内主流模板，
- * 支持连接测试。**不设置全局当前模型** —— 每个对话在输入框的模型菜单里独立选择，
- * 新对话默认用列表中的第一份配置。API Key 全程只存本机。
+ * 支持连接测试。每张卡片右下角的开关设置**全局默认模型**（互斥，只能有一个开启）：
+ * 新会话与未指定模型的自动化任务使用它，已存在的会话仍沿用各自绑定的模型。
+ * API Key 全程只存本机。
  * 本身不是弹窗 —— 由「系统配置」弹窗的页签承载。
  */
 import { useEffect, useMemo, useState } from "react";
@@ -24,8 +25,12 @@ import {
   Select,
   Space,
   Spin,
+  Switch,
+  Tooltip,
+  message,
 } from "antd";
 import {
+  activateModel,
   createModel,
   deleteModel,
   fetchModels,
@@ -46,6 +51,8 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
   const [info, setInfo] = useState<ModelsInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [tests, setTests] = useState<Record<string, TestResult | "loading">>({});
+  /** 正在切换默认模型的配置 id（开关 loading，避免连点） */
+  const [activating, setActivating] = useState<string | null>(null);
 
   // 内层表单
   const [formOpen, setFormOpen] = useState(false);
@@ -107,6 +114,22 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
       reload();
     } catch (e) {
       setTests((t) => ({ ...t, [id]: { ok: false, error: String(e) } }));
+    }
+  };
+
+  /** 设为全局默认：互斥由后端保证，成功后重拉列表让其他开关自动熄灭 */
+  const doActivate = async (id: string) => {
+    if (activating) return;
+    setActivating(id);
+    try {
+      await activateModel(id);
+      reload();
+      onChanged();
+      message.success("已设为默认模型");
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setActivating(null);
     }
   };
 
@@ -256,29 +279,45 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
                     </div>
                     <div className="ms-card-result">{renderResult(tests[p.id])}</div>
                   </div>
-                  <Space direction="vertical" size={6} className="ms-card-actions">
-                    <Button
-                      size="small"
-                      icon={<ApiOutlined />}
-                      onClick={() => doTest(p.id)}
-                      loading={tests[p.id] === "loading"}
-                    >
-                      连接测试
-                    </Button>
-                    <Space size={4}>
-                      <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(p)}>
-                        编辑
-                      </Button>
-                      <Popconfirm
-                        title="删除这份配置？"
-                        okText="删除"
-                        cancelText="取消"
-                        onConfirm={() => doDelete(p.id)}
+                  <div className="ms-card-side">
+                    <Space direction="vertical" size={6} className="ms-card-actions">
+                      <Button
+                        size="small"
+                        icon={<ApiOutlined />}
+                        onClick={() => doTest(p.id)}
+                        loading={tests[p.id] === "loading"}
                       >
-                        <Button size="small" danger icon={<DeleteOutlined />} />
-                      </Popconfirm>
+                        连接测试
+                      </Button>
+                      <Space size={4}>
+                        <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(p)}>
+                          编辑
+                        </Button>
+                        <Popconfirm
+                          title="删除这份配置？"
+                          okText="删除"
+                          cancelText="取消"
+                          onConfirm={() => doDelete(p.id)}
+                        >
+                          <Button size="small" danger icon={<DeleteOutlined />} />
+                        </Popconfirm>
+                      </Space>
                     </Space>
-                  </Space>
+                    <Tooltip title="新会话与未指定模型的自动化任务默认使用">
+                      <span className="ms-default-switch">
+                        默认
+                        <Switch
+                          size="small"
+                          checked={p.is_active}
+                          loading={activating === p.id}
+                          onChange={(on) => {
+                            if (on) doActivate(p.id);
+                            else message.warning("默认模型至少保留一个，打开其他模型的开关即可切换");
+                          }}
+                        />
+                      </span>
+                    </Tooltip>
+                  </div>
                 </div>
               ))}
             </div>

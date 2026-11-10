@@ -578,6 +578,16 @@ export async function deleteModel(id: string): Promise<void> {
   if (!res.ok) throw new Error(await readError(res));
 }
 
+/** 设为全局默认模型（新会话与未指定模型的自动化任务使用） */
+export async function activateModel(id: string): Promise<void> {
+  const res = await req(`/api/models/${encodeURIComponent(id)}/activate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
 export async function testModel(id: string): Promise<TestResult> {
   const res = await req(`/api/models/${encodeURIComponent(id)}/test`, {
     method: "POST",

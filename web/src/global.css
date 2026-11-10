@@ -1972,6 +1972,25 @@ body.sidebar-resizing .sidebar-resizer::after {
   align-items: stretch;
 }
 
+/* 卡片右侧操作列：按钮在上、默认模型开关沉到右下角 */
+.ms-card-side {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.ms-default-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--tx-8c8c8c);
+  user-select: none;
+}
+
 .ms-ok {
   color: #52c41a;
 }
