@@ -4,7 +4,7 @@
  * 加载方式是「后端 URL」而不是 file://：前端所有请求都是相对路径，
  * 同源加载后 SSE / Cookie / 登录态零改造（见方案文档第 2 节）。
  */
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell, Tray } from 'electron'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { Backend, BackendStartError, DESKTOP_PORT, diagnoseCommand } from './backend'
@@ -19,7 +19,10 @@ const isDev = !packagesBackend
 
 let win: BrowserWindow | null = null
 let backend: Backend | null = null
+let tray: Tray | null = null
 let quitting = false
+// 关闭确认弹窗正在显示：防止用户连点关闭按钮堆出多个弹窗
+let askingClose = false
 
 if (process.platform === 'win32') {
   app.setAppUserModelId('com.miniagent.desktop')
@@ -57,7 +60,7 @@ function createWindow(port: number): void {
     }
   })
 
-  win.on('close', () => {
+  win.on('close', (event) => {
     if (!win) return
     const [width, height] = win.getSize()
     try {
@@ -65,13 +68,94 @@ function createWindow(port: number): void {
     } catch {
       /* 记忆窗口尺寸失败不算错误 */
     }
+    // 真正退出（before-quit / 托盘菜单退出）时不再拦截
+    if (quitting) return
+    const action = readConfig().close_action
+    if (action === 'quit') return
+    event.preventDefault()
+    if (action === 'tray') {
+      hideToTray()
+      return
+    }
+    void askCloseAction()
   })
   win.on('closed', () => {
     win = null
+    destroyTray()
   })
 
   win.once('ready-to-show', () => win?.show())
   void win.loadURL(`http://127.0.0.1:${port}/`)
+}
+
+/** 托盘图标：用打包进应用的 icon.ico；开发态缺失时退回 exe 自带的图标 */
+function trayIconPath(): string {
+  const packed = path.join(app.getAppPath(), 'build', 'icon.ico')
+  return fs.existsSync(packed) ? packed : process.execPath
+}
+
+/** 从托盘恢复主界面 */
+function showMainWindow(): void {
+  if (!win) return
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+
+/** 收进托盘：窗口隐藏，首次隐藏时创建托盘图标 */
+function hideToTray(): void {
+  if (!win) return
+  win.hide()
+  ensureTray()
+}
+
+/** 托盘图标：左键恢复主界面，右键菜单（打开主界面 / 退出） */
+function ensureTray(): void {
+  if (tray) return
+  tray = new Tray(trayIconPath())
+  tray.setToolTip('mini-agent')
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: '打开主界面', click: () => showMainWindow() },
+      { type: 'separator' },
+      { label: '退出', click: () => void shutdownAndQuit(0) },
+    ]),
+  )
+  tray.on('click', () => showMainWindow())
+}
+
+function destroyTray(): void {
+  tray?.destroy()
+  tray = null
+}
+
+/** 首次关闭：询问一次并记住用户选择（之后可在「系统配置 → 桌面」修改） */
+async function askCloseAction(): Promise<void> {
+  if (askingClose) return
+  askingClose = true
+  try {
+    const { response } = await dialog.showMessageBox({
+      type: 'question',
+      title: 'mini-agent',
+      message: '关闭窗口后要做什么？',
+      detail:
+        '选择后会被记住，以后点击关闭按钮都按这个方式处理。\n' +
+        '可以随时在「系统配置 → 桌面」中修改。',
+      buttons: ['最小化到托盘', '退出程序'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    })
+    if (response === 1) {
+      patchConfig({ close_action: 'quit' })
+      await shutdownAndQuit(0)
+    } else {
+      patchConfig({ close_action: 'tray' })
+      hideToTray()
+    }
+  } finally {
+    askingClose = false
+  }
 }
 
 function registerIpc(): void {
@@ -86,6 +170,12 @@ function registerIpc(): void {
     }
   })
   ipcMain.handle('desktop:get-config', () => readConfig())
+  ipcMain.handle('desktop:set-close-action', (_event, action: unknown) => {
+    const next = action === 'tray' || action === 'quit' ? action : 'ask'
+    const cfg = patchConfig({ close_action: next })
+    // 从「退出」改成「收进托盘」时，允许下次关闭立刻生效，无需重启
+    return cfg
+  })
   ipcMain.handle('desktop:set-lan', (_event, enabled: boolean) => {
     const next = patchConfig({ lan_enabled: enabled === true })
     return { ...next, restart_required: true }

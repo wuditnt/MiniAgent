@@ -605,9 +605,13 @@ export interface DesktopBackendInfo {
   logFile: string;
 }
 
+/** 点击窗口关闭按钮时的行为：ask 每次询问 / tray 最小化到托盘 / quit 退出程序 */
+export type DesktopCloseAction = "ask" | "tray" | "quit";
+
 /** desktop-config.json 的可见部分 */
 export interface DesktopConfig {
   lan_enabled: boolean;
+  close_action: DesktopCloseAction;
   window: { width: number; height: number };
 }
 
@@ -620,6 +624,7 @@ export interface DesktopBridge {
   platform: string;
   backend(): Promise<DesktopBackendInfo>;
   getConfig(): Promise<DesktopConfig>;
+  setCloseAction(action: DesktopCloseAction): Promise<DesktopConfig>;
   setLanEnabled(
     enabled: boolean
   ): Promise<DesktopConfig & { restart_required: boolean }>;

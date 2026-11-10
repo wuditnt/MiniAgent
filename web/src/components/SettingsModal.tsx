@@ -11,6 +11,7 @@ import {
   ApiOutlined,
   AppstoreOutlined,
   BulbOutlined,
+  DesktopOutlined,
   GlobalOutlined,
   ReloadOutlined,
   SettingOutlined,
@@ -24,6 +25,7 @@ import type {
   SettingsInfo,
   ToolInfo,
 } from "../types";
+import DesktopPanel from "./DesktopPanel";
 import MemoryPanel from "./MemoryPanel";
 import ModelSettingsPanel from "./ModelSettings";
 import NetworkPanel from "./NetworkPanel";
@@ -41,10 +43,17 @@ interface Props {
   workspaceId: string;
 }
 
-export type SettingsTab = "model" | "general" | "search" | "memory" | "tools" | "network";
+export type SettingsTab =
+  | "model"
+  | "general"
+  | "search"
+  | "memory"
+  | "tools"
+  | "network"
+  | "desktop";
 
-/** 桌面端才有的页签：浏览器下不渲染（监听地址由启动参数决定） */
-const DESKTOP_ONLY_TABS: SettingsTab[] = ["network"];
+/** 桌面端才有的页签：浏览器下不渲染（监听地址/关闭行为由桌面壳决定） */
+const DESKTOP_ONLY_TABS: SettingsTab[] = ["network", "desktop"];
 
 /** 每个字段的界面元信息：标签、说明、区间、步进 */
 const FIELDS: {
@@ -139,6 +148,7 @@ const NAV: {
   { key: "general", label: "通用配置", icon: <SettingOutlined />, group: "设置" },
   { key: "search", label: "联网搜索", icon: <GlobalOutlined />, group: "设置" },
   { key: "network", label: "网络", icon: <WifiOutlined />, group: "设置" },
+  { key: "desktop", label: "桌面", icon: <DesktopOutlined />, group: "设置" },
   { key: "memory", label: "记忆", icon: <BulbOutlined />, group: "数据与扩展" },
   { key: "tools", label: "工具管理", icon: <AppstoreOutlined />, group: "数据与扩展" },
 ];
@@ -499,6 +509,7 @@ export default function SettingsModal({ open, tab, onTab, onClose, onChanged, wo
             </Spin>
           )}
           {active === "network" && isDesktop && <NetworkPanel />}
+          {active === "desktop" && isDesktop && <DesktopPanel />}
           {active === "memory" && <MemoryPanel workspaceId={workspaceId} />}
           {active === "tools" && (
             <Spin spinning={toolsLoading}>

@@ -8,15 +8,21 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { app } from 'electron'
 
+/** 点击窗口关闭按钮时的行为：ask 首次询问 / tray 收进托盘 / quit 退出程序 */
+export type CloseAction = 'ask' | 'tray' | 'quit'
+
 export interface DesktopConfig {
   /** 是否监听 0.0.0.0（局域网/手机可访问）；保存后需重启生效 */
   lan_enabled: boolean
+  /** 关闭按钮行为；ask 表示还没问过用户，首次关闭时弹窗选择并记住 */
+  close_action: CloseAction
   /** 上次关闭时的窗口尺寸（仅记忆大小，不记忆位置） */
   window: { width: number; height: number }
 }
 
 const DEFAULTS: DesktopConfig = {
   lan_enabled: false,
+  close_action: 'ask',
   window: { width: 1280, height: 860 },
 }
 
@@ -43,6 +49,10 @@ function merge(raw: unknown): DesktopConfig {
   }
   return {
     lan_enabled: obj.lan_enabled === true,
+    close_action:
+      obj.close_action === 'tray' || obj.close_action === 'quit'
+        ? obj.close_action
+        : DEFAULTS.close_action,
     window: {
       width: Number(win.width) > 400 ? Number(win.width) : DEFAULTS.window.width,
       height: Number(win.height) > 300 ? Number(win.height) : DEFAULTS.window.height,
