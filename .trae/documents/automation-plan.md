@@ -1,6 +1,6 @@
 # 自动化任务（定时执行）方案与实施计划
 
-> 状态：方案已评审确认，**尚未实施**。
+> 状态：**已实施完成**（M1 后端 / M2 前端 / M3 文档与回归均已完成，`npm run build` 与全量测试通过）。
 > 基线：`1a0aaa5`（侧栏「自动化」入口已就位，当前仅占位提示）。
 > 目标：在导航栏「自动化」中创建定时任务，到点后模拟一次会话消息，由 Agent 在指定工作区后台执行；首次执行创建会话主题，后续周期在同一主题下追加。
 
@@ -503,3 +503,4 @@ def start_run(self, sid, payload, *, subscribe=True, trigger="manual") -> Thread
 |---|---|
 | 2026-11-10 | 初版：确认 SQLite 存储、8 模板、跳过错过执行、P0 未读红点 |
 | 2026-11-10 | 补充「对话式修改」：任务级 AI 助手，patch 预览后人工保存，对话历史落 `task_chat_messages` |
+| 2026-11-10 | 实施完成：新增 `src/core/automation.py`、`src/core/scheduler.py`、`tests/test_automation.py`（14 项）与前端 `AutomationsPage` / `AutomationEditor` / `AutomationAssistant` / `automationTemplates.ts`；`webui.py` 抽取 `start_run` 并接入自动化路由、无人值守、会话未读；`web` 端 `npm run build` 通过，`tests/run_tests.py` 31/31 通过；新增 `docs/03-features/automation.md` 并更新文档索引与已知问题 |

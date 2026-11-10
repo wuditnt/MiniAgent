@@ -22,7 +22,7 @@ import {
   SettingOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
-import { Empty, Input, Popconfirm, Tooltip, message } from "antd";
+import { Empty, Input, Popconfirm, Tooltip } from "antd";
 import type { SessionItem, WorkspaceItem } from "../types";
 
 interface Props {
@@ -58,10 +58,14 @@ interface Props {
   onOpenSkills: () => void;
   /** 打开连接器（MCP 外部能力）页 */
   onOpenConnectors: () => void;
+  /** 打开自动化任务页 */
+  onOpenAutomations: () => void;
+  /** 自动化会话未读数（侧栏「自动化」红点） */
+  automationsUnread?: number;
   /** 从后端 /api/state 取回的版本号，显示在品牌名右侧 */
   version?: string;
   /** 当前主区视图：用于高亮左栏导航 */
-  activeView?: "chat" | "skills" | "connectors";
+  activeView?: "chat" | "skills" | "connectors" | "automations";
   /** 底部人员菜单节点（由 App 构造，未登录时为 null） */
   accountMenu?: ReactNode;
   /** 正在执行的会话 id 集合：有则在该会话标题前显示呼吸圆点 */
@@ -159,6 +163,8 @@ export default function Sidebar({
   onOpenSettings,
   onOpenSkills,
   onOpenConnectors,
+  onOpenAutomations,
+  automationsUnread = 0,
   version,
   activeView,
   accountMenu,
@@ -280,9 +286,17 @@ export default function Sidebar({
             <AppstoreOutlined className="menu-item-icon" />
             <span>连接</span>
           </div>
-          <div className="menu-item" onClick={() => message.info("「自动化」功能开发中")}>
+          <div
+            className={`menu-item ${activeView === "automations" ? "active" : ""}`}
+            onClick={onOpenAutomations}
+          >
             <ThunderboltOutlined className="menu-item-icon" />
             <span>自动化</span>
+            {automationsUnread > 0 && (
+              <span className="menu-badge" title="有未查看的自动化结果">
+                {automationsUnread > 99 ? "99+" : automationsUnread}
+              </span>
+            )}
           </div>
         </div>
 
@@ -437,6 +451,18 @@ export default function Sidebar({
                                   <div className="session-item-title">
                                     {highlight(s.title, terms)}
                                   </div>
+                                  {s.source === "automation" && (
+                                    <span className="session-auto-tag" title="自动化任务生成的会话">
+                                      自动
+                                    </span>
+                                  )}
+                                  {s.unread && (
+                                    <span
+                                      className="session-unread-dot"
+                                      aria-label="未读"
+                                      title="有新的自动化结果，点开即清除"
+                                    />
+                                  )}
                                   {attentionIds?.has(s.id) && (
                                     <span
                                       className="session-attention-dot"

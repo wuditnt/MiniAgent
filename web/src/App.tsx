@@ -17,6 +17,7 @@ import {
   fetchSessions,
   fetchState,
   fetchWorkspaces,
+  markSessionRead,
   pickFolder,
   postAnswer,
   postConfirm,
@@ -60,13 +61,14 @@ import { useTheme, type ThemeMode } from "./theme";
 import Trajectory from "./components/Trajectory";
 import SkillManager from "./components/SkillManager";
 import ConnectorsPage from "./components/ConnectorsPage";
+import AutomationsPage from "./components/AutomationsPage";
 
 const SESSION_KEY = "miniagent.session";
 const MODE_KEY = "miniagent.mode";
 const WS_KEY = "miniagent.workspace";
 
 /** 主区视图：左栏导航与之一一对应；新增页面只需在这里加一项 */
-type MainView = "chat" | "skills" | "connectors";
+type MainView = "chat" | "skills" | "connectors" | "automations";
 const APPROVAL_KEY = "miniagent.approval";
 const SIDEBAR_W_KEY = "miniagent.sidebar-width";
 const SIDEBAR_W_MIN = 220;
@@ -1250,6 +1252,12 @@ export default function App({
   const handleSelectSession = (sid: string, hitIndex?: number) => {
     setView("chat"); // 会话属于导航：在任何功能页点会话都回到对话
     const hasHit = typeof hitIndex === "number" && hitIndex >= 0;
+    const target = sessions.find((s) => s.id === sid);
+    // 自动化会话：进入即清未读（红点只提醒「有新结果」，看过就消失）
+    if (target?.unread) {
+      markSessionRead(sid).catch(() => {});
+      setSessions((list) => list.map((s) => (s.id === sid ? { ...s, unread: false } : s)));
+    }
     if (sid === session) {
       // 已停在该会话：历史就在屏上，直接定位即可
       if (hasHit) jumpToHit(hitIndex as number);
@@ -1258,7 +1266,6 @@ export default function App({
     setDraftWs(null); // 离开草稿占位：新会话还没聊天就被切走 → 占位消失
     setDraftModel(null);
     // 还原该会话保存的模式（老会话没有该字段时保持当前模式）
-    const target = sessions.find((s) => s.id === sid);
     if (target?.mode) setMode(target.mode);
     pendingHit.current = hasHit ? (hitIndex as number) : null;
     setSession(sid);
@@ -1694,6 +1701,13 @@ export default function App({
             setView("connectors");
             setTrajectoryOpen(false);
           }}
+          onOpenAutomations={() => {
+            setView("automations");
+            setTrajectoryOpen(false);
+          }}
+          automationsUnread={
+            sessions.filter((s) => s.source === "automation" && s.unread).length
+          }
           activeView={view}
           accountMenu={accountMenu}
         />
@@ -2005,6 +2019,16 @@ export default function App({
           )}
           {view === "connectors" && (
             <ConnectorsPage onClose={() => setView("chat")} remote={!!state?.remote} />
+          )}
+          {view === "automations" && (
+            <AutomationsPage
+              workspaces={workspaces}
+              models={models}
+              workspaceId={ws}
+              remote={!!state?.remote}
+              onClose={() => setView("chat")}
+              onOpenSession={(sid) => handleSelectSession(sid)}
+            />
           )}
         </div>
       )}
