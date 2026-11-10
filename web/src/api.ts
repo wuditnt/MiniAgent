@@ -19,6 +19,7 @@ import type {
   ConnectorTestResult,
   ConnectorsData,
   GeneralSettings,
+  GlobalEvent,
   HealthInfo,
   HistoryMessage,
   MemoryData,
@@ -943,4 +944,14 @@ async function readSSE(res: Response, onEvent: (ev: SSEEvent) => void): Promise<
       }
     }
   }
+}
+
+/** 全局事件流：订阅 /api/events 广播的会话创建 / 运行开始 / 运行结束控制信号 */
+export async function eventsStream(
+  onEvent: (ev: GlobalEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const res = await req("/api/events", { signal });
+  if (!res.ok || !res.body) throw new Error(await readError(res));
+  await readSSE(res, onEvent as unknown as (ev: SSEEvent) => void);
 }

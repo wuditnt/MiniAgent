@@ -908,6 +908,59 @@ def scenario_multi_stream() -> None:
     print("  [20] 共享流多会话通过（双路帧 + seq 续传 + 快照回落 + 参数校验）")
 
 
+def scenario_global_events() -> None:
+    """全局事件流 /api/events：广播 session_created / run_started / run_finished。
+
+    这是「后台自动化执行 → 前端实时更新」的控制信号层：一条常驻 SSE，
+    不夹正文，只驱动列表刷新与历史重拉，替代原来的 running 轮询 + 猜测。
+    """
+    got: list[dict] = []
+    connected = threading.Event()
+
+    def subscriber() -> None:
+        # urlopen 返回即代表服务端已在 _handle_events 里把订阅队列挂进 _GLOBAL_SUBS
+        resp = urllib.request.urlopen(
+            f"http://127.0.0.1:{WEB_PORT}/api/events", timeout=30)
+        connected.set()
+        try:
+            for raw in resp:
+                line = raw.decode("utf-8").strip()
+                if not line.startswith("data:"):
+                    continue
+                got.append(json.loads(line[5:]))
+                if {e["type"] for e in got} >= {"session_created", "run_started", "run_finished"}:
+                    break
+        finally:
+            resp.close()
+
+    t = threading.Thread(target=subscriber, daemon=True)
+    t.start()
+    assert connected.wait(5), "全局事件流订阅未在 5s 内建立"
+
+    # ① 触发 session_created：新建会话
+    status, sess = api("POST", "/api/sessions", {"workspace": "default"})
+    assert status == 200, sess
+    sid = sess["id"]
+
+    # ② 触发 run_started / run_finished：跑一轮 agent 短任务
+    global SCRIPT
+    SCRIPT = []
+    events = collect({"message": "hello", "mode": "agent", "web": False, "session": sid})
+    assert any(e.get("type") == "done" for e in events), "agent 短任务应完成"
+
+    t.join(timeout=10)
+    types = {e.get("type") for e in got}
+    assert "session_created" in types, f"应广播 session_created：{got}"
+    assert "run_started" in types, f"应广播 run_started：{got}"
+    assert "run_finished" in types, f"应广播 run_finished：{got}"
+    sc = next(e for e in got if e["type"] == "session_created")
+    assert sc["session"] == sid, f"session_created 应指向新会话：{sc}"
+    rf = next(e for e in got if e["type"] == "run_finished")
+    assert rf["session"] == sid and rf.get("status") == "success", rf
+    api("DELETE", f"/api/sessions/{sid}")
+    print("  [21] 全局事件流通过（session_created / run_started / run_finished 广播）")
+
+
 def scenario_confirm(deny: bool) -> None:
     """⑥⑦ 危险确认：
     拒绝 → agent 不执行（不发 tool_start/tool_end），结果直接回给模型，最终 done；
@@ -1545,6 +1598,7 @@ def main() -> int:
         ("接入后台任务", scenario_reconnect),
         ("实时草稿", scenario_live_draft),
         ("共享流多会话", scenario_multi_stream),
+        ("全局事件流", scenario_global_events),
         ("危险确认-拒绝", lambda: scenario_confirm(deny=True)),
         ("危险确认-允许", lambda: scenario_confirm(deny=False)),
         ("同会话并发 409", scenario_409),

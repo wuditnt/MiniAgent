@@ -32,6 +32,7 @@ import type {
   ApprovalMode,
   Artifact,
   ChatItem,
+  GlobalEvent,
   HistoryMessage,
   Mode,
   ModelProvider,
@@ -57,6 +58,7 @@ import ChangePasswordModal from "./components/ChangePasswordModal";
 import Workbench from "./components/Workbench";
 import { MAX_BACKGROUND, useSessionRuntime } from "./useSessionRuntime";
 import { closeSessionStream, setInterest, setStreamHandler } from "./sessionStream";
+import { closeEventStream, setEventStreamHandler, startEventStream } from "./eventStream";
 import { useTheme, type ThemeMode } from "./theme";
 import Trajectory from "./components/Trajectory";
 import SkillManager from "./components/SkillManager";
@@ -845,9 +847,37 @@ export default function App({
   const rtApiRef = useRef(rtApi);
   rtApiRef.current = rtApi;
 
+  // 全局事件流（/api/events）：会话创建 / 运行开始 / 运行结束的控制信号。
+  // 事件不含正文，只驱动列表刷新与「该会话历史需重拉」的判断。
+  const globalEventRef = useRef<(ev: GlobalEvent) => void>(() => {});
+  globalEventRef.current = (ev: GlobalEvent) => {
+    if (!ev.session) return;
+    if (ev.type === "session_created") {
+      refreshSessions();
+    } else if (ev.type === "run_started") {
+      // 加入运行集合：侧栏显示运行点；若正显示该会话，由「空闲→运行」effect 触发重拉
+      setRunningIds((prev) => new Set(prev).add(ev.session));
+    } else if (ev.type === "run_finished") {
+      // 跑完了：标记「下次打开必须重拉」，从运行集合移除；正显示该会话则立即补拉终稿
+      pendingReloadRef.current.add(ev.session);
+      setRunningIds((prev) => {
+        const s = new Set(prev);
+        s.delete(ev.session);
+        return s;
+      });
+      if (ev.session === session) setRunReload((n) => n + 1);
+      refreshSessions();
+    }
+  };
+
   useEffect(() => {
     setStreamHandler((ev) => frameRef.current(ev));
-    return () => closeSessionStream();
+    setEventStreamHandler((ev) => globalEventRef.current(ev));
+    startEventStream();
+    return () => {
+      closeSessionStream();
+      closeEventStream();
+    };
   }, []);
 
   // 订阅集合：当前会话优先；其余后台运行会话按「已在保活」优先，最多 MAX_BACKGROUND 个

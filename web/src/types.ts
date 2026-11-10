@@ -111,6 +111,12 @@ export type SSEEvent = { session?: string; seq?: number } & (
     }
 );
 
+/** 全局事件流（/api/events）广播的控制信号：不含正文，只驱动列表刷新/历史重拉 */
+export type GlobalEvent =
+  | { type: "session_created"; session: string; workspace_id?: string; source?: string }
+  | { type: "run_started"; session: string; source?: string }
+  | { type: "run_finished"; session: string; status: string };
+
 /** 轨迹事件的来源（决定 Trajectory 视图的着色） */
 export type TraceSource =
   | "system"

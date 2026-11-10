@@ -71,6 +71,24 @@ ATTACH_DIR = ".attachments"    # 工作区内附件存放子目录
 # （Last-Event-ID 只有一个值，所以序号必须跨会话唯一，不能各会话各数各的）。
 _EVENT_SEQ = 0
 _EVENT_SEQ_LOCK = threading.Lock()
+
+# ---------------------------------------------------------------- 全局事件流
+# 与会话事件流独立的一条轻量通道：广播「会话创建 / 运行开始 / 运行结束」这类
+# 控制信号，前端据此决定何时刷新列表或重拉历史。事件不含正文、不写回放缓冲、
+# 不参与多路流的 seq 续传 —— 断线重连后由前端主动刷新 running/sessions 兜底。
+_GLOBAL_SUBS: "list[queue.Queue]" = []
+_GLOBAL_SUB_LOCK = threading.Lock()
+
+
+def _emit_global(event: dict) -> None:
+    """把一条全局事件广播给 /api/events 的所有订阅者；无人订阅时直接丢弃。"""
+    with _GLOBAL_SUB_LOCK:
+        subs = list(_GLOBAL_SUBS)
+    if not subs:
+        return
+    ev = {**event, "session": event.get("session") or "*"}
+    for q in subs:
+        q.put(ev)
 _REPLAY: "deque[dict]" = deque()
 _REPLAY_BYTES = 0
 _REPLAY_MAX_EVENTS = 2000             # 回放缓冲最多留多少帧
@@ -2265,6 +2283,8 @@ class WebServer:
                 "actions": [dict(a) for a in run["actions"]],
                 "server_now": time.time(),
             })
+            _emit_global({"type": "run_started", "session": sid,
+                          "source": trigger or "manual"})
             mem_event = _remember_from_message(message)
             if mem_event:
                 session.emit(mem_event)
@@ -2336,6 +2356,8 @@ class WebServer:
         session.mode = "agent"
         session.source = "automation"
         session.automation_id = str(task.get("id") or "")
+        _emit_global({"type": "session_created", "session": sid,
+                      "workspace_id": wid, "source": "automation"})
         return sid
 
     def ensure_automation_session(self, task: dict) -> str:
@@ -2719,6 +2741,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_automation_chat_list(m.group(1))
         elif route == "/api/running":
             self._handle_running()
+        elif route == "/api/events":
+            self._handle_events()
         elif route == "/api/chat/stream":
             self._handle_chat_stream(parse_qs(parsed.query))
         elif route == "/api/workspaces":
@@ -3487,6 +3511,38 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self._json({"sessions": {sid: {"since": since} for sid, since in running.items()},
                     "server_now": time.time()})
 
+    def _handle_events(self) -> None:
+        """全局事件流：一条常驻 SSE，广播 session_created / run_started / run_finished。
+
+        与会话流（/api/chat/stream）不同：这条流「不因空闲而关」，持续保持直到
+        客户端断开；事件不含正文、不带 seq，前端断线重连后主动刷新兜底即可。
+        """
+        q: queue.Queue = queue.Queue()
+        with _GLOBAL_SUB_LOCK:
+            _GLOBAL_SUBS.append(q)
+        try:
+            self._sse_headers()
+            self.close_connection = True
+            while True:
+                try:
+                    event = q.get(timeout=PUMP_IDLE)
+                except queue.Empty:
+                    try:
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                    except (ConnectionAbortedError, ConnectionResetError,
+                            BrokenPipeError, OSError):
+                        return
+                    continue
+                if not self._sse_frame(event):
+                    return
+        finally:
+            with _GLOBAL_SUB_LOCK:
+                try:
+                    _GLOBAL_SUBS.remove(q)
+                except ValueError:
+                    pass
+
     def _snapshot_event(self, session: "_Session") -> dict:
         """一个会话的整份快照（消息 + 本轮时间线 + 未定稿草稿）。"""
         sid = session.id
@@ -3608,6 +3664,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
         # 同时在内存里登记一个空会话，并把归属工作区带上
         session = self.web.session(sid)
         session.workspace_id = wid
+        _emit_global({"type": "session_created", "session": sid,
+                      "workspace_id": wid, "source": "manual"})
         self._json({"id": sid, "title": "新对话", "workspace_id": wid})
 
     def _lock_session_or_409(self, sid: str, action: str):
@@ -5382,6 +5440,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 session.end_run("error")
             session.queue = None
             session.unattended = False
+            # 全局广播运行结束：前端据此补拉该会话终稿（无需轮询 running 去猜）
+            _emit_global({"type": "run_finished", "session": session.id,
+                          "status": outcome["status"]})
             # 调度器回调（写 task_runs / 未读）在解锁前执行：避免下一次运行并发写会话
             if on_done is not None:
                 try:
