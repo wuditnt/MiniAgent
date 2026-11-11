@@ -29,6 +29,41 @@ export interface Attachment {
   size: number;
 }
 
+/** 工作区文件引用（@ 选中后随消息发送；后端按快照读取内容） */
+export interface WorkspaceRef {
+  name: string;
+  /** 相对工作区根，统一 / 分隔 */
+  path: string;
+  size: number;
+  mtime: number;
+  ext?: string;
+  mime?: string;
+  /** 注入方式（后端解析后回填）：inline 全文 / image 多模态 / path 仅路径 */
+  mode?: "inline" | "image" | "path";
+  /** 发送时文件与客户端快照不一致 */
+  changed?: boolean;
+}
+
+/** GET /api/workspace/search 的条目 */
+export interface WorkspaceSearchItem extends WorkspaceRef {
+  ext: string;
+}
+
+/** GET /api/workspace/search 返回 */
+export interface WorkspaceSearchData {
+  items: WorkspaceSearchItem[];
+  truncated: boolean;
+  took_ms: number;
+}
+
+/** POST /api/workspace/stat 的条目 */
+export interface WorkspaceStatItem {
+  path: string;
+  exists: boolean;
+  size: number;
+  mtime: number;
+}
+
 /** 工具产出的图片：本轮生成、已落在工作区里的文件（气泡下方缩略图条） */
 export interface Artifact {
   /** 相对工作区根的路径（/ 分隔） */
@@ -192,6 +227,8 @@ export interface ChatItem {
   reason?: string;
   /** 用户消息的附件（图片 / 文件），供前端展示 */
   attachments?: Attachment[];
+  /** 用户消息引用的工作区文件（@ 选择），历史回放展示引用 chip */
+  references?: WorkspaceRef[];
   /** 本轮工具生成的图片（保留在气泡下方，历史回放同样可见） */
   artifacts?: Artifact[];
   /** 消息时间（秒级时间戳）：工具栏里展示「今天 23:08」 */
@@ -226,6 +263,8 @@ export interface HistoryMessage {
   sec?: number;
   /** 用户消息的附件元数据 */
   attachments?: Attachment[];
+  /** 用户消息引用的工作区文件（老会话没有） */
+  references?: WorkspaceRef[];
   /** 该轮工具产出的图片（老会话可能没有） */
   artifacts?: Artifact[];
   /** 消息时间（秒级时间戳），老会话可能没有 */

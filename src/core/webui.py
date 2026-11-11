@@ -64,7 +64,34 @@ CONFIRM_ARG_LIMIT = 20000      # 危险确认弹窗参数上限：需完整展�
 MAX_BODY = 32 * 1024 * 1024    # 请求体上限 32MB（base64 附件膨胀约 1/3，实际文件上限约 24MB）
 MAX_UPLOAD_BYTES = 24 * 1024 * 1024   # 单个附件解码后上限
 MAX_ATTACHMENT_TEXT = 8000     # 文本附件注入消息的内容节选上限（字符）
+MAX_ATTACHMENTS = 5            # 单条消息最多携带的本地附件数
 ATTACH_DIR = ".attachments"    # 工作区内附件存放子目录
+
+# ---------------------------------------------------------------- @ 引用
+MAX_REFERENCES = 5                    # 单条消息最多引用的工作区文件数
+REF_INLINE_BYTES = 8 * 1024           # 单个文本引用的内联上限
+REF_TOTAL_INLINE_BYTES = 32 * 1024    # 单条消息所有引用的内联总预算
+REF_SUMMARY_LINES = 40                # 超过内联上限时给出的摘要行数
+#: 可直接按文本读取的扩展名白名单（mime 为 text/* 或 application/json 时同样放行）
+REF_TEXT_EXTS = frozenset({
+    ".md", ".markdown", ".txt", ".log", ".csv", ".tsv", ".json", ".jsonl",
+    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env",
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte",
+    ".html", ".htm", ".css", ".scss", ".less", ".xml", ".svg",
+    ".sql", ".sh", ".ps1", ".bat", ".go", ".rs", ".java", ".kt", ".c", ".h",
+    ".cpp", ".hpp", ".rb", ".php", ".lua", ".r",
+})
+#: 工作区搜索时整棵剪掉的目录（以 . 开头的目录一律跳过）
+SEARCH_SKIP_DIRS = frozenset({
+    ".git", "node_modules", ".venv", "venv", "dist", "build", "out",
+    "__pycache__", ".mypy_cache", ".pytest_cache", ".idea", ".vscode",
+    ATTACH_DIR, ".memory", "target", "coverage", ".next",
+})
+SEARCH_MAX_ENTRIES = 20000            # 单次搜索最多访问的条目数
+SEARCH_MAX_DEPTH = 12                 # 递归深度上限
+SEARCH_MAX_RESULTS = 30               # 搜索结果上限
+SEARCH_TIME_LIMIT = 1.5               # 搜索墙钟上限（秒）
+STAT_MAX_PATHS = 50                   # 一次批量 stat 的路径上限
 
 # ---------------------------------------------------------------- 实时事件序号
 # 一条 SSE 可以同时观看多个会话，靠帧里的 session 分流；断线续传则靠全局单调序号
@@ -511,6 +538,9 @@ class _Session:
                     # 附件元数据灌回内存，save() 时再原样落盘
                     if role == "user" and m.get("attachments"):
                         msg["_attachments"] = m["attachments"]
+                    # @ 引用元数据同理：历史回放展示引用 chip，重新落盘不丢
+                    if role == "user" and m.get("references"):
+                        msg["_references"] = m["references"]
                     self.agent.messages.append(msg)
         self._loaded = True
 
@@ -533,6 +563,8 @@ class _Session:
                 item = {"role": "user", "content": content}
                 if m.get("_attachments"):
                     item["attachments"] = m["_attachments"]
+                if m.get("_references"):
+                    item["references"] = m["_references"]
                 if m.get("_ts"):
                     item["ts"] = m["_ts"]
                 messages.append(item)
@@ -1234,6 +1266,220 @@ def _resolve_attachments(attachments: list[dict], ws_root: str) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------- @ 工作区引用
+
+def _reference_file(ws_root: str, rel: str) -> str | None:
+    """把引用里的相对路径解析成真实文件路径；非法（越界 / 绝对路径 / ..）返回 None。
+
+    引用不复制文件，发送时按原路径读取 —— 所以这里的边界校验必须和
+    `_attachment_file` 同一口径：规范化后 realpath 必须落在工作区根目录内。
+    """
+    raw = str(rel or "").replace("\\", "/").strip()
+    if not raw or raw.startswith("/") or os.path.isabs(raw):
+        return None
+    parts = [p for p in raw.split("/") if p not in ("", ".")]
+    if not parts or any(p == ".." for p in parts) or ":" in parts[0]:
+        return None
+    root = os.path.realpath(ws_root)
+    fp = os.path.realpath(os.path.join(root, *parts))
+    if fp != root and not fp.startswith(root + os.sep):
+        return None
+    return fp
+
+
+def _guess_mime(path: str) -> str:
+    """按扩展名猜 mime：先查静态资源表，再退回标准库。"""
+    import mimetypes
+
+    ext = os.path.splitext(path)[1].lower()
+    known = _CONTENT_TYPES.get(ext)
+    if known:
+        return known.split(";")[0].strip()
+    guessed, _ = mimetypes.guess_type(path)
+    return guessed or "application/octet-stream"
+
+
+def _is_text_ref(path: str, mime: str) -> bool:
+    """文本判定：mime 是 text/* 或 JSON，或扩展名在白名单里。"""
+    if mime.startswith("text/") or mime == "application/json":
+        return True
+    return os.path.splitext(path)[1].lower() in REF_TEXT_EXTS
+
+
+def _reference_summary(text: str) -> str:
+    """大文本不给全文，只给前 N 行，够模型判断「要不要继续读」。"""
+    lines = text.splitlines()
+    head = "\n".join(lines[:REF_SUMMARY_LINES])
+    more = len(lines) - REF_SUMMARY_LINES
+    return head + (f"\n…（共 {len(lines)} 行，仅展示前 {REF_SUMMARY_LINES} 行）" if more > 0 else "")
+
+
+def _resolve_references(references: list[dict], ws_root: str) -> list[dict]:
+    """把前端提交的引用解析成 agent 需要的结构（内容按规则内联或降级为路径）。
+
+    规则（与方案 D1/D8 一致）：
+      · 文本且 ≤ 8KB → 全文内联；
+      · 文本但 > 8KB → 前 40 行摘要，仍是路径引用；
+      · 图片且 ≤ 24MB → data_url 走多模态；
+      · 其它 / 超大图片 / 超出 32KB 总预算 → 只给路径。
+
+    路径非法时抛 ValueError（调用方转 400）；文件不存在时保留路径注记，
+    不让整轮对话因为一个被删掉的文件而失败。
+    """
+    import base64
+
+    picked: list[dict] = []
+    seen: set[str] = set()
+    for ref in references or []:
+        if not isinstance(ref, dict):
+            continue
+        rel = str(ref.get("path") or "").replace("\\", "/").strip()
+        if not rel:
+            continue
+        fp = _reference_file(ws_root, rel)
+        if fp is None:
+            raise ValueError(f"非法的引用路径：{rel}")
+        if fp in seen:
+            continue
+        seen.add(fp)
+        picked.append({"path": rel, "fp": fp,
+                       "mtime": float(ref.get("mtime") or 0),
+                       "size": int(ref.get("size") or 0)})
+    if len(picked) > MAX_REFERENCES:
+        raise ValueError(f"单条消息最多引用 {MAX_REFERENCES} 个文件")
+
+    budget = REF_TOTAL_INLINE_BYTES
+    out: list[dict] = []
+    for item in picked:
+        rel, fp = item["path"], item["fp"]
+        entry: dict = {
+            "name": os.path.basename(fp),
+            "path": rel,
+            "mime": _guess_mime(fp),
+            "size": 0,
+            "mtime": 0.0,
+            "mode": "path",
+            "changed": False,
+        }
+        try:
+            st = os.stat(fp)
+        except OSError:
+            entry["changed"] = True
+            out.append(entry)
+            continue
+        entry["size"] = st.st_size
+        entry["mtime"] = st.st_mtime
+        entry["changed"] = bool(
+            item["size"] and item["size"] != st.st_size
+            or item["mtime"] and abs(item["mtime"] - st.st_mtime) > 1
+        )
+        mime = entry["mime"]
+        is_text = _is_text_ref(rel, mime)
+        # 文本优先判定：.svg 的 mime 是 image/svg+xml，但它本质是可读文本
+        if is_text:
+            try:
+                with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read(REF_INLINE_BYTES + 1)
+                # 只读到上限+1：不把整个大文件读进内存再判断
+                if len(text) <= REF_INLINE_BYTES and st.st_size <= REF_INLINE_BYTES:
+                    if st.st_size <= budget:
+                        entry["content"] = text
+                        entry["mode"] = "inline"
+                        budget -= st.st_size
+                else:
+                    with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                        head = "".join(f.readline() for _ in range(REF_SUMMARY_LINES))
+                    entry["summary"] = _reference_summary(head)
+            except OSError:
+                pass
+        elif mime.startswith("image/") and st.st_size <= MAX_UPLOAD_BYTES:
+            if st.st_size <= budget:
+                try:
+                    with open(fp, "rb") as f:
+                        data = f.read()
+                    entry["data_url"] = (
+                        f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+                    )
+                    entry["mode"] = "image"
+                    budget -= st.st_size
+                except OSError:
+                    pass
+        out.append(entry)
+    return out
+
+
+# ---------------------------------------------------------- 工作区搜索
+
+def _search_score(name: str, rel: str, keyword: str) -> int:
+    """匹配打分：越小越靠前；0 表示不命中。
+
+    文件名前缀 > 文件名子串 > 路径子串 > 文件名字序列。
+    """
+    low_name, low_rel = name.lower(), rel.lower()
+    if not keyword:
+        return 1
+    if low_name.startswith(keyword):
+        return 1
+    if keyword in low_name:
+        return 2
+    if keyword in low_rel:
+        return 3
+    # 子序列：f、c、a 依次出现即算命中（"fca" 能搜到 "file_ca.py"）
+    pos = 0
+    for ch in low_name:
+        if pos < len(keyword) and ch == keyword[pos]:
+            pos += 1
+    return 4 if pos == len(keyword) else 0
+
+
+def _search_workspace(root: str, keyword: str, limit: int) -> tuple[list[dict], bool]:
+    """在工作区里按文件名/相对路径模糊搜索，返回 (结果, 是否被截断)。
+
+    三层防护：跳过忽略目录与所有点目录、限制深度/条目数/耗时、不跟随越界符号链接。
+    """
+    key = keyword.strip().lower()
+    results: list[tuple[int, float, dict]] = []
+    visited = 0
+    truncated = False
+    deadline = time.time() + SEARCH_TIME_LIMIT
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, root)
+        depth = 0 if rel_dir == "." else rel_dir.count(os.sep) + 1
+        if depth >= SEARCH_MAX_DEPTH:
+            dirnames[:] = []
+            continue
+        dirnames[:] = [
+            d for d in dirnames
+            if not d.startswith(".") and d not in SEARCH_SKIP_DIRS
+        ]
+        for fn in filenames:
+            visited += 1
+            if visited > SEARCH_MAX_ENTRIES or time.time() > deadline:
+                truncated = True
+                return [x[2] for x in sorted(results, key=lambda x: (x[0], -x[1]))][:limit], True
+            if not key:
+                score = 1
+            else:
+                rel = f"{rel_dir}/{fn}".replace(os.sep, "/") if rel_dir != "." else fn
+                score = _search_score(fn, rel, key)
+                if not score:
+                    continue
+            rel = f"{rel_dir}/{fn}".replace(os.sep, "/") if rel_dir != "." else fn
+            try:
+                st = os.stat(os.path.join(dirpath, fn))
+            except OSError:
+                continue
+            results.append((score, st.st_mtime, {
+                "name": fn, "path": rel, "size": st.st_size, "mtime": st.st_mtime,
+                "ext": os.path.splitext(fn)[1].lower(),
+            }))
+    results.sort(key=lambda x: (x[0], -x[1]))
+    if len(results) > limit:
+        truncated = True
+    return [x[2] for x in results[:limit]], truncated
+
+
+
 # ---------------------------------------------------------- 工作台文件浏览
 
 def _workspace_path(workspace_id: str, rel: str) -> tuple[str, str]:
@@ -1775,6 +2021,8 @@ def _with_pending_user(session: "_Session", src: list[dict]) -> list[dict]:
     item: dict = {"role": "user", "content": pending.get("message") or ""}
     if pending.get("attachments"):
         item["_attachments"] = list(pending["attachments"])
+    if pending.get("references"):
+        item["_references"] = list(pending["references"])
     if pending.get("ts"):
         item["_ts"] = pending["ts"]
     return [*src, item]
@@ -1881,6 +2129,9 @@ def _display_items(raw: list[dict]) -> list[dict]:
                 atts = raw[i].get("_attachments") or raw[i].get("attachments")
                 if atts:
                     item["attachments"] = atts
+                refs = raw[i].get("_references") or raw[i].get("references")
+                if refs:
+                    item["references"] = refs
                 ts = raw[i].get("_ts") or raw[i].get("ts")
                 if ts:
                     item["ts"] = ts
@@ -2247,13 +2498,29 @@ class WebServer:
             message = str(payload.get("message") or "").strip()
             raw_atts = payload.get("attachments")
             attachments = [a for a in (raw_atts or []) if isinstance(a, dict)]
+            if len(attachments) > MAX_ATTACHMENTS:
+                raise RunStartError(400, f"单条消息最多携带 {MAX_ATTACHMENTS} 个附件")
+            # @ 引用：只保留 path/mtime/size 三个字段，具体内容在 worker 里按工作区读取
+            raw_refs = payload.get("references")
+            references: list[dict] = []
+            for r in (raw_refs or []):
+                if not isinstance(r, dict):
+                    continue
+                p = str(r.get("path") or "").replace("\\", "/").strip()
+                if not p:
+                    continue
+                references.append({"path": p,
+                                   "mtime": float(r.get("mtime") or 0),
+                                   "size": int(r.get("size") or 0)})
+            if len(references) > MAX_REFERENCES:
+                raise RunStartError(400, f"单条消息最多引用 {MAX_REFERENCES} 个文件")
             mode = payload.get("mode") if payload.get("mode") in ("chat", "agent") else "agent"
             # 技能写在消息里（\x01名字\x01），运行时自己查；快速对话模式不启用技能
             skill_names, message = _skills_from_message(
                 self.skill_loader if mode == "agent" else None, message
             )
             skill_context, _used_skills = _skill_context(self.skill_loader, skill_names)
-            if not message and not attachments:
+            if not message and not attachments and not references:
                 raise RunStartError(400, "message 不能为空")
             # 联网开关：前端总是随请求带上本会话的值；未带则沿用会话已保存的配置
             web = bool(payload.get("web")) if "web" in payload else None
@@ -2289,6 +2556,14 @@ class WebServer:
             if ws and workspace_config.get_workspace(ws) and not agent.messages[1:]:
                 session.workspace_id = ws
 
+            # 引用路径先在这里验一遍：非法路径要在请求线程上回 400，
+            # 而不是等工作线程读取时才变成一条 error 事件。
+            if references:
+                ref_root = workspace_config.resolve_path(session.workspace_id)
+                for r in references:
+                    if _reference_file(ref_root, r["path"]) is None:
+                        raise RunStartError(400, f"非法的引用路径：{r['path']}")
+
             session.mode, session.web = mode, web
             session.approval_mode = approval
             # 只有本轮有效：worker 收尾时复位
@@ -2303,7 +2578,8 @@ class WebServer:
             # 让这期间接入的客户端（自动化任务尤其常见）也能看到这一条
             session.pending_turn = {
                 "turn": run["turn"], "message": message,
-                "attachments": attachments, "ts": run["started_at"],
+                "attachments": attachments, "references": references,
+                "ts": run["started_at"],
             }
             session.record_action("step", "开始本轮任务", "读取会话上下文，注入工具表", status="ok")
             q = session.subscribe() if subscribe else None
@@ -2323,7 +2599,7 @@ class WebServer:
             worker = threading.Thread(
                 target=_RequestHandler._run_worker,
                 args=(session, agent, message, mode, attachments, approval, web,
-                      skill_context, session.unattended, on_done),
+                      skill_context, session.unattended, on_done, references),
                 daemon=True,
                 name=f"web-chat-{sid}",
             )
@@ -2798,6 +3074,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_skill_detail(parse_qs(parsed.query))
         elif route == "/api/workspace/dir":
             self._handle_workspace_dir(parse_qs(parsed.query))
+        elif route == "/api/workspace/search":
+            self._handle_workspace_search(parse_qs(parsed.query))
         elif route == "/api/workspace/file":
             self._handle_workspace_file(parse_qs(parsed.query))
         elif route == "/api/workspace/raw":
@@ -2838,6 +3116,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_chat()
         elif route == "/api/workspace/delete":
             self._handle_workspace_entry_delete()
+        elif route == "/api/workspace/stat":
+            self._handle_workspace_stat()
         elif route == "/api/workspace/reveal":
             self._handle_workspace_reveal()
         elif route == "/api/upload":
@@ -4760,6 +5040,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
         前端先上传再发送：/api/chat 只传元数据（path/mime/size），
         工作线程在发送前用 _resolve_attachments 读文件编成 data_url/节选。
         """
+        # 远程只读：上传会把文件写进宿主机工作区，只允许本机操作
+        if self._is_remote():
+            self._fail(403, "远程访问不支持上传附件")
+            return
         body = self._read_body()
         if body is None:
             self._fail(400, "请求体必须是 JSON（{name, data, mime, workspace}）")
@@ -4841,6 +5125,55 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     # ---------------------------------------------------------- 工作台文件浏览
+
+    def _handle_workspace_search(self, params: dict) -> None:
+        """按文件名/相对路径模糊搜索工作区内文件（@ 引用面板用）。"""
+        wid = (params.get("workspace_id") or [workspace_config.DEFAULT_ID])[0]
+        q = (params.get("q") or [""])[0]
+        try:
+            limit = int((params.get("limit") or [20])[0])
+        except (TypeError, ValueError):
+            limit = 20
+        limit = max(1, min(limit, SEARCH_MAX_RESULTS))
+        root = os.path.realpath(
+            workspace_config.resolve_path(wid or workspace_config.DEFAULT_ID)
+        )
+        if not os.path.isdir(root):
+            self._fail(404, "工作区目录不存在")
+            return
+        t0 = time.time()
+        items, truncated = _search_workspace(root, q, limit)
+        self._json({
+            "items": items,
+            "truncated": truncated,
+            "took_ms": int((time.time() - t0) * 1000),
+        })
+
+    def _handle_workspace_stat(self) -> None:
+        """批量查询工作区文件是否存在及 size/mtime（历史引用标注「已变更/已删除」）。"""
+        body = self._read_body()
+        if body is None:
+            self._fail(400, "请求体必须是 JSON（{workspace_id, paths}）")
+            return
+        wid = str(body.get("workspace_id") or workspace_config.DEFAULT_ID)
+        raw = body.get("paths")
+        paths = [str(p) for p in (raw or []) if isinstance(p, str)]
+        if len(paths) > STAT_MAX_PATHS:
+            self._fail(400, f"一次最多查询 {STAT_MAX_PATHS} 个路径")
+            return
+        root = os.path.realpath(workspace_config.resolve_path(wid))
+        items: list[dict] = []
+        for rel in paths:
+            item: dict = {"path": rel, "exists": False, "size": 0, "mtime": 0.0}
+            fp = _reference_file(root, rel)
+            if fp is not None and os.path.isfile(fp):
+                try:
+                    st = os.stat(fp)
+                    item.update(exists=True, size=st.st_size, mtime=st.st_mtime)
+                except OSError:
+                    pass
+            items.append(item)
+        self._json({"items": items})
 
     def _handle_workspace_dir(self, params: dict) -> None:
         wid = (params.get("workspace_id") or [workspace_config.DEFAULT_ID])[0]
@@ -5272,6 +5605,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
         sid = self._sid_or_fail(str(body.get("session") or "default")[:64])
         if sid is None:
             return
+        # 远程只读：可以查看历史引用，但不能为本轮新增引用
+        refs = body.get("references")
+        if refs and self._is_remote():
+            self._fail(403, "远程访问不支持引用工作区文件")
+            return
         # 准备与启动统一交给 start_run：会话级模型/工作区/连接器、turn 计数、
         # run_start 事件以及忙闲与锁的复位都在那边完成，/api/chat 只负责泵事件。
         try:
@@ -5340,7 +5678,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         session: _Session, agent, message: str, mode: str,
         attachments: list[dict] | None = None, approval: str = "ask",
         web: bool = False, skill_context: str = "", unattended: bool = False,
-        on_done=None,
+        on_done=None, references: list[dict] | None = None,
     ) -> None:
         """工作线程：换工具表 → agent.run() → 终态事件。
 
@@ -5400,6 +5738,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             answer = agent.run(
                 message,
                 attachments=_resolve_attachments(attachments or [], ws_root),
+                references=_resolve_references(references or [], ws_root),
                 extra_system=skill_context,
             )
             sec = round(time.time() - t0, 1)

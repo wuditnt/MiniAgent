@@ -223,6 +223,43 @@ body.sidebar-resizing .sidebar-resizer::after {
   background: var(--bg-ffffff);
 }
 
+/* 对话区根容器：撑满 .main 的剩余高度，并作为拖拽上传的整块热区 */
+.chat-root {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 拖拽文件的提示遮罩：pointer-events:none 保证不吞掉 drop 事件 */
+.chat-drop-overlay {
+  position: absolute;
+  inset: 12px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: 2px dashed #1677ff;
+  border-radius: 12px;
+  background: rgba(230, 244, 255, 0.86);
+  color: #1677ff;
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.chat-drop-overlay .anticon {
+  font-size: 34px;
+}
+
+.chat-drop-overlay.disabled {
+  border-color: #ff7875;
+  background: rgba(255, 241, 240, 0.9);
+  color: #cf1322;
+}
+
 /* 上翻历史后出现的「回到底部」浮标：sticky 吸在消息区底沿，
    height:0 + translateY(-100%) 保证不占布局高度、不改变 scrollHeight */
 .chat-jump {
@@ -2491,6 +2528,182 @@ body.sidebar-resizing .sidebar-resizer::after {
   color: #69b1ff;
 }
 
+/* 文件块：与技能块同形，绿色系区分；title 里有相对路径 */
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin: 0 2px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: #eefaf2;
+  color: #0f8a4a;
+  font-weight: 500;
+  line-height: 1.5;
+  vertical-align: baseline;
+  user-select: all;
+  cursor: default;
+}
+
+.file-chip-icon {
+  flex: none;
+  color: #0f8a4a;
+}
+
+/* ---- @ 文件引用面板：与技能面板一致，贴输入框顶部向上弹出 ---- */
+.mention-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 40;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid #ebeef5;
+  border-radius: 10px;
+  background: var(--bg-ffffff);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.mention-group {
+  padding: 6px 8px 4px;
+  font-size: 12px;
+  color: var(--tx-bfbfbf);
+}
+
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.mention-item.active,
+.mention-item:hover {
+  background: #f2f7ff;
+}
+
+.mention-item.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mention-icon {
+  flex: none;
+  display: inline-flex;
+  color: #8c8c8c;
+}
+
+.mention-main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.mention-name {
+  overflow: hidden;
+  font-size: 13px;
+  color: #262626;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-dir {
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--tx-bfbfbf);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-size {
+  flex: none;
+  font-size: 11px;
+  color: var(--tx-bfbfbf);
+}
+
+.mention-empty {
+  padding: 10px 8px;
+  font-size: 12px;
+  color: var(--tx-bfbfbf);
+  text-align: center;
+}
+
+.mention-actions {
+  margin-top: 4px;
+  padding-top: 2px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.mention-upload .mention-name {
+  color: #1677ff;
+}
+
+.mention-hint {
+  display: block;
+  padding: 4px 8px 2px;
+  font-size: 11px;
+  color: var(--tx-bfbfbf);
+}
+
+/* ---- 用户气泡上方的 @ 引用 chip ---- */
+.msg-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+
+.msg-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 260px;
+  padding: 2px 8px;
+  border: 1px solid #d9e7d9;
+  border-radius: 6px;
+  background: #f6fbf7;
+  color: #0f8a4a;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.msg-ref-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg-ref-tag {
+  flex: none;
+  font-size: 11px;
+  font-style: normal;
+  color: #d46b08;
+}
+
+.msg-ref.changed {
+  border-color: #ffe0b2;
+  background: #fff8ef;
+}
+
+.msg-ref.deleted {
+  border-color: #ffd6d6;
+  background: #fff5f5;
+  color: #c0392b;
+  cursor: default;
+  text-decoration: line-through;
+}
+
+.msg-ref.deleted .msg-ref-tag {
+  text-decoration: none;
+}
+
 /* ---- 技能选择面板：贴着输入框顶部向上弹出，宽度与输入框一致 ---- */
 .skill-picker {
   display: inline-flex;
@@ -3758,6 +3971,15 @@ body.sidebar-resizing .sidebar-resizer::after {
 
 .wb-row:hover {
   background: var(--bg-f5f8ff);
+}
+
+/* 文件行可拖拽到对话区变成 @ 引用：用抓取光标给出可拖暗示 */
+.wb-row.file {
+  cursor: grab;
+}
+
+.wb-row.file:active {
+  cursor: grabbing;
 }
 
 .wb-row-icon {

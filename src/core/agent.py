@@ -800,12 +800,16 @@ class Agent:
         self,
         user_input: str,
         attachments: list[dict] | None = None,
+        references: list[dict] | None = None,
         extra_system: str = "",
     ) -> str:
         """运行一个任务。被取消时抛 core.cancel.Cancelled（不抛 KeyboardInterrupt）。
 
         attachments：WebUI 上传的附件（[{name, path, mime, size, data_url?, excerpt?}]），
         由 _build_user_message 组装进用户消息 —— 图片走多模态分片，文本注入节选。
+
+        references：WebUI 的 @ 引用（已由服务端解析好 mode/content/data_url），
+        与附件同一套组装逻辑，但元数据单独记为 _references。
 
         extra_system：本轮临时附加到 system prompt 的内容（Web UI 用户显式选中的技能
         正文等）。只影响本次 run，结束后清空，不进入消息历史。
@@ -831,8 +835,9 @@ class Agent:
         _run_t0 = time.time()
         _usage_before = dict(self.usage)
         _llm_log.info(
-            "run.start session=%s chars=%d attachments=%d",
+            "run.start session=%s chars=%d attachments=%d references=%d",
             self.session_id or "-", len(user_input or ""), len(attachments or []),
+            len(references or []),
         )
         prev = set_current_token(token)
         # 本次运行实际使用的会话工具表：search_tools 这类「动态加载能力」的工具
@@ -857,6 +862,11 @@ class Agent:
                  "mime": a.get("mime"), "size": int(a.get("size") or 0)}
                 for a in (attachments or [])
             ],
+            references=[
+                {"name": r.get("name"), "path": r.get("path"),
+                 "mode": r.get("mode"), "size": int(r.get("size") or 0)}
+                for r in (references or [])
+            ],
             tags={},
         )
         # 本轮确认模式：同步 system prompt（auto 追加责任准则 + 记忆块），
@@ -866,7 +876,7 @@ class Agent:
         approval_tok = approval.set_asker(self._ask_approval)
         ask_tok = ask.set_asker(self._ask_user)
         try:
-            answer = self._run_loop(user_input, attachments)
+            answer = self._run_loop(user_input, attachments, references)
             # 回复已定稿：记忆提炼放后台线程，绝不让它拖慢 done 事件
             self._spawn_extract(user_input, answer)
             _llm_log.info(
@@ -1453,16 +1463,23 @@ class Agent:
                 )
 
     @staticmethod
-    def _build_user_message(user_input: str, attachments: list[dict]) -> dict:
-        """组装用户消息。无附件时保持纯字符串；有图片时升级为多模态 content 数组。
+    def _build_user_message(
+        user_input: str,
+        attachments: list[dict],
+        references: list[dict] | None = None,
+    ) -> dict:
+        """组装用户消息。无附件/引用时保持纯字符串；有图片时升级为多模态 content 数组。
 
         附件的三档处理（按类型各得其所）：
           · 图片   → data_url 的 image_url 分片，视觉模型直接看到；
           · 文本   → 内容节选拼进消息文本（长度已在 webui 层裁剪）；
           · 其它二进制 → 只注记相对路径，模型可调用工具自行读取。
-        _attachments 元数据供 WebUI 历史回放展示（_ 前缀不会发给模型接口）。
+        @ 引用（references）由 webui 解析好 mode：inline 给全文、image 给 data_url、
+        path 只给路径注记。_attachments / _references 元数据供 WebUI 历史回放展示
+        （_ 前缀不会发给模型接口）。
         """
-        if not attachments:
+        refs = [r for r in (references or []) if isinstance(r, dict)]
+        if not attachments and not refs:
             return {"role": "user", "content": user_input}
 
         text_parts = [user_input]
@@ -1483,16 +1500,56 @@ class Agent:
             else:
                 text_parts.append(f"\n\n[附件：{name}（{mime or '未知类型'}，路径 {rel}）]")
 
+        ref_meta: list[dict] = []
+        for ref in refs:
+            path = str(ref.get("path") or "")
+            mime = str(ref.get("mime") or "")
+            mode = str(ref.get("mode") or "path")
+            data_url = ref.get("data_url")
+            content = ref.get("content")
+            summary = ref.get("summary")
+            item = {
+                "name": str(ref.get("name") or path.rsplit("/", 1)[-1]),
+                "path": path, "mime": mime,
+                "size": int(ref.get("size") or 0),
+                "mtime": ref.get("mtime") or 0,
+                "mode": mode,
+                "changed": bool(ref.get("changed")),
+            }
+            if mode == "image" and data_url:
+                image_parts.append({"type": "image_url", "image_url": {"url": data_url}})
+                text_parts.append(f"\n\n[引用图片 {path}]")
+            elif mode == "inline" and content is not None:
+                text_parts.append(f"\n\n[引用文件 {path} 内容]\n{content}")
+            else:
+                size = item["size"]
+                text_parts.append(
+                    f"\n\n[引用工作区文件 {path}（{size} 字节，未内联，可用文件工具读取）]"
+                )
+                if summary:
+                    text_parts.append(f"\n前 {len(str(summary).splitlines())} 行摘要：\n{summary}")
+            ref_meta.append(item)
+
         text = "".join(text_parts)
         if image_parts:
-            content: Any = [{"type": "text", "text": text}] + image_parts
+            content_out: Any = [{"type": "text", "text": text}] + image_parts
         else:
-            content = text
-        return {"role": "user", "content": content, "_attachments": meta}
+            content_out = text
+        msg: dict = {"role": "user", "content": content_out}
+        if meta:
+            msg["_attachments"] = meta
+        if ref_meta:
+            msg["_references"] = ref_meta
+        return msg
 
-    def _run_loop(self, user_input: str, attachments: list[dict] | None = None) -> str:
+    def _run_loop(
+        self,
+        user_input: str,
+        attachments: list[dict] | None = None,
+        references: list[dict] | None = None,
+    ) -> str:
         take_images()   # 丢弃上一次任务可能残留的附件（如取消时没取走的）
-        self.messages.append(self._build_user_message(user_input, attachments or []))
+        self.messages.append(self._build_user_message(user_input, attachments or [], references))
         um = self.messages[-1]
         um["_ts"] = time.time()   # 消息时间：随会话落盘，供历史回放展示
         self._emit(
@@ -1501,6 +1558,7 @@ class Agent:
             chars=len(events.content_text(um.get("content"))),
             sha256=events.sha256_text(events.content_text(um.get("content"))),
             attachments=um.get("_attachments") or [],
+            references=um.get("_references") or [],
         )
         client = self._get_client()
         self.last_answer_streamed = False

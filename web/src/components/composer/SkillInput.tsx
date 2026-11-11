@@ -13,16 +13,26 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { Input } from "antd";
 import type { GetProps } from "antd";
 import { skillToken, type SkillSource } from "./skillMarks";
+import { fileToken } from "./mention";
 
 type TextareaProps = GetProps<typeof Input.TextArea>;
 
-const TOKEN_RE = /\u0002skill:(builtin|custom):([^\u0002]*)\u0002/g;
+/** 技能块与文件块共用一次扫描：两套标记前缀不同，互不干扰 */
+const TOKEN_RE =
+  /\u0002skill:(builtin|custom):([^\u0002]*)\u0002|\u0003file:([^\u0003]*)\u0003/g;
 
 /** 与 antd BookOutlined 同形，内联在技能块里（两类技能只靠颜色区分） */
 const SKILL_ICON_SVG =
   '<svg class="skill-chip-icon" viewBox="64 64 896 896" width="12" height="12" fill="currentColor" aria-hidden="true">' +
   '<path d="M832 64H192c-17.7 0-32 14.3-32 32v832c0 17.7 14.3 32 32 32h640c17.7 0 32-14.3 32-32V96c0-17.7-14.3-32-32-32zm-260 72h96v209.9L621.5 312 572 347.4V136zm220 752H232V136h280v296.9c0 3.3 1 6.6 3 9.3a15.9 15.9 0 0022.3 3.7l83.8-59.9 81.4 59.4c2.7 2 6 3.1 9.4 3.1 8.8 0 16-7.2 16-16V136h64v752z"/>' +
   "</svg>";
+
+/** 文件块图标（简化文档外形） */
+const FILE_ICON_SVG =
+  '<svg class="file-chip-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" ' +
+  'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ' +
+  'aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>' +
+  '<path d="M14 2v6h6"/></svg>';
 
 /** 单个节点 → 字符串：技能块还原成标记，<br> 与块级元素还原成换行 */
 function serializeNode(node: Node): string {
@@ -31,6 +41,9 @@ function serializeNode(node: Node): string {
   const el = node as HTMLElement;
   if (el.dataset.skill !== undefined) {
     return skillToken(el.dataset.skill, (el.dataset.source as SkillSource) || "builtin");
+  }
+  if (el.dataset.file !== undefined) {
+    return fileToken(el.dataset.file);
   }
   if (el.tagName === "BR") return "\n";
   const inner = Array.from(el.childNodes).map(serializeNode).join("");
@@ -60,6 +73,28 @@ function renderInto(el: HTMLElement, value: string): void {
   TOKEN_RE.lastIndex = 0;
   while ((m = TOKEN_RE.exec(value))) {
     if (m.index > last) appendText(el, value.slice(last, m.index));
+    if (m[3] !== undefined) {
+      // 文件块：图标 + 文件名，悬停显示相对路径
+      let rel = m[3];
+      try {
+        rel = decodeURIComponent(m[3]);
+      } catch {
+        /* 保留原串 */
+      }
+      const chip = document.createElement("span");
+      chip.className = "file-chip";
+      chip.contentEditable = "false";
+      chip.dataset.file = rel;
+      chip.title = rel;
+      chip.innerHTML = FILE_ICON_SVG;
+      const label = document.createElement("span");
+      label.className = "file-chip-name";
+      label.textContent = rel.split("/").pop() || rel;
+      chip.appendChild(label);
+      el.appendChild(chip);
+      last = m.index + m[0].length;
+      continue;
+    }
     const [, source, name] = m;
     const chip = document.createElement("span");
     chip.className = "skill-chip";

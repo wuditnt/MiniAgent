@@ -115,6 +115,8 @@ function toItems(messages: HistoryMessage[], runs?: RunInfo[]): ChatItem[] {
       sec: m.sec,
       // 附件元数据：发送时写入，历史回放原样展示
       attachments: m.attachments,
+      // @ 引用元数据：历史回放展示引用 chip（老会话没有该字段）
+      references: m.references,
       // 本轮工具产出的图片：刷新 / 重启后照样能在气泡下方看到
       artifacts: m.artifacts,
       ts: m.ts,
@@ -944,10 +946,11 @@ export default function App({
   const send = (
     text: string,
     attachments?: import("./types").Attachment[],
+    references?: import("./types").WorkspaceRef[],
     skipUserItem?: boolean
   ) => {
     const msg = text.trim();
-    if (!msg && !(attachments && attachments.length)) return;
+    if (!msg && !(attachments && attachments.length) && !(references && references.length)) return;
     if (busy) return;
     const sid = session;
     const asstId = `a-${Date.now()}`;
@@ -963,6 +966,7 @@ export default function App({
       content: display || skillsInSent(msg).join(" "),
       status: "done",
       attachments,
+      references,
       ts: sentAt,
     };
     const asstItem: ChatItem = {
@@ -1014,6 +1018,7 @@ export default function App({
     chatStream(
       {
         message: msg, mode, web, approval, session, workspace: ws, attachments,
+        references,
         // 会话级模型配置：新会话（草稿）在首条消息时随请求落盘
         model_id: effModelId,
         reasoning: effReasoning,
@@ -1244,7 +1249,7 @@ export default function App({
     truncateSession(session, keep)
       .then(() => {
         setItems((prev) => prev.slice(0, userIdx + 1));
-        send(userMsg.content, userMsg.attachments, true);
+        send(userMsg.content, userMsg.attachments, userMsg.references, true);
       })
       .catch((e: unknown) => message.error(e instanceof Error ? e.message : "重新生成失败"));
   };
@@ -1257,7 +1262,7 @@ export default function App({
   };
 
   /** 内联编辑框的「发送」：先截掉该条 user 及其后的本轮内容，再用新文本重发 */
-  const sendEdit = (text: string) => {
+  const sendEdit = (text: string, references?: import("./types").WorkspaceRef[]) => {
     if (busy) return;
     const id = editingId;
     setEditingId(null);
@@ -1271,7 +1276,7 @@ export default function App({
     truncateSession(session, keep)
       .then(() => {
         setItems((prev) => prev.slice(0, idx));
-        send(msg);
+        send(msg, undefined, references);
       })
       .catch((e: unknown) => message.error(e instanceof Error ? e.message : "编辑重发失败"));
   };
@@ -1918,6 +1923,7 @@ export default function App({
           onApproval={setApproval}
           onSend={send}
           onStop={stop}
+          remote={!!state?.remote}
           focusId={focus?.id ?? null}
           workspaces={workspaces}
           workspaceId={ws}

@@ -10,6 +10,7 @@ import {
   CheckOutlined,
   CopyOutlined,
   DatabaseOutlined,
+  CloudUploadOutlined,
   DeleteOutlined,
   DownOutlined,
   EditOutlined,
@@ -43,6 +44,8 @@ import type {
   ReasoningLevel,
   SkillItem,
   WorkspaceItem,
+  WorkspaceRef,
+  WorkspaceSearchItem,
 } from "../types";
 import { fetchSkills, uploadFile, workspaceRawUrl } from "../api";
 import { fmtSec, fmtTime } from "../format";
@@ -52,6 +55,15 @@ import RunHeader from "./RunHeader";
 import WelcomePane from "./WelcomePane";
 import SkillInput from "./composer/SkillInput";
 import AbilityPicker from "./composer/AbilityPicker";
+import MentionMenu from "./composer/MentionMenu";
+import {
+  detectMention,
+  fileToken,
+  mentionQuery,
+  replaceMentionWithToken,
+  stripFileMarks,
+  uniqueFiles,
+} from "./composer/mention";
 import {
   insertSkillToken,
   parseComposer,
@@ -61,7 +73,9 @@ import {
 } from "./composer/skillMarks";
 import { detectSlashCommand, skillQuery, stripSkillCommand } from "./composer/slashCommands";
 import { matchSkills } from "./composer/skillSearch";
+import { getDraggedRef, hasDraggedRef } from "./composer/refDrag";
 import ConfirmPanel from "./ConfirmPanel";
+import FileRefChips from "./FileRefChips";
 
 /** token 数缩写：59300 → 59.3K（与参考图一致） */
 function fmtTokens(n: number): string {
@@ -506,7 +520,7 @@ interface Props {
   /** 三档确认模式（ask / auto / full），仅智能体模式下可切 */
   approval: ApprovalMode;
   onApproval: (m: ApprovalMode) => void;
-  onSend: (text: string, attachments?: Attachment[]) => void;
+  onSend: (text: string, attachments?: Attachment[], references?: WorkspaceRef[]) => void;
   onStop: () => void;
   /** 搜索命中后要定位闪烁的消息 id（形如 h-3）；为 null 表示无定位请求 */
   focusId?: string | null;
@@ -528,7 +542,7 @@ interface Props {
   /** 正在内联编辑的消息 id（该气泡渲染为编辑框）；null = 未在编辑 */
   editingId?: string | null;
   /** 内联编辑框「发送」：先删掉该条（最后一次信息）再用新文本重发 */
-  onEditSend?: (text: string) => void;
+  onEditSend?: (text: string, references?: WorkspaceRef[]) => void;
   onCancelEdit?: () => void;
   /** 多选删除：按选中的消息 id 删除（任意组合，不再限定「此条及之后」） */
   onDeleteMessages?: (ids: string[]) => void;
@@ -567,6 +581,8 @@ interface Props {
   /** 本会话的输入草稿：切会话时恢复，未发的字不会丢 */
   draft?: string;
   onDraftChange?: (text: string) => void;
+  /** 远程访问：只读模式，禁止上传与新增引用 */
+  remote?: boolean;
 }
 
 /** 推理等级的展示文案（三档：low / high / max） */
@@ -591,6 +607,38 @@ const BUBBLE_CLAMP_LINES = 5;
 
 /** 一轮最多同时选几个技能：system prompt 每次模型调用都会重发，选太多会挤爆上下文 */
 const MAX_SKILLS = 3;
+
+/** 单条消息最多引用几个工作区文件（与后端 MAX_REFERENCES 对齐） */
+const MAX_REFS = 5;
+/** 单条消息最多携带几个本地附件 */
+const MAX_ATTACHMENTS = 5;
+/** 「最近使用」保留数量，按工作区隔离存 localStorage */
+const MENTION_RECENT_LIMIT = 8;
+
+function recentsKey(workspaceId: string): string {
+  return `ma.mention.recent.${workspaceId || "default"}`;
+}
+
+function loadRecents(workspaceId: string): WorkspaceSearchItem[] {
+  try {
+    const raw = localStorage.getItem(recentsKey(workspaceId));
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list.slice(0, MENTION_RECENT_LIMIT) : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberRecent(workspaceId: string, item: WorkspaceSearchItem): WorkspaceSearchItem[] {
+  const next = [item, ...loadRecents(workspaceId).filter((r) => r.path !== item.path)]
+    .slice(0, MENTION_RECENT_LIMIT);
+  try {
+    localStorage.setItem(recentsKey(workspaceId), JSON.stringify(next));
+  } catch {
+    /* 隐私模式写不进去，忽略 */
+  }
+  return next;
+}
 
 /**
  * 输入框上方左侧的工作区胶囊：告诉用户「这条对话的文件操作边界在哪」。
@@ -932,6 +980,7 @@ export default function Chat({
   onScrollTop,
   draft,
   onDraftChange,
+  remote,
 }: Props) {
   const [input, setInput] = useState(draft ?? "");
   // 已展开的长用户气泡：仅当前会话内有效，切会话即清空（不持久化）
@@ -947,6 +996,22 @@ export default function Chat({
   const [skillQueryText, setSkillQueryText] = useState("");
   // 已选技能直接从输入串解析，避免「状态与输入框不同步」这类问题
   const pickedSkills = useMemo(() => parseComposer(input).skills, [input]);
+  // @ 文件引用：候选与选中项。选中项保留 size/mtime 快照，发送时后端据此判断「已变更」
+  const [refs, setRefs] = useState<WorkspaceRef[]>([]);
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionAt, setMentionAt] = useState<number | null>(null);
+  const [mentionQueryText, setMentionQueryText] = useState("");
+  const [mentionItems, setMentionItems] = useState<WorkspaceSearchItem[]>([]);
+  const [mentionActive, setMentionActive] = useState(0);
+  const [recents, setRecents] = useState<WorkspaceSearchItem[]>(() => loadRecents(workspaceId));
+  // 拖拽进入对话区时的提示：upload = 系统文件上传附件，ref = 工作区文件转 @ 引用
+  const [dragKind, setDragKind] = useState<"upload" | "ref" | null>(null);
+  // 输入框里还留着的文件 chip：删掉 chip 后对应引用也应当失效
+  const pickedPaths = useMemo(() => uniqueFiles(input), [input]);
+  const activeRefs = useMemo(
+    () => refs.filter((r) => pickedPaths.includes(r.path)),
+    [refs, pickedPaths]
+  );
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevLen = useRef(0);
   // 是否处于「跟随底部」状态：用户手动往上翻历史时置 false，滚回底部自动恢复
@@ -997,6 +1062,92 @@ export default function Chat({
     setSkillOpen(false);
     setSlashAt(null);
     setSkillQueryText("");
+  };
+
+  /** 关闭 @ 面板并清掉触发位置 / 查询词（选中文件、按 Esc、发送后都走这里） */
+  const endMentionSearch = () => {
+    setMentionOpen(false);
+    setMentionAt(null);
+    setMentionQueryText("");
+    setMentionActive(0);
+  };
+
+  /** 选中一个工作区文件：把它变成输入框里的 chip，并记住最近使用 */
+  const selectRef = (item: WorkspaceSearchItem) => {
+    if (remote) {
+      message.warning("远程访问不支持新增引用");
+      return;
+    }
+    const exists = refs.some((r) => r.path === item.path);
+    if (!exists && refs.length >= MAX_REFS) {
+      message.warning(`最多引用 ${MAX_REFS} 个文件`);
+      return;
+    }
+    const token = fileToken(item.path);
+    setInput(
+      mentionAt === null ? `${input}${input && !/\s$/.test(input) ? " " : ""}${token} ` :
+        replaceMentionWithToken(input, mentionAt, token)
+    );
+    if (!exists) setRefs((prev) => [...prev, item]);
+    setRecents(rememberRecent(workspaceId, item));
+    endMentionSearch();
+    requestAnimationFrame(() => senderRef.current?.focus?.());
+  };
+
+  /**
+   * 从工作台文件树拖进对话区：直接追加成引用 chip。
+   * 与面板选中同一条链路（去重、上限 5、远程只读拦截），只是不需要替换 "@查询"。
+   */
+  const addDroppedRef = (ref: WorkspaceSearchItem) => {
+    if (remote) {
+      message.warning("远程访问不支持新增引用");
+      return;
+    }
+    if (refs.some((r) => r.path === ref.path)) {
+      message.info("该文件已在引用中");
+      return;
+    }
+    if (refs.length >= MAX_REFS) {
+      message.warning(`最多引用 ${MAX_REFS} 个文件`);
+      return;
+    }
+    setRefs((prev) => [...prev, ref]);
+    const token = fileToken(ref.path);
+    setInput((prev) => `${prev}${prev && !/\s$/.test(prev) ? " " : ""}${token} `);
+    setRecents(rememberRecent(workspaceId, ref));
+    endMentionSearch();
+    requestAnimationFrame(() => senderRef.current?.focus?.());
+  };
+
+  /**
+   * 输入框键盘：@ 面板打开时接管方向键 / Enter / Esc。
+   * 必须在这里处理（而不是在面板上），否则输入框先收到 Enter 就直接发送了。
+   */
+  const handleComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!mentionOpen) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      endMentionSearch();
+      return;
+    }
+    if (!mentionItems.length) {
+      // 没有候选时 Enter 只关面板：避免把孤零零的 "@" 当正文发出去
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        endMentionSearch();
+      }
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setMentionActive((i) => (i + 1) % mentionItems.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setMentionActive((i) => (i - 1 + mentionItems.length) % mentionItems.length);
+    } else if (e.key === "Enter" || e.key === "Tab") {
+      e.preventDefault();
+      selectRef(mentionItems[Math.min(mentionActive, mentionItems.length - 1)]);
+    }
   };
 
   // ---------------------------------------------------------------- 多选删除
@@ -1093,6 +1244,17 @@ export default function Chat({
    * 查询词没有匹配时只是不渲染面板（skillOpen 仍为 true），删字可立即恢复。
    */
   const handleInputChange = (v: string) => {
+    // @ 引用会话优先：触发符还在就只更新查询词
+    if (mentionAt !== null) {
+      if (v[mentionAt] === "@") {
+        setMentionQueryText(mentionQuery(v, mentionAt));
+        setMentionOpen(true);
+        setInput(v);
+        return;
+      }
+      endMentionSearch();   // "@" 被删掉，退出引用会话
+    }
+
     if (slashAt !== null) {
       if (v[slashAt] === "/") {
         setSkillQueryText(skillQuery(v, slashAt));
@@ -1103,9 +1265,22 @@ export default function Chat({
       endSkillSearch();   // "/" 被删掉，退出搜索会话
     }
 
+    // 两个面板互斥：@ 打开时关掉技能面板，反之亦然
+    const mHit = detectMention(input, v);
+    if (mHit >= 0 && !busy) {
+      endSkillSearch();
+      setMentionOpen(true);
+      setMentionAt(mHit);
+      setMentionQueryText(mentionQuery(v, mHit));
+      setMentionActive(0);
+      setInput(v);
+      return;
+    }
+
     const hit = detectSlashCommand(input, v);
     if (hit && hit.command.id === "skill" && mode === "agent" && !busy) {
       ensureSkills();
+      endMentionSearch();
       setSkillOpen(true);
       setSlashAt(hit.index);
       setSkillQueryText(skillQuery(v, hit.index));
@@ -1134,6 +1309,12 @@ export default function Chat({
     // 等 DOM 重建完再聚焦，否则光标落在旧节点上
     requestAnimationFrame(() => senderRef.current?.focus?.());
   };
+
+  // 切工作区 / 切会话：最近使用按工作区隔离，已选引用随之失效（旧路径在新上下文里不成立）
+  useEffect(() => {
+    setRecents(loadRecents(workspaceId));
+    setRefs([]);
+  }, [workspaceId, sessionId]);
 
   // 切到快速对话：技能不参与，清掉输入框里的技能块（保留正文）
   useEffect(() => {
@@ -1390,21 +1571,102 @@ export default function Chat({
       : []),
   ];
 
-  /** 选中文件后立即上传到工作区 .attachments/，结果暂存 pending 等发送 */
-  const onPickFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    e.target.value = ""; // 允许再次选择同一个文件
-    if (!f) return;
+  /**
+   * 逐个上传到工作区 .attachments/，成功的进 pending，失败的只提示不中断。
+   * 多选 / 拖拽 / 粘贴共用这一条链路；远程只读直接拒绝。
+   */
+  const uploadFiles = async (files: File[]) => {
+    if (remote) {
+      message.warning("远程访问不支持上传附件");
+      return;
+    }
+    const room = MAX_ATTACHMENTS - pending.length;
+    if (room <= 0) {
+      message.warning(`单条消息最多携带 ${MAX_ATTACHMENTS} 个附件`);
+      return;
+    }
+    const list = files.slice(0, room);
+    if (files.length > room) {
+      message.warning(`单条消息最多携带 ${MAX_ATTACHMENTS} 个附件，已忽略多余的 ${files.length - room} 个`);
+    }
     setUploading(true);
+    let ok = 0;
     try {
-      const att = await uploadFile(f, workspaceId);
-      setPending((prev) => [...prev, att]);
-      message.success(`已附加「${f.name}」`);
-    } catch (err) {
-      message.error(`上传失败：${err instanceof Error ? err.message : String(err)}`);
+      for (const f of list) {
+        try {
+          const att = await uploadFile(f, workspaceId);
+          setPending((prev) => [...prev, att]);
+          ok += 1;
+        } catch (err) {
+          message.error(
+            `「${f.name}」上传失败：${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
     } finally {
       setUploading(false);
     }
+    if (ok) message.success(`已附加 ${ok} 个文件`);
+  };
+
+  /** 选中文件后立即上传，结果暂存 pending 等发送（支持多选） */
+  const onPickFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // 允许再次选择同一个文件
+    if (files.length) void uploadFiles(files);
+  };
+
+  /** 粘贴：剪贴板里带文件（截图）时走上传，不再把文件名当文本插入 */
+  const onComposerPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(e.clipboardData?.files ?? []);
+    if (!files.length) return;
+    e.preventDefault();
+    void uploadFiles(files);
+  };
+
+  /**
+   * 拖拽落点：工作区文件 → 转成 @ 引用；系统文件 → 上传附件。
+   * 整块对话区都是热区，落点在哪一层都收敛到这两个分支。
+   */
+  const onComposerDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    setDragKind(null);
+    const ref = getDraggedRef(e.dataTransfer);
+    if (ref) {
+      e.preventDefault();
+      addDroppedRef(ref);
+      return;
+    }
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (!files.length) return;
+    e.preventDefault();
+    void uploadFiles(files);
+  };
+
+  /** 这次拖拽属于哪一类：无法识别（纯文本等）返回 null，交回浏览器默认行为 */
+  const dragKindOf = (e: React.DragEvent): "upload" | "ref" | null => {
+    if (hasDraggedRef(e.dataTransfer)) return "ref";
+    if (Array.from(e.dataTransfer?.types ?? []).includes("Files")) return "upload";
+    return null;
+  };
+
+  const onRootDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
+    const kind = dragKindOf(e);
+    if (!kind) return;
+    e.preventDefault();
+    setDragKind(kind);
+  };
+
+  const onRootDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    const kind = dragKindOf(e);
+    if (!kind) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+
+  const onRootDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    // 子元素之间移动也会触发 dragleave：只有真正离开整个对话区才收起遮罩
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+    setDragKind(null);
   };
 
   const removePending = (idx: number) => {
@@ -1633,7 +1895,7 @@ export default function Chat({
               onCancel={() => onCancelEdit?.()}
               onSend={(t) => {
                 pendingPin.current = true; // 重发后把新消息钉到列表顶部
-                onEditSend?.(t);
+                onEditSend?.(t, it.references);
               }}
             />
           </div>
@@ -1643,10 +1905,14 @@ export default function Chat({
     return {
       key: it.id,
       role: "user",
-      // 附件放在气泡上方（Bubble 的 header），按上传顺序右对齐排列
+      // 附件与 @ 引用放在气泡上方（Bubble 的 header），按上传/选择顺序排列
       header:
-        it.attachments && it.attachments.length ? (
-          <AttachmentPreview attachments={it.attachments} workspaceId={workspaceId} />
+        (it.attachments && it.attachments.length) ||
+        (it.references && it.references.length) ? (
+          <>
+            <AttachmentPreview attachments={it.attachments} workspaceId={workspaceId} />
+            <FileRefChips refs={it.references} workspaceId={workspaceId} />
+          </>
         ) : undefined,
       content: (
         <div id={`msg-${it.id}`}>
@@ -1697,7 +1963,13 @@ export default function Chat({
   ]);
 
   return (
-    <>
+    <div
+      className="chat-root"
+      onDragEnter={onRootDragEnter}
+      onDragOver={onRootDragOver}
+      onDragLeave={onRootDragLeave}
+      onDrop={onComposerDrop}
+    >
       <div className="chat-scroll" ref={scrollRef} onScroll={onScroll}>
         {items.length === 0 ? (
           <WelcomePane
@@ -1870,22 +2142,47 @@ export default function Chat({
           {/* 输入框定位容器：审批面板绝对定位覆盖在 Sender 上，塌缩态恰好盖满，
               展开「查看详细」时锚定底部向上撑开 */}
           <div className={`composer-slot${confirm ? " blocked" : ""}`}>
+            <MentionMenu
+              open={mentionOpen && !confirm}
+              workspaceId={workspaceId}
+              query={mentionQueryText}
+              items={mentionItems}
+              active={mentionActive}
+              recents={recents}
+              uploading={uploading}
+              remote={remote}
+              onItems={(list) => {
+                setMentionItems(list);
+                setMentionActive(0);
+              }}
+              onPick={selectRef}
+              onUpload={() => document.getElementById("att-input-file")?.click()}
+            />
             <Sender
               ref={senderRef}
               value={input}
               onChange={handleInputChange}
+              onKeyDown={handleComposerKeyDown}
+              onPaste={onComposerPaste}
               components={{ input: SkillInput }}
               onSubmit={(v: string) => {
                 // 输入框发送 = 放弃内联编辑（编辑只从内联框确认发送），防止误截断
                 if (editingId) onCancelEdit?.();
-                // 技能块序列化成「裸名字 + 不可见包裹字符」，由后端运行时自行查找
-                const message = serializeForSend(v).trim();
-                if (!message && !pending.length) return;
+                // 技能块序列化成「裸名字 + 不可见包裹字符」，由后端运行时自行查找；
+                // 文件块从正文剥离，引用走独立字段（内容由服务端按快照读取）
+                const message = stripFileMarks(serializeForSend(v)).trim();
+                if (!message && !pending.length && !activeRefs.length) return;
                 pendingPin.current = true; // 发送后把这条消息钉到列表顶部
-                onSend(message, pending.length ? pending : undefined);
+                onSend(
+                  message,
+                  pending.length ? pending : undefined,
+                  activeRefs.length ? activeRefs : undefined
+                );
                 setInput("");
                 setPending([]);
+                setRefs([]);
                 endSkillSearch();
+                endMentionSearch();
               }}
               loading={busy}
               onCancel={onStop}
@@ -2045,12 +2342,26 @@ export default function Chat({
           </div>
           {/* 「+」菜单用的文件选择框：视觉隐藏而非 display:none，
               保证手机浏览器通过 label 激活时能正常弹出选图面板 */}
-          <input id="att-input-image" className="visually-hidden-file" type="file" accept="image/*" onChange={onPickFile} />
-          <input id="att-input-file" className="visually-hidden-file" type="file" onChange={onPickFile} />
+          <input id="att-input-image" className="visually-hidden-file" type="file" accept="image/*" multiple onChange={onPickFile} />
+          <input id="att-input-file" className="visually-hidden-file" type="file" multiple onChange={onPickFile} />
           <div className="hint">Enter 发送 / Shift+Enter 换行 · 本地部署，数据不出本机</div>
         </div>
       </div>
       )}
-    </>
+      {dragKind && (
+        <div className={`chat-drop-overlay${remote ? " disabled" : ""}`}>
+          {dragKind === "ref" ? <FolderOpenOutlined /> : <CloudUploadOutlined />}
+          <div>
+            {dragKind === "ref"
+              ? remote
+                ? "远程访问不支持新增引用"
+                : "松开即引用该文件（作为 @ 上下文）"
+              : remote
+                ? "远程访问不支持上传附件"
+                : "松开即上传到当前工作区"}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

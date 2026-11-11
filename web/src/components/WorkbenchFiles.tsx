@@ -24,6 +24,7 @@ import {
   workspaceDownloadUrl,
 } from "../api";
 import type { WorkspaceDirData, WorkspaceEntry } from "../types";
+import { setDraggedRef } from "./composer/refDrag";
 
 interface Props {
   workspaceId: string;
@@ -250,6 +251,18 @@ export default function WorkbenchFiles({
                   className={`wb-row ${entry.type}`}
                   role="button"
                   tabIndex={0}
+                  /* 文件可直接拖进对话区变成 @ 引用；目录不参与（引用只针对文件） */
+                  draggable={entry.type === "file"}
+                  onDragStart={(e) => {
+                    if (entry.type !== "file") return;
+                    setDraggedRef(e.dataTransfer, {
+                      name: entry.name,
+                      path: entry.path,
+                      size: entry.size,
+                      mtime: entry.mtime,
+                      ext: entry.ext,
+                    });
+                  }}
                   onClick={() =>
                     entry.type === "dir" ? onPathChange(entry.path) : onOpenFile(entry)
                   }

@@ -39,6 +39,9 @@ import type {
   WorkspaceDirData,
   WorkspaceFileData,
   WorkspaceItem,
+  WorkspaceRef,
+  WorkspaceSearchData,
+  WorkspaceStatItem,
   WorkspaceTablePage,
 } from "./types";
 
@@ -414,6 +417,36 @@ export async function fetchWorkspaceFile(
 export function workspaceRawUrl(workspaceId: string, path: string): string {
   const qs = new URLSearchParams({ workspace_id: workspaceId, path });
   return `/api/workspace/raw?${qs}`;
+}
+
+/** @ 引用面板：按文件名 / 相对路径模糊搜索工作区文件 */
+export async function searchWorkspaceFiles(
+  workspaceId: string,
+  q: string,
+  limit = 20
+): Promise<WorkspaceSearchData> {
+  const qs = new URLSearchParams({
+    workspace_id: workspaceId,
+    q,
+    limit: String(limit),
+  });
+  const res = await req(`/api/workspace/search?${qs}`);
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/** 历史引用 chip：批量查询文件是否存在及 size/mtime（最多 50 个） */
+export async function statWorkspaceFiles(
+  workspaceId: string,
+  paths: string[]
+): Promise<WorkspaceStatItem[]> {
+  const res = await req("/api/workspace/stat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace_id: workspaceId, paths: paths.slice(0, 50) }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()).items ?? [];
 }
 
 /** 文件下载地址：后端以 attachment 形式返回，浏览器直接落盘 */
@@ -876,6 +909,8 @@ export async function chatStream(
     session: string;
     workspace?: string;
     attachments?: Attachment[];
+    /** @ 引用的工作区文件（路径 + 快照元数据；内容由服务端读取） */
+    references?: WorkspaceRef[];
     approval?: ApprovalMode;
     /** 会话级模型配置：新会话（磁盘上还没有文件）首条消息时随请求落盘 */
     model_id?: string;

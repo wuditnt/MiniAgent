@@ -20,6 +20,25 @@ Web UI 的全部交互都走在这套「双模式」上：同一个会话里逐�
 - 快速对话不显示推理等级选择；智能体模式可选 Low / High / Max。
 - 「联网搜索」开关在输入框上方右侧，按会话独立保存，两种模式都可用。
 
+## 输入框与上下文注入
+
+输入框支持三种「随消息带上下文」的方式，内容不会进入正文气泡：
+
+| 方式 | 入口 | 服务端处理 |
+|---|---|---|
+| **@ 引用工作区文件** | 行首或任意空白后键入 `@`，按文件名 / 相对路径搜索 | 发送时按相对路径读取快照：文本 ≤ 8KB 内联全文，> 8KB 给前 40 行摘要，图片 ≤ 24MB 走多模态，其余只给路径。单条最多 5 个，内联总预算 32KB，超出按顺序降级为路径引用 |
+| **附件上传** | 回形针 / 图片按钮、拖拽到输入区、粘贴截图 | 复制进工作区 `.attachments/`；单文件 ≤ 24MB，单条最多 5 个；图片走多模态，文本注入 8000 字节选，其它二进制只记路径 |
+| **技能块** | `/` 唤起技能面板（仅智能体模式） | 技能名随消息发送，运行时把技能正文临时附加到 system prompt；不写入历史 |
+
+交互约定：
+
+- `@` 与 `/` 两个面板互斥；`Esc` 关闭，`↑↓` 移动，`Enter` / `Tab` 选中；选中文件后以绿色 chip 留在输入框，可整块退格删除。
+- `@` 面板为空查询时展示「最近使用」（按工作区存 localStorage）+「从本地上传…」，输入查询词后才请求服务端搜索（150ms 防抖）。
+- 工作台文件树的文件也可直接拖进对话区：松手即变成引用 chip（自定义 MIME `application/x-miniagent-ref`，见 `refDrag.ts`）；系统文件拖入则走附件上传。整块对话区都是热区，拖入时显示提示遮罩。
+- 工作区引用是**发送时刻的快照**：之后文件被改 / 被删，历史气泡只标注「已变更 / 已删除」，不重读内容。
+- 远程访问为只读：禁止上传附件与新增引用，历史引用仍可查看。
+- 自动化任务不携带 `@` 引用（P0）。
+
 ## 图形与代码块
 
 助手回答里的三种围栏会被渲染成图形卡片，而不是普通代码块：
@@ -78,6 +97,7 @@ run(user_input)
 - 系统提示：`DEFAULT_SYSTEM_PROMPT` / `CHAT_SYSTEM_PROMPT` / `_sync_system_prompt()`
 - SSE 入口：`src/core/webui.py` 的 `_handle_chat_stream()`；会话锁 `_lock_session_or_409()`
 - 前端：`web/src/components/Chat.tsx`、`web/src/App.tsx`、`web/src/components/ToolChain.tsx`
+- @ 引用：`web/src/components/composer/mention.ts` / `MentionMenu.tsx` / `FileRefChips.tsx` / `refDrag.ts`（文件树拖拽协议）；后端 `_handle_workspace_search` / `_handle_workspace_stat` / `_resolve_references`（`src/core/webui.py`）、`_build_user_message`（`src/core/agent.py`）
 
 ## 注意事项
 
