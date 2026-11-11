@@ -3451,45 +3451,61 @@ body.sidebar-resizing .sidebar-resizer::after {
   color: var(--tx-8c8c8c);
 }
 
-/* ---- 上下文水位指示器 ---- */
-.ctx-meter {
+/* ---- 上下文水位：环形进度 ----
+   24px 的小圆环，轨道用浅灰、进度用状态色（绿 / 黄 / 红），
+   中间只放整数百分比；完整用量在 Tooltip 里。
+   圆环从 12 点方向起步（svg 逆时针转 90°），用 dashoffset 表达进度。 */
+.ctx-ring {
   position: relative;
+  flex: none;
   display: inline-flex;
   align-items: center;
-  width: 72px;
-  height: 20px;
-  border-radius: 10px;
-  background: var(--bg-f0f0f0);
-  overflow: hidden;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: #52c41a;
 }
 
-.ctx-meter-bar {
-  position: absolute;
-  left: 0;
-  top: 0;
-  height: 100%;
-  background: #52c41a;
-  border-radius: 10px;
-  transition: width 0.3s, background 0.3s;
-}
-
-.ctx-meter.ctx-warn .ctx-meter-bar {
-  background: #faad14;
-}
-
-.ctx-meter.ctx-danger .ctx-meter-bar {
-  background: #ff4d4f;
-}
-
-.ctx-meter-text {
-  position: relative;
-  z-index: 1;
+.ctx-ring svg {
+  display: block;
   width: 100%;
-  text-align: center;
-  font-size: 11px;
-  font-weight: 500;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.ctx-ring-track {
+  fill: none;
+  stroke: var(--bg-f0f0f0);
+  stroke-width: 3;
+}
+
+.ctx-ring-bar {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.35s ease, stroke 0.3s;
+}
+
+.ctx-ring.ctx-warn {
+  color: #faad14;
+}
+
+.ctx-ring.ctx-danger {
+  color: #ff4d4f;
+}
+
+.ctx-ring-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
   color: var(--tx-ink-065);
-  line-height: 20px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---- 窄屏适配（≤768px）---- */
@@ -3586,14 +3602,13 @@ body.sidebar-resizing .sidebar-resizer::after {
     font-size: 12px;
   }
 
-  .ctx-meter {
-    width: 56px;
-    height: 18px;
+  .ctx-ring {
+    width: 20px;
+    height: 20px;
   }
 
-  .ctx-meter-text {
-    font-size: 10px;
-    line-height: 18px;
+  .ctx-ring-text {
+    font-size: 8px;
   }
 
   .stats-grid {

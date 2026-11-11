@@ -2107,18 +2107,39 @@ export default function Chat({
               locked={workspaceLocked}
               onChange={onWorkspaceChange}
             />
-            {/* 上下文水位 */}
-            {contextLimit != null && contextLimit > 0 && (
-              <Tooltip title={`上下文已用 ${contextUsage?.toLocaleString() ?? 0} / ${contextLimit.toLocaleString()} 字符`}>
-                <span className={`ctx-meter ${(() => {
-                  const pct = (contextUsage ?? 0) / contextLimit;
-                  return pct > 0.8 ? "ctx-danger" : pct > 0.5 ? "ctx-warn" : "";
-                })()}`}>
-                  <span className="ctx-meter-bar" style={{ width: `${Math.min(100, ((contextUsage ?? 0) / contextLimit) * 100)}%` }} />
-                  <span className="ctx-meter-text">{Math.round(((contextUsage ?? 0) / contextLimit) * 100)}%</span>
-                </span>
-              </Tooltip>
-            )}
+            {/* 上下文水位：环形进度（比例四舍五入成整数，数字居中） */}
+            {contextLimit != null && contextLimit > 0 && (() => {
+              const usage = contextUsage ?? 0;
+              const ratio = Math.min(1, Math.max(0, usage / contextLimit));
+              const pct = Math.round(ratio * 100);
+              const state = pct > 80 ? "ctx-danger" : pct > 50 ? "ctx-warn" : "";
+              // r=10：圆周长，用来把进度换算成 dashoffset
+              const C = 2 * Math.PI * 10;
+              return (
+                <Tooltip
+                  title={`上下文已用 ${pct}% · ${usage.toLocaleString()} / ${contextLimit.toLocaleString()} 字符`}
+                >
+                  <span
+                    className={`ctx-ring ${state}`}
+                    role="img"
+                    aria-label={`上下文已用 ${pct}%`}
+                  >
+                    <svg viewBox="0 0 24 24">
+                      <circle className="ctx-ring-track" cx="12" cy="12" r="10" />
+                      <circle
+                        className="ctx-ring-bar"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        strokeDasharray={C}
+                        strokeDashoffset={C * (1 - ratio)}
+                      />
+                    </svg>
+                    <span className="ctx-ring-text">{pct}</span>
+                  </span>
+                </Tooltip>
+              );
+            })()}
             {/* 待发送附件 chips：发送后清空 */}
             {pending.map((a, i) => (
               <span key={i} className="pending-att">
